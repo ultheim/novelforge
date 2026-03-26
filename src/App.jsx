@@ -1794,7 +1794,7 @@ const createDefaultProject = () => ({
   contentPrefs: "", avoidList: "", writingStyle: "",
   characters: [], worldBuilding: [], plotOutline: [], relationships: [],
   continuityNotes: "",
-  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }],
+  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "" }],
   createdAt: new Date().toISOString(),
   wordGoal: 0,
 });
@@ -3082,7 +3082,7 @@ ${desc}`;
   const response = await callOpenRouter([
     { role: "system", content: systemPrompt },
     { role: "user", content: userMessage },
-  ], { maxTokens: 4000, temperature: 0.4 });
+  ], { maxTokens: 10000, temperature: 0.4 });
 
   if (!response) return null;
 
@@ -3618,6 +3618,7 @@ export default function NovelForge() {
   const [expandedWorldIds, setExpandedWorldIds] = useState(new Set()); // D6: Collapsible world entries
   const [expandedRelIds, setExpandedRelIds] = useState(new Set()); // D11: Collapsible relationships
   const [deleteConfirmText, setDeleteConfirmText] = useState(""); // E7: Type-to-confirm delete
+  const [flushConfirm, setFlushConfirm] = useState(false);
   const [charSuggestions, setCharSuggestions] = useState(null);
   const [whiteRoom, setWhiteRoom] = useState(null); // { char1Id, char2Id, tension, result, isGenerating }
   const [showTimeline, setShowTimeline] = useState(false);
@@ -3671,6 +3672,11 @@ export default function NovelForge() {
         if (p.length) {
           // H4: Data migration — ensure all characters have fields from newer schema versions
           const migrated = p.map(proj => {
+			// Ensure chapters have worldView field
+            const chapters = (proj.chapters || []).map(ch => ({
+              worldView: "",
+              ...ch,
+            }));
             const chars = (proj.characters || []).map(c => ({
               aliases: "", canonNotes: "", status: "alive", statusChangedChapter: 0,
               firstAppearanceChapter: 0, backstoryRevealChapter: 0, image: "", lookAlike: "",
@@ -3710,7 +3716,8 @@ export default function NovelForge() {
             });
             return {
               ...proj,
-              characters: chars,
+              chapters,
+			  characters: chars,
               relationships,
               plotOutline,
               worldBuilding: (proj.worldBuilding || []).map(w => ({
@@ -3819,23 +3826,34 @@ export default function NovelForge() {
   useEffect(() => { tabChatHistoriesRef.current = tabChatHistories; }, [tabChatHistories]);
 
   useEffect(() => {
-    const handler = () => {
-      debouncedSaveProjects.cancel();
-      debouncedSaveSettings.cancel();
-      debouncedSaveTabChats.cancel();
-      // Sync editor content to state before closing
+    const handler = (e) => {
+      // Sync editor to state first
       const el = editorRef.current;
-      if (el) {
-        try {
+      if (el && activeProjectId) {
+        const html = el.innerHTML;
+        if (html && html !== "<br>") {
           const currentProjects = [...projectsRef.current];
           const pIdx = currentProjects.findIndex(p => p.id === activeProjectId);
           if (pIdx !== -1 && currentProjects[pIdx].chapters?.[activeChapterIdx]) {
-            currentProjects[pIdx].chapters[activeChapterIdx].content = el.innerHTML;
+            currentProjects[pIdx].chapters[activeChapterIdx].content = html;
+            projectsRef.current = currentProjects;
           }
-          Storage.saveProjects(currentProjects);
-        } catch {}
+        }
       }
+      // Cancel debounced saves and force synchronous save
+      debouncedSaveProjects.cancel();
+      debouncedSaveSettings.cancel();
+      debouncedSaveTabChats.cancel();
+      Storage.saveProjects(projectsRef.current);
       Storage.saveSettings({ ...settingsRef.current, theme: themeRef.current });
+      if (Object.keys(tabChatHistoriesRef.current).length) {
+        Storage.saveTabChats(tabChatHistoriesRef.current);
+      }
+      // Show browser warning if editor has unsaved content
+      if (el && el.innerHTML && el.innerHTML !== "<br>" && el.innerHTML !== lastSyncedContentRef.current) {
+        e.preventDefault();
+        e.returnValue = "You have unsaved editor changes. They've been auto-saved to browser storage, but link a JSON file for safety.";
+      }
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
@@ -4683,21 +4701,52 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     if (!sugg || sugg.suggestionStatus !== "pending") return;
 
     if (sugg.action === "create") {
-      // Create new relationship
       const newRel = {
         id: uid(), char1: sugg.char1Id, char2: sugg.char2Id,
-        dynamic: sugg.dynamic || "", status: sugg.status || "developing",
-        tension: sugg.tension || "medium", tensionType: sugg.tensionType || "romantic",
-        notes: `Auto-detected in Ch${(charSuggestions.chapterIdx || 0) + 1}: ${sugg.reason}`,
-        char1Perspective: "", char2Perspective: "", progression: "",
-        meetsInChapter: (charSuggestions.chapterIdx || 0) + 1, evolutionTimeline: "",
+        dynamic: sugg.dynamic || "",
+        status: sugg.status || "developing",
+        tension: sugg.tension || "medium",
+        tensionType: sugg.tensionType || "romantic",
+        char1Perspective: sugg.char1Perspective || "",
+        char2Perspective: sugg.char2Perspective || "",
+        progression: sugg.progression || "",
+        meetsInChapter: sugg.meetsInChapter || (charSuggestions.chapterIdx || 0) + 1,
+        evolutionTimeline: sugg.evolutionTimeline || "",
+        notes: sugg.notes || "",
       };
       updateProject({ relationships: [...(project?.relationships || []), newRel] });
       showToast(`Created relationship: ${sugg.char1Name} ↔ ${sugg.char2Name}`, "success");
     } else if (sugg.action === "update" && sugg.relId) {
-      // Update existing relationship field with merge logic
       const existingRel = (project?.relationships || []).find(r => r.id === sugg.relId);
       if (existingRel) {
+        // Validate dropdown values
+        const VALID_STATUS = new Set(["strangers","acquaintances","developing","friends","friends-with-benefits","tension","dating","lovers","committed","complicated","estranged","enemies","enemies-to-lovers","exes","forbidden","unrequited"]);
+        const VALID_TENSION = new Set(["none","low","medium","high","explosive"]);
+        const VALID_TENSION_TYPE = new Set(["romantic","hostile","suspenseful","competitive","protective","friendly","neutral","acquaintance","mixed"]);
+
+        let suggestedVal = String(sugg.suggested || "").trim().toLowerCase();
+        if (sugg.field === "status" && !VALID_STATUS.has(suggestedVal)) {
+          showToast(`Invalid status "${sugg.suggested}" — keeping "${existingRel.status}"`, "error");
+          setCharSuggestions(prev => prev ? {
+            ...prev, relSuggestions: (prev.relSuggestions || []).map(s => s.id === suggId ? { ...s, suggestionStatus: "rejected" } : s),
+          } : null);
+          return;
+        }
+        if (sugg.field === "tension" && !VALID_TENSION.has(suggestedVal)) {
+          showToast(`Invalid tension "${sugg.suggested}" — keeping "${existingRel.tension}"`, "error");
+          setCharSuggestions(prev => prev ? {
+            ...prev, relSuggestions: (prev.relSuggestions || []).map(s => s.id === suggId ? { ...s, suggestionStatus: "rejected" } : s),
+          } : null);
+          return;
+        }
+        if (sugg.field === "tensionType" && !VALID_TENSION_TYPE.has(suggestedVal)) {
+          showToast(`Invalid tension type "${sugg.suggested}" — keeping "${existingRel.tensionType}"`, "error");
+          setCharSuggestions(prev => prev ? {
+            ...prev, relSuggestions: (prev.relSuggestions || []).map(s => s.id === suggId ? { ...s, suggestionStatus: "rejected" } : s),
+          } : null);
+          return;
+        }
+
         const currentVal = existingRel[sugg.field] || "";
         let finalVal = sugg.suggested;
         const directFields = new Set(["status", "tension", "tensionType"]);
@@ -4776,7 +4825,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
       const result = await callOpenRouter([
         { role: "system", content: `You are rewriting a passage from a different character's internal perspective. Preserve the same scene events but shift entirely into ${flipTo.name}'s psychological state, thoughts, and sensory experience.\n\n${flipTo.name} (${flipTo.role}): ${flipTo.personality || ""}. ${flipTo.desires ? `Desires: ${flipTo.desires}` : ""}` },
         { role: "user", content: `Rewrite this passage entirely from ${flipTo.name}'s internal perspective (currently written from ${currentPov.name}'s perspective):\n\n${selectedText}` },
-      ], { maxTokens: 1500, temperature: 0.8 });
+      ], { maxTokens: 10000, temperature: 0.8 });
       if (result) {
         setDiffReview({
           original: selectedText, proposed: result,
@@ -4833,7 +4882,7 @@ Write a detailed summary in 3-5 sentences that a writing AI can use to maintain 
 
 Be specific with character names. Write as a factual reference, not a story recap.` },
         { role: "user", content: `Summarize Chapter ${idx + 1}: "${ch.title || 'Untitled'}":\n\n${sample}` },
-      ], { maxTokens: 600, temperature: 0.3 });
+      ], { maxTokens: 10000, temperature: 0.3 });
 
       // E1: Track when summary was generated for stale detection
       updateChapter(idx, { summary, summaryGeneratedAt: new Date().toISOString() });
@@ -4856,7 +4905,6 @@ Be specific with character names. Write as a factual reference, not a story reca
               `Arc: ${c.arc || "(empty)"}`,
               `Status: ${c.status || "alive"}`,
               `Canon Notes: ${c.canonNotes || "(empty)"}`,
-              `Relationships: ${c.relationships || "(empty)"}`,
               `Backstory: ${c.backstory || "(empty)"}`,
               `Speech Pattern: ${c.speechPattern || "(empty)"}`,
             ];
@@ -4864,28 +4912,38 @@ Be specific with character names. Write as a factual reference, not a story reca
           }).join("\n\n");
 
           const suggestions = await callOpenRouter([
-            { role: "system", content: `You are analyzing a completed chapter to recommend character profile updates.
+            { role: "system", content: `You are analyzing a completed chapter to recommend concise, factual character profile updates.
 
-CRITICAL RULES:
-- Each character field ALREADY contains accumulated information from previous chapters.
-- You must NEVER replace existing content. You must BUILD ON what's already there.
-- Your "suggested" value must include ALL existing content PLUS the new information from this chapter.
-- Think of it as: suggested = existing content + new additions from this chapter.
-- If a field is "(empty)", you can write fresh content.
-- If a field already has content, APPEND or WEAVE IN the new details — never drop what was there.
+CRITICAL FORMAT RULES:
+- Canon Notes: ONLY factual bullet points. Each entry starts with "[ChN]" prefix. NO narrative. NO paragraphs.
+  Example: "[Ch12]: Learned her sister is alive. [Ch12]: Was hit during confrontation with Ray."
+- Desires: Short sentences tracking how wants/needs have shifted. Use "[ChN]" prefix for new entries.
+  Example: "[Ch12]: Wants to find sister — now top priority over career."
+- Arc: Update ONLY the arc phase tag and add the latest turning point. Keep it under 2 sentences.
+  Example: "[Story position: mid, Ch3/15] Hit bottom — just learned the betrayal."
+- Status: Only if they died, became absent, or their status changed.
+- Status Changed (Ch#): Only if status changed this chapter.
+- Backstory: Only if NEW backstory was revealed. Use "[ChN]: [fact]" format.
+- Speech Pattern: Only if the way they speak visibly changed this chapter.
+- Do NOT suggest updates to "relationships" — character relationships are managed exclusively in the Relations tab.
 
-For each character who changed in this chapter, output a JSON block:
+CRITICAL CONTENT RULES:
+- Each field ALREADY contains accumulated information. You must BUILD ON what's there — NEVER replace.
+- Your "suggested" value must include ALL existing content PLUS the new "[ChN]: ..." entries from this chapter.
+- If a field is "(empty)", write fresh concise content.
+- Only suggest changes where something actually CHANGED or was REVEALED.
+
+For each character who changed, output:
 \`\`\`json
 { "type": "character_updates", "data": [
-  { "name": "CharName", "field": "fieldName", "current": "the FULL existing value you see above", "suggested": "the FULL updated value (existing + new)", "reason": "what changed in this chapter" }
+  { "name": "CharName", "field": "fieldName", "current": "the FULL existing value", "suggested": "existing + [ChN]: new entry", "reason": "brief: what changed" }
 ] }
 \`\`\`
 
-Fields you can suggest updates for: personality, desires, arc, status, statusChangedChapter, canonNotes, relationships, backstory, speechPattern.
-Only suggest changes where something actually CHANGED or was REVEALED in this chapter. Be specific.
-If no updates are needed, respond with just "No character updates needed."` },
+Fields you can suggest: desires, arc, status, statusChangedChapter, canonNotes, backstory, speechPattern.
+If no updates are needed, respond "No character updates needed."` },
             { role: "user", content: `Chapter ${idx + 1} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${idx + 1}` },
-          ], { maxTokens: 2000, temperature: 0.4 });
+          ], { maxTokens: 10000, temperature: 0.4 });
 
           if (suggestions && !suggestions.toLowerCase().includes("no character updates needed")) {
             // FIX: Parse structured JSON suggestions for reviewable UI
@@ -4922,11 +4980,14 @@ If no updates are needed, respond with just "No character updates needed."` },
               }
             } catch {}
 
+            // FIX: Filter out any relationship field suggestions — relationships belong in the Relations tab, not character profiles
+            parsedSuggestions = parsedSuggestions.filter(s => s.field !== "relationships");
+
             if (parsedSuggestions.length > 0) {
               setCharSuggestions({ chapterIdx: idx, chapterTitle: ch.title || `Chapter ${idx + 1}`, items: parsedSuggestions });
               showToast(`${parsedSuggestions.length} character update suggestion${parsedSuggestions.length > 1 ? "s" : ""} ready for review`, "info");
-            } else {
-              // Fallback: show raw text if JSON parsing failed
+            } else if (suggestions && suggestions.trim() && !suggestions.toLowerCase().includes("no character updates needed")) {
+              // Fallback: show raw text if JSON parsing failed but AI returned content
               setChatMessages(prev => [...prev, {
                 id: uid(), role: "assistant", mode: "summarize", chapterIdx: idx,
                 content: `**Character Update Suggestions** (from Ch${idx + 1} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
@@ -4942,30 +5003,65 @@ If no updates are needed, respond with just "No character updates needed."` },
             const existingRels = (project.relationships || []).map(r => {
               const c1 = _resolveCharName(r.char1, project.characters);
               const c2 = _resolveCharName(r.char2, project.characters);
-              return `${c1} ↔ ${c2}: ${r.dynamic || "no dynamic"} | Status: ${r.status || "developing"} | Tension: ${r.tension || "medium"}`;
+              const parts = [`${c1} ↔ ${c2}`];
+              if (r.dynamic) parts.push(`Dynamic: ${r.dynamic}`);
+              if (r.status) parts.push(`Status: ${r.status}`);
+              if (r.tension) parts.push(`Tension: ${r.tension}${r.tensionType ? ` (${r.tensionType})` : ""}`);
+              if (r.char1Perspective) parts.push(`${c1}'s view: ${r.char1Perspective}`);
+              if (r.char2Perspective) parts.push(`${c2}'s view: ${r.char2Perspective}`);
+              if (r.progression) parts.push(`Arc: ${r.progression}`);
+              if (r.evolutionTimeline) parts.push(`Timeline: ${r.evolutionTimeline}`);
+              if (r.notes) parts.push(`Notes: ${r.notes}`);
+              return parts.join(" | ");
             }).join("\n");
 
+            const charDetail = mentionedChars.map(c =>
+              `${c.name} (${c.role}): ${c.personality || "no personality"}. Desires: ${c.desires || "unknown"}.`
+            ).join("\n");
+
             const relSuggestions = await callOpenRouter([
-              { role: "system", content: `You are analyzing a chapter to detect relationship changes. Based on the summary, suggest relationship updates.
+              { role: "system", content: `You are analyzing a chapter to detect relationship changes and output ONE JSON object per relationship pair.
 
-Existing relationships:
-${existingRels || "(none yet)"}
+CHARACTER DETAILS:
+${charDetail}
 
-Characters in this chapter: ${mentionedChars.map(c => c.name).join(", ")}
+EXISTING RELATIONSHIPS:
+${existingRels || "(none yet — create new ones if characters interacted meaningfully)"}
 
-For each relationship that CHANGED, was ESTABLISHED, or had notable TENSION in this chapter, output:
+For each relationship pair that changed this chapter, output ONE JSON object with ALL fields filled in. Whether the relationship is new or existing, always include every field. The system will decide whether to create or update.
+
+Each object MUST have these fields — fill ALL of them with rich, specific content:
+
+- char1: character name (exact match)
+- char2: character name (exact match)
+- dynamic: 2-3 sentences describing how they relate. Power dynamics, emotional patterns, the "shape" of their connection. Be specific about THIS chapter's events.
+- status: one of: strangers, acquaintances, developing, friends, friends-with-benefits, tension, dating, lovers, committed, complicated, estranged, enemies, enemies-to-lovers, exes, forbidden, unrequited
+- tension: one of: none, low, medium, high, explosive
+- tensionType: one of: romantic, hostile, suspenseful, competitive, protective, friendly, neutral, acquaintance, mixed
+- char1Perspective: 1-2 sentences. How does char1 THINK and FEEL about char2 right now? Write from char1's internal POV. Reference a specific moment from this chapter.
+- char2Perspective: 1-2 sentences. Same for char2's internal POV of char1.
+- notes: What SPECIFICALLY happened in this chapter that relates to this relationship. Not generic — describe the actual moment, dialogue, or gesture.
+
+Example output:
 \`\`\`json
 { "type": "relationship_updates", "data": [
-  { "char1": "Name1", "char2": "Name2", "action": "update|create", "field": "fieldName", "suggested": "new value", "reason": "what happened" }
+  {
+    "char1": "Luke Allordi",
+    "char2": "Ryker Sullivan",
+    "dynamic": "Flirtatious landlord-tenant dynamic ignites immediately — Luke's gruff paternal protectiveness softens into warm, lingering eye contact and unnecessary physical help with bags; Ryker's personable charm disarms Luke's usual emotional armor, creating a mutual awareness neither acknowledges aloud.",
+    "status": "developing",
+    "tension": "high",
+    "tensionType": "romantic",
+    "char1Perspective": "The kid stripped off his shirt like he owned the place already — and Luke caught himself staring at the way the rain plastered Ryker's hair to his forehead. Something he hasn't felt since before Maria died. Scary. Exciting.",
+    "char2Perspective": "Luke warned him about Precinct 18 with a look that said more than the words — this man knows things, has been through things. And when their hands touched passing the duffel, neither of them pulled away fast enough.",
+    "notes": "First meeting in apartment 3B during rainstorm. Stripped wet shirts together, sparking mutual physical attraction with lingering touches. Luke warned about NYPD corruption at Precinct 18. Promised beers at 8 PM."
+  }
 ] }
 \`\`\`
 
-Fields: dynamic, status, tension, tensionType, char1Perspective, char2Perspective, progression, notes.
-For NEW relationships (action: "create"), include: char1, char2, dynamic, status, tension, tensionType.
-For UPDATES, include the specific field that changed and its new value.
-Only suggest changes backed by events in the chapter. If no relationship changes, respond "No relationship updates needed."` },
-              { role: "user", content: `Chapter ${idx + 1} summary: ${summary}\n\nChapter number: ${idx + 1}` },
-            ], { maxTokens: 1200, temperature: 0.4 });
+If no relationship changes, respond "No relationship updates needed."` },
+              { role: "user", content: `Chapter ${idx + 1} summary: ${summary}\n\nChapter number: ${idx + 1}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
+            ], { maxTokens: 10000, temperature: 0.5 });
 
             if (relSuggestions && !relSuggestions.toLowerCase().includes("no relationship updates needed")) {
               let parsedRelSuggestions = [];
@@ -4975,48 +5071,66 @@ Only suggest changes backed by events in the chapter. If no relationship changes
                   try {
                     const parsed = JSON.parse(match[1]);
                     const items = parsed.data || (Array.isArray(parsed) ? parsed : [parsed]);
+                    const seenPairs = new Set();
+
                     for (const item of items) {
-                      if (item.char1 && item.char2) {
-                        const c1Match = (project.characters || []).find(c => c.name && c.name.toLowerCase() === item.char1.toLowerCase());
-                        const c2Match = (project.characters || []).find(c => c.name && c.name.toLowerCase() === item.char2.toLowerCase());
-                        if (c1Match && c2Match) {
-                          if (item.action === "create") {
-                            // Check if relationship already exists
-                            const exists = (project.relationships || []).some(r =>
-                              (r.char1 === c1Match.id && r.char2 === c2Match.id) ||
-                              (r.char1 === c2Match.id && r.char2 === c1Match.id)
-                            );
-                            if (!exists) {
-                              parsedRelSuggestions.push({
-                                id: uid(), action: "create",
-                                char1Id: c1Match.id, char1Name: c1Match.name,
-                                char2Id: c2Match.id, char2Name: c2Match.name,
-                                dynamic: item.dynamic || "", status: item.status || "developing",
-                                tension: item.tension || "medium", tensionType: item.tensionType || "romantic",
-                                reason: item.reason || "",
-                                suggestionStatus: "pending",
-                              });
+                      if (!item.char1 || !item.char2) continue;
+                      const pairKey = [item.char1.toLowerCase(), item.char2.toLowerCase()].sort().join("::");
+                      if (seenPairs.has(pairKey)) continue;
+                      seenPairs.add(pairKey);
+
+                      const c1Match = (project.characters || []).find(c => c.name && c.name.toLowerCase() === item.char1.toLowerCase());
+                      const c2Match = (project.characters || []).find(c => c.name && c.name.toLowerCase() === item.char2.toLowerCase());
+                      if (!c1Match || !c2Match) continue;
+
+                      // Check if relationship already exists — use LIVE project state, not stale ref
+                      const existingRel = (project?.relationships || []).find(r =>
+                        (r.char1 === c1Match.id && r.char2 === c2Match.id) ||
+                        (r.char1 === c2Match.id && r.char2 === c2Match.id)
+                      );
+
+                      if (existingRel) {
+                        // UPDATE: merge each non-empty field from the suggestion
+                        const updateFields = ["dynamic", "status", "tension", "tensionType", "char1Perspective", "char2Perspective", "progression", "evolutionTimeline", "notes"];
+                        for (const field of updateFields) {
+                          if (item[field] && item[field].trim()) {
+                            const currentVal = existingRel[field] || "";
+                            const directFields = new Set(["status", "tension", "tensionType"]);
+                            let finalVal = item[field];
+                            if (!directFields.has(field) && currentVal.trim()) {
+                              const curNorm = currentVal.trim().toLowerCase();
+                              const sugNorm = item[field].trim().toLowerCase();
+                              if (!sugNorm.includes(curNorm.slice(0, Math.min(50, curNorm.length)))) {
+                                finalVal = `${currentVal.trim()}\n[Ch${idx + 1}]: ${item[field].trim()}`;
+                              }
                             }
-                          } else {
-                            // Update existing relationship
-                            const existingRel = (project.relationships || []).find(r =>
-                              (r.char1 === c1Match.id && r.char2 === c2Match.id) ||
-                              (r.char1 === c2Match.id && r.char2 === c1Match.id)
-                            );
-                            if (existingRel && item.field && item.suggested) {
-                              parsedRelSuggestions.push({
-                                id: uid(), action: "update",
-                                relId: existingRel.id,
-                                char1Name: c1Match.name, char2Name: c2Match.name,
-                                field: item.field,
-                                current: existingRel[item.field] || "",
-                                suggested: item.suggested,
-                                reason: item.reason || "",
-                                suggestionStatus: "pending",
-                              });
-                            }
+                            parsedRelSuggestions.push({
+                              id: uid(), action: "update",
+                              relId: existingRel.id,
+                              char1Name: c1Match.name, char2Name: c2Match.name,
+                              field, current: currentVal, suggested: finalVal,
+                              reason: item.notes || "",
+                              suggestionStatus: "pending",
+                            });
                           }
                         }
+                      } else {
+                        // CREATE: copy ALL fields directly from the AI suggestion
+                        parsedRelSuggestions.push({
+                          id: uid(), action: "create",
+                          char1Id: c1Match.id, char1Name: c1Match.name,
+                          char2Id: c2Match.id, char2Name: c2Match.name,
+                          dynamic: item.dynamic || "",
+                          status: item.status || "developing",
+                          tension: item.tension || "medium",
+                          tensionType: item.tensionType || "romantic",
+                          char1Perspective: item.char1Perspective || "",
+                          char2Perspective: item.char2Perspective || "",
+                          notes: item.notes || "",
+                          meetsInChapter: idx + 1,
+                          evolutionTimeline: item.notes ? `Ch${idx + 1}: ${item.notes}` : "",
+                          suggestionStatus: "pending",
+                        });
                       }
                     }
                   } catch {}
@@ -5024,12 +5138,11 @@ Only suggest changes backed by events in the chapter. If no relationship changes
               } catch {}
 
               if (parsedRelSuggestions.length > 0) {
-                // Merge relationship suggestions into the charSuggestions modal
                 setCharSuggestions(prev => {
                   const existing = prev || { chapterIdx: idx, chapterTitle: ch.title || `Chapter ${idx + 1}`, items: [] };
                   return {
                     ...existing,
-                    relSuggestions: parsedRelSuggestions,
+                    relSuggestions: [...(existing.relSuggestions || []), ...parsedRelSuggestions],
                   };
                 });
               }
@@ -5139,6 +5252,80 @@ Only suggest changes backed by events in the chapter. If no relationship changes
     }
   }, [gdriveClientId, showToast, projects.length, setProjects, setActiveProjectId, setSettings, setTabChatHistories, setGdriveConnected, setGdriveLastSync]);
 
+  const handleFlushAll = useCallback(async () => {
+    // 1. Save unsaved editor content to state before flushing
+    const el = editorRef.current;
+    if (el && activeProjectId) {
+      const html = el.innerHTML;
+      if (html && html !== "<br>") {
+        setProjects(prev => prev.map(p => {
+          if (p.id !== activeProjectId) return p;
+          const chapters = [...(p.chapters || [])];
+          if (chapters[activeChapterIdx]) {
+            chapters[activeChapterIdx] = { ...chapters[activeChapterIdx], content: html };
+          }
+          return { ...p, chapters };
+        }));
+      }
+    }
+
+    // 2. Clear all persisted storage
+    try {
+      await new Promise((resolve, reject) => {
+        const req = indexedDB.deleteDatabase(IDB_DB_NAME);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+        req.onblocked = () => resolve(); // Proceed even if blocked
+      });
+      localStorage.removeItem(LS_PROJECTS);
+      localStorage.removeItem(LS_SETTINGS);
+      localStorage.removeItem(LS_TAB_CHATS);
+    } catch (e) { console.error("Flush failed:", e); }
+
+    // 3. Disconnect Google Drive and clear image caches
+    GDrive.disconnect();
+    GDriveImages.clear();
+
+    // 4. Clear markdown cache
+    _mdCache.clear();
+
+    // 5. Reset all state to fresh-app defaults
+    setProjects([]);
+    setActiveProjectId(null);
+    setActiveChapterIdx(0);
+    setChatMessages([]);
+    setSettings({
+      apiKey: "", model: "anthropic/claude-sonnet-4", maxTokens: 4096,
+      temperature: 0.85, systemPrompt: "",
+      frequencyPenalty: 0.1, presencePenalty: 0.15,
+      modelContextWindow: 200000,
+    });
+    setTabChatHistories({});
+    setTheme("dark");
+    setFileLinked(false);
+    setGdriveConnected(false);
+    setGdriveLastSync(null);
+    setGdriveAutoSync(false);
+    setGdriveClientId("");
+    setShowProjectList(true);
+    setActiveTab("write");
+    setEditingCharId(null);
+    setProjectSearch("");
+    setSessionWordsStart(null);
+
+    // 6. Reset refs
+    _lastChapterPerProject.current = {};
+    _fileHandle = null;
+    lastSyncedChapterRef.current = null;
+    lastSyncedContentRef.current = null;
+    lastContentRef.current = null;
+    lastContentChapterRef.current = null;
+    undoDispatch({ type: "reset" });
+
+    setFlushConfirm(false);
+    showToast("All data cleared — app is fresh", "success");
+  }, [activeProjectId, activeChapterIdx, showToast]);
+  
   const handleGdriveDisconnect = useCallback(() => {
     GDrive.disconnect();
     GDriveImages.clear();
@@ -5148,6 +5335,84 @@ Only suggest changes backed by events in the chapter. If no relationship changes
     showToast("Disconnected from Google Drive", "info");
   }, [showToast]);
 
+  const handleGenerateChapterWorldView = useCallback(async () => {
+    if (!settings.apiKey) { showToast("Set API key first", "error"); return; }
+    const ch = project?.chapters?.[activeChapterIdx];
+    if (!ch?.content || wordCount(ch.content) < 20) { showToast("Write some content first", "error"); return; }
+
+    const plain = _htmlToPlain(ch.content);
+    const currentChNum = activeChapterIdx + 1;
+
+    // Previous chapter's world view for consistency
+    let prevWorldView = "";
+    if (activeChapterIdx > 0) {
+      prevWorldView = project.chapters[activeChapterIdx - 1]?.worldView || "";
+    }
+
+    // Character profiles for visual reference
+    const charContext = (project?.characters || []).filter(c => c.name).map(c =>
+      `${c.name} (${c.role}): ${c.appearance || "no appearance set"}. Personality: ${c.personality || "none"}.`
+    ).join("\n");
+
+    // World entries with reference images info
+    const worldContext = (project?.worldBuilding || []).map(w => {
+      const refs = w.referenceImages || {};
+      const anglesWithImages = Object.entries(refs).filter(([, v]) => v).map(([k]) => k);
+      return `${w.name} [${w.category || "Location"}]: ${w.description || ""}${anglesWithImages.length > 0 ? ` [Uploaded images: ${anglesWithImages.join(", ")}]` : ""}`;
+    }).join("\n");
+
+    // Plot outline for this chapter
+    const plotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === currentChNum);
+    const plotContext = plotEntry ? `Chapter plot: ${plotEntry.summary || ""} ${plotEntry.beats || ""} [Scene type: ${plotEntry.sceneType || "narrative"}]` : "";
+
+    const sceneNotes = ch.sceneNotes || "";
+
+    showToast("Generating chapter world view...", "info");
+
+    try {
+      const response = await callOpenRouter([
+        { role: "system", content: `You are a visual continuity tracker for a novel being adapted into visual novel images. You produce a scene-by-scene visual world view that image generation AIs will use to maintain PERFECT visual consistency across all scenes.
+
+For each scene in the chapter, track EXACTLY:
+- Character CLOTHING with ALL details: exact colors (hex if possible), fabric type, fit, condition (pristine, wrinkled, stained, wet, torn, etc.), layers (jacket open/closed, sleeves rolled up, etc.)
+- Character APPEARANCE STATE: hairstyle (up, down, messy, wet), accessories, makeup state, any physical changes (new cuts, bruises, tired eyes, flushed cheeks)
+- Character POSITIONING: where they are in the location, what they're doing with their body, what they're holding/interacting with
+- ENVIRONMENT: what's visible, what changed from the previous scene, lighting conditions
+- MOOD/VIBE: emotional temperature, tension level
+
+FORMAT RULES:
+- Use PLAIN TEXT only — no markdown, no bold, no italics
+- Use [SCENE: description] markers to separate scenes
+- Under each scene, list characters with their visual state
+- Be SPECIFIC and CONCRETE — "white cotton button-down shirt, top two buttons undone, sleeves rolled to elbows" not "casual clothes"
+- Reference the PREVIOUS chapter's world view for continuity — what were characters last seen wearing? Did they change clothes?
+- If a location has uploaded reference images, note which angle images are available` },
+        { role: "user", content: `PREVIOUS CHAPTER WORLD VIEW (for visual continuity):
+${prevWorldView || "This is the first chapter or no previous world view was generated."}
+
+CURRENT CHAPTER (Ch${currentChNum}: "${ch.title || "Untitled"}"):
+${plain.length > 15000 ? plain.slice(0, 7000) + "\n[... middle omitted ...]\n" + plain.slice(-7000) : plain}
+
+CHARACTERS:
+${charContext}
+
+WORLD ENTRIES (locations with reference images):
+${worldContext}
+
+${plotContext}
+
+${sceneNotes ? `SCENE DIRECTION: ${sceneNotes}` : ""}
+
+Produce the scene-by-scene visual world view now. Use [SCENE: description] markers. List each character's clothing, appearance state, and position under each scene.` },
+      ], { maxTokens: 4000, temperature: 0.3 });
+
+      updateChapter(activeChapterIdx, { worldView: response || "" });
+      showToast("Chapter world view generated", "success");
+    } catch (e) {
+      showToast(`Failed: ${_formatApiError(e)}`, "error");
+    }
+  }, [project, activeChapterIdx, settings.apiKey, callOpenRouter, updateChapter, showToast]);
+  
   const handleGenerateImagePrompts = useCallback(async (itemId) => {
     if (!settings.apiKey) { showToast("Set your OpenRouter API key in Settings first", "error"); return; }
     const item = project?.worldBuilding?.find(w => w.id === itemId);
@@ -5426,6 +5691,7 @@ Only suggest changes backed by events in the chapter. If no relationship changes
           sceneNotes: ch.sceneNotes || "",
           pov: ch.pov || "",
           summaryGeneratedAt: ch.summaryGeneratedAt || "",
+          worldView: ch.worldView || "",
         }));
         // Ensure characters have IDs and new fields default properly
         if (Array.isArray(imported.characters)) {
@@ -5662,15 +5928,22 @@ Only suggest changes backed by events in the chapter. If no relationship changes
       // FIX: Resolve character names to IDs
       const c1Id = _resolveCharId(norm.char1 || "", allChars);
       const c2Id = _resolveCharId(norm.char2 || "", allChars);
-      // FIX: Skip duplicates — don't add if relationship between same pair already exists
+      // FIX: Skip invalid or duplicate entries
+      if (!c1Id || !c2Id || c1Id === c2Id) continue;
       const isDupe = newRels.some(r =>
         (r.char1 === c1Id && r.char2 === c2Id) || (r.char1 === c2Id && r.char2 === c1Id)
       );
-      if (isDupe && c1Id && c2Id) continue;
+      if (isDupe) continue;
+      // FIX: Validate dropdown values against valid options
+      const validStatus = new Set(["strangers","acquaintances","developing","friends","friends-with-benefits","tension","dating","lovers","committed","complicated","estranged","enemies","enemies-to-lovers","exes","forbidden","unrequited"]);
+      const validTension = new Set(["none","low","medium","high","explosive"]);
+      const validTensionType = new Set(["romantic","hostile","suspenseful","competitive","protective","friendly","neutral","acquaintance","mixed"]);
       newRels.push({
         id: uid(), char1: c1Id, char2: c2Id,
-        dynamic: norm.dynamic || "", status: norm.status || "developing",
-        tension: norm.tension || "medium", tensionType: norm.tensionType || "romantic",
+        dynamic: norm.dynamic || "",
+        status: validStatus.has(String(norm.status || "").toLowerCase()) ? norm.status : "developing",
+        tension: validTension.has(String(norm.tension || "").toLowerCase()) ? norm.tension : "medium",
+        tensionType: validTensionType.has(String(norm.tensionType || "").toLowerCase()) ? norm.tensionType : "romantic",
         notes: norm.notes || "", char1Perspective: norm.char1Perspective || "",
         char2Perspective: norm.char2Perspective || "", progression: norm.progression || "",
         meetsInChapter: norm.meetsInChapter || 0, evolutionTimeline: norm.evolutionTimeline || "",
@@ -5872,8 +6145,73 @@ CRITICAL RULES:
 - Use look-alike names for face references (e.g. "whose face closely resembles [name]")
 - If world reference images exist, add "[Reference image attached]" and describe what the image shows
 - Be extremely specific about spatial relationships and body positioning` },
-                  { role: "user", content: `SCENE TEXT:\n${effectiveText}\n\nCHARACTER PROFILES:\n${contextData.mentionedChars.map(c => `${c.name} (${c.role}, ${c.age || "?"} ${c.gender || ""}): Look-alike: ${c.lookAlike || "NOT SET"}. Appearance: ${c.appearance || "none"}. Personality: ${c.personality || "none"}`).join("\n\n")}\n\nLOCATION:\n${contextData._backdropRaw || "No pre-built location. Derive entirely from scene text."}\n${contextData.worldRefImages.length > 0 ? `[${contextData.worldRefImages.length} reference image(s) attached for this location]` : ""}\n\nSCENE TYPE: ${contextData._sceneType || "narrative"}\nTIME CONTEXT: ${contextData._timeRaw || "Determine from scene"}\nCAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
-                ], { maxTokens: 2500, temperature: 0.4 });
+                  { role: "user", content: `SCENE TEXT:
+${effectiveText}
+${(() => {
+  // World view context — clothing, position, location angle
+  const worldView = activeChapter?.worldView || "";
+  let extraContext = "";
+
+  if (worldView) {
+    // 1. Extract character clothing/appearance from the world view's scene blocks
+    const charClothingLines = [];
+    const sceneBlocks = worldView.split(/\[SCENE:[^\]]*\]/i);
+    for (const block of sceneBlocks) {
+      for (const char of contextData.mentionedChars) {
+        const namePattern = new RegExp(`${char.name.split(/\s+/)[0]}[^\\n]*`, 'gi');
+        const matches = block.match(namePattern);
+        if (matches) charClothingLines.push(...matches);
+      }
+    }
+    if (charClothingLines.length > 0) {
+      extraContext += "\n\nCHAPTER WORLD VIEW — CHARACTER APPEARANCE:\n" + charClothingLines.join("\n");
+    }
+
+    // 2. Location angle matching from world entry images
+    const primaryWorld = contextData.primaryWorld;
+    if (primaryWorld) {
+      const refs = primaryWorld.referenceImages || {};
+      const availableAngles = Object.entries(refs).filter(([, v]) => v);
+      if (availableAngles.length > 0) {
+        // Select best angle based on scene type
+        const sceneType = contextData._sceneType || "narrative";
+        const anglePriority = {
+          action: ["wall_a", "wall_b"], dialogue: ["wall_a", "wall_c"],
+          intimate: ["wall_c", "wall_d"], emotional: ["wall_a", "wall_c"],
+        };
+        const priorities = anglePriority[sceneType] || ["wall_a", "wall_b", "wall_c", "wall_d"];
+        const selectedAngle = priorities.find(a => refs[a]) || availableAngles[0][0];
+        const selectedImage = refs[selectedAngle];
+        const wallLabels = { wall_a: "Entry View (facing into room from door)", wall_b: "Right Wall", wall_c: "Left Wall", wall_d: "Behind Entry (door wall)" };
+
+        const anglePrompt = (primaryWorld.imagePrompts || {})[selectedAngle] || "";
+
+        extraContext += '\n\nLOCATION: "' + primaryWorld.name + '" — using ' + (wallLabels[selectedAngle] || selectedAngle) + ' angle.';
+		if (anglePrompt) {
+		  extraContext += '\nAngle-specific prompt for this view:\n' + anglePrompt;
+		}
+        // AFTER (fixed)
+		extraContext += "\n\n[Reference image ATTACHED — use this EXACT image as the backdrop/background. Insert the character(s) INTO this environment. The generated image must show this precise location with the character(s) added. Do not generate a new background — use this one.]";
+      }
+    }
+  }
+
+  return extraContext;
+})()}
+CHARACTER PROFILES:
+${contextData.mentionedChars.map(c => {
+  let charInfo = `${c.name} (${c.role}, ${c.age || "?"} ${c.gender || ""}): Look-alike: ${c.lookAlike || "NOT SET"}. Appearance: ${c.appearance || "none"}. Personality: ${c.personality || "none"}`;
+  return charInfo;
+}).join("\n\n")}
+
+LOCATION:
+${contextData._backdropRaw || "No pre-built location. Derive entirely from scene text."}
+${contextData.worldRefImages.length > 0 ? `[${contextData.worldRefImages.length} reference image(s) attached for this location]` : ""}
+
+SCENE TYPE: ${contextData._sceneType || "narrative"}
+TIME CONTEXT: ${contextData._timeRaw || "Determine from scene"}
+CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
+                ], { maxTokens: 10000, temperature: 0.4 });
                 setImagePromptData(prev => ({ ...prev, prompt: aiPrompt || "(AI returned empty)", isGenerating: false }));
 
                 // If NSFW, generate desensitized version too
@@ -5894,7 +6232,7 @@ CRITICAL RULES:
 - Make sure the final result is very SFW with zero doubts that this is not an NSFW activity even if read by a child
 - The viewer should see the SAME image from both prompts` },
                     { role: "user", content: `Rewrite this prompt to pass content filters:\n\n${aiPrompt}` },
-                  ], { maxTokens: 2500, temperature: 0.3 });
+                  ], { maxTokens: 10000, temperature: 0.3 });
                   setImagePromptData(prev => ({ ...prev, desensitizedPrompt: desensitized || null }));
                 }
                 } catch (e) {
@@ -6018,6 +6356,11 @@ CRITICAL RULES:
           <textarea value={sceneNotes} onChange={e => setSceneNotes(e.target.value)}
             placeholder="Where is this scene going? Emotional goal? Who initiates?"
             className="nf-scene-textarea" aria-label="Scene direction notes" />
+		  {activeChapter?.worldView && (
+            <div style={{ marginTop: 4, fontSize: 9, color: "var(--nf-success)", display: "flex", alignItems: "center", gap: 4 }}>
+              <Icons.Check /> World view active — image prompts will include chapter context
+            </div>
+          )}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <textarea value={chatInput} onChange={e => setChatInput(e.target.value)}
@@ -6044,7 +6387,7 @@ CRITICAL RULES:
             <button onClick={() => {
               const chNum = (project?.chapters?.length || 0) + 1;
               const title = `Chapter ${chNum}`;
-              const chs = [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }];
+              const chs = [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "" }];
               // FIX 7: Also create matching plot entry if one doesn't exist for this chapter number
               const existingPlot = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chNum);
               const plotUpdate = existingPlot ? {} : {
@@ -6122,6 +6465,14 @@ CRITICAL RULES:
               <button onClick={() => autoSummarizeChapter(activeChapterIdx)} disabled={isSummarizing} className="nf-btn-icon-sm" aria-label="Summarize chapter">
                 {isSummarizing ? <Spinner /> : <Icons.Brain />}
                 {isSummarizing && <span style={{ fontSize: 10 }}>Summarizing...</span>}
+              </button>
+            </Tooltip>
+			<Tooltip text="Generate world view for image prompts">
+              <button onClick={handleGenerateChapterWorldView} disabled={isGenerating || !settings.apiKey || !activeChapter?.content || wordCount(activeChapter?.content) < 20}
+                className="nf-btn-icon-sm" style={activeChapter?.worldView ? { borderColor: "var(--nf-success)", color: "var(--nf-success)" } : undefined}
+                aria-label="Generate chapter world view">
+                <Icons.Map />
+                {!activeChapter?.worldView && <span style={{ fontSize: 9, opacity: 0.6 }}>World View</span>}
               </button>
             </Tooltip>
             <button onClick={() => setFocusMode(!focusMode)} className="nf-btn-icon-sm" title={focusMode ? "Exit focus (⌘⇧F)" : "Focus mode (⌘⇧F)"} aria-label="Toggle focus mode">
@@ -7478,6 +7829,14 @@ CRITICAL RULES:
               showToast("Project deleted", "success");
             }} className="nf-btn nf-btn-danger"><Icons.Trash /> Delete Project</button>
           </div>
+		  <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--nf-border)" }}>
+            <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+              Clear <strong>all app data</strong> — projects, settings, Google Drive connection, cached images. Use when sharing this device or starting fresh. This cannot be undone.
+            </p>
+            <button onClick={() => setFlushConfirm(true)} className="nf-btn nf-btn-danger" style={{ borderColor: "var(--nf-accent)" }}>
+              <Icons.X /> Flush All Data
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -7819,6 +8178,30 @@ CRITICAL RULES:
 
         {toast && <Toast key={toast.key} message={toast.message} type={toast.type} onDone={() => setToast(null)} />}
         {confirmDialog && <ConfirmDialog message={confirmDialog.message} onConfirm={confirmDialog.onConfirm} onCancel={() => setConfirmDialog(null)} confirmLabel={confirmDialog.confirmLabel} />}
+		{flushConfirm && (
+          <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.12s ease-out" }} onClick={() => setFlushConfirm(false)}>
+            <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 3, padding: "28px 32px", maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)" }}>
+              <h3 style={{ fontSize: 17, fontFamily: "var(--nf-font-display)", color: "var(--nf-accent)", marginBottom: 14, fontWeight: 500 }}>Flush All App Data</h3>
+              <p style={{ fontSize: 13, color: "var(--nf-text-dim)", lineHeight: 1.7, marginBottom: 10 }}>
+                This will permanently delete:
+              </p>
+              <ul style={{ fontSize: 12, color: "var(--nf-text-muted)", lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
+                <li>All projects and chapters</li>
+                <li>All characters, world entries, plot outlines, relationships</li>
+                <li>API key and all settings</li>
+                <li>Google Drive connection and cached images</li>
+                <li>Chat histories and tab data</li>
+              </ul>
+              <p style={{ fontSize: 12, color: "var(--nf-accent)", fontWeight: 600, marginBottom: 20 }}>
+                Export your data as JSON first if you want to keep it.
+              </p>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setFlushConfirm(false)} className="nf-btn nf-btn-ghost">Cancel</button>
+                <button onClick={() => handleFlushAll()} className="nf-btn nf-btn-danger" autoFocus>Flush Everything</button>
+              </div>
+            </div>
+          </div>
+        )}
         {diffReview && <DiffReviewModal original={diffReview.original} proposed={diffReview.proposed} onAccept={diffReview.onAccept} onReject={diffReview.onReject} onInsertAtCursor={diffReview.onInsertAtCursor} />}
         {charSuggestions && <CharacterSuggestionsModal suggestions={charSuggestions} onAccept={handleAcceptSuggestion} onReject={handleRejectSuggestion} onAcceptAll={handleAcceptAllSuggestions} onRejectAll={handleRejectAllSuggestions} onAcceptRel={handleAcceptRelSuggestion} onRejectRel={handleRejectRelSuggestion} onClose={() => setCharSuggestions(null)} />}
         {whiteRoom && <WhiteRoomModal char1={whiteRoom.char1Id} char2={whiteRoom.char2Id} tension={whiteRoom.tension} result={whiteRoom.result} isGenerating={whiteRoom.isGenerating} onGenerate={handleWhiteRoomGenerate} onClose={() => setWhiteRoom(null)} settings={settings} characters={project?.characters} />}
@@ -7976,7 +8359,7 @@ CRITICAL RULES:
                         if (file.size > 5 * 1024 * 1024) { showToast("Max 5MB for chapter images", "error"); return; }
                         const reader = new FileReader();
                         reader.onload = ev => {
-                          const imgHtml = `<div style="text-align:center;margin:24px 0"><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="Scene illustration" /><div style="font-size:11px;color:#888;margin-top:6px;font-style:italic">Scene illustration</div></div>`;
+                          const imgHtml = `<div style="text-align:center;margin:24px 0"><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="Ch${activeChapterIdx + 1} scene — ${imagePromptData.mentionedChars.map(c => c.name).join(", ") || "illustration"}" /><div style="font-size:11px;color:#888;margin-top:6px;font-style:italic">Ch${activeChapterIdx + 1}: ${activeChapter?.title || "Scene"}</div></div>`;
                           const el = editorRef.current;
                           if (el) {
                             const sel = window.getSelection();

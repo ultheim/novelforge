@@ -918,9 +918,9 @@ const ContextEngine = {
         // A20: Note dead/absent characters
         if (c.status && c.status !== "alive") desc += ` {${c.status}}`;
         // A12: Truncate personality at sentence/clause boundary
-        if (c.personality) desc += ` — ${_truncateAtBoundary(c.personality, 140)}`;
+        if (c.personality) desc += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
         // A13: Truncate speech pattern at clause boundary
-        if (c.speechPattern) desc += ` | Voice: ${_truncateAtBoundary(c.speechPattern, 90)}`;
+        if (c.speechPattern) desc += ` | Voice: ${_truncateAtBoundary(c.speechPattern, 1000)}`;
         p.push(desc);
       }
       if (sorted.length > limit) p.push(`  (+ ${sorted.length - limit} more characters)`);
@@ -1069,7 +1069,7 @@ const ContextEngine = {
         // A10: Compact appearance after first few chapters
         if (c.appearance) {
           if (c.firstAppearanceChapter > 0 && currentChNum > c.firstAppearanceChapter + 2) {
-            fields.push(["Appearance (key)", _truncateAtBoundary(c.appearance, 120)]);
+            fields.push(["Appearance (key)", _truncateAtBoundary(c.appearance, 1000)]);
           } else {
             fields.push(["Appearance", c.appearance]);
           }
@@ -1114,7 +1114,7 @@ const ContextEngine = {
           fields.push(["Character arc", `[Story position: ${arcPhase}, Ch${currentChNum}/${totalChapters}] ${c.arc}`]);
         }
         // A17: Canon notes — FIX 1.22: truncate long canon notes
-        if (c.canonNotes) fields.push(["Canon notes", _truncateAtBoundary(c.canonNotes, 300)]);
+        if (c.canonNotes) fields.push(["Canon notes", _truncateAtBoundary(c.canonNotes, 1000)]);
         // A20: Status — FIX 1.28: Note "unknown" status explicitly
         if (c.status && c.status !== "alive") {
           let statusNote = c.status.toUpperCase();
@@ -1195,9 +1195,9 @@ const ContextEngine = {
             let compact = `  • ${c.name} (${c.role || "supporting"})${statusTag}`;
             if (c.pronouns) compact += ` [${c.pronouns}]`;
             // A12: Sentence-boundary truncation for personality
-            if (c.personality) compact += ` — ${_truncateAtBoundary(c.personality, 120)}`;
+            if (c.personality) compact += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
             // A6: Include speech pattern snippet for characters who might speak
-            if (c.speechPattern) compact += ` | Voice: ${_truncateAtBoundary(c.speechPattern, 80)}`;
+            if (c.speechPattern) compact += ` | Voice: ${_truncateAtBoundary(c.speechPattern, 1000)}`;
             // A1: Arc phase only (no full arc text)
             if (c.arc) {
               const totalCh = project.chapters?.length || 1;
@@ -1263,16 +1263,16 @@ const ContextEngine = {
             if (r.tensionType) line += ` (${r.tensionType})`; // B3: Tension flavor
           }
           // B7: Directional perspectives
-          if (r.char1Perspective) line += ` | ${c1Name}'s view: ${_truncateAtBoundary(r.char1Perspective, 100)}`;
-          if (r.char2Perspective) line += ` | ${c2Name}'s view: ${_truncateAtBoundary(r.char2Perspective, 100)}`;
+          if (r.char1Perspective) line += ` | ${c1Name}'s view: ${_truncateAtBoundary(r.char1Perspective, 1000)}`;
+          if (r.char2Perspective) line += ` | ${c2Name}'s view: ${_truncateAtBoundary(r.char2Perspective, 1000)}`;
           // B10: Progression arc
           if (r.progression) line += ` | Arc: ${r.progression}`;
           // B1/B2: Evolution timeline with chapter awareness
           if (r.evolutionTimeline) {
-            line += ` | Evolution: ${_truncateAtBoundary(r.evolutionTimeline, 150)}`;
+            line += ` | Evolution: ${_truncateAtBoundary(r.evolutionTimeline, 1000)}`;
           }
           // B6: Sentence-boundary truncation for notes
-          if (r.notes) line += ` | ${_truncateAtBoundary(r.notes, 150)}`;
+          if (r.notes) line += ` | ${_truncateAtBoundary(r.notes, 1000)}`;
           if (tokensUsed + this._estimateLen(line) < budgetRels) {
             relParts.push(line);
             tokensUsed += this._estimateLen(line);
@@ -1326,7 +1326,7 @@ const ContextEngine = {
           // C3: Smart truncation — use first 3 sentences or 300 chars, whichever is more
           if (w.description) {
             if (w.description.length > 300) {
-              entry += `: ${_truncateAtBoundary(w.description, 300)}`;
+              entry += `: ${_truncateAtBoundary(w.description, 1000)}`;
             } else {
               entry += `: ${w.description}`;
             }
@@ -1341,7 +1341,7 @@ const ContextEngine = {
           for (const w of others) {
             const typePrefix = w.category ? `[${w.category}] ` : "";
             let e = `• ${typePrefix}${w.name}`;
-            if (w.description) e += `: ${_truncateAtBoundary(w.description, 120)}`;
+            if (w.description) e += `: ${_truncateAtBoundary(w.description, 1000)}`;
             if (tokensUsed + this._estimateLen(e) < budgetWorld) {
               worldParts.push(e);
               tokensUsed += this._estimateLen(e);
@@ -1671,7 +1671,7 @@ const ContextEngine = {
             parts.push(`\nOther characters:`);
             others.forEach(c => {
               let line = `  • ${c.name} (${c.role})`;
-              if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 80)}`;
+              if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
               parts.push(line);
             });
           }
@@ -1679,7 +1679,7 @@ const ContextEngine = {
           parts.push(`\nExisting characters:`);
           project.characters.forEach(c => {
             let line = `  • ${c.name} (${c.role})`;
-            if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 60)}`;
+            if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
             parts.push(line);
           });
         }
@@ -1697,7 +1697,7 @@ const ContextEngine = {
           project.worldBuilding.forEach(w => {
             let line = `• ${w.name}`;
             if (w.category) line += ` [${w.category}]`;
-            if (w.description) line += `: ${_truncateAtBoundary(w.description, 150)}`;
+            if (w.description) line += `: ${_truncateAtBoundary(w.description, 1000)}`;
             parts.push(line);
           });
           parts.push(`</existing_world_entries>`);
@@ -1753,7 +1753,7 @@ const ContextEngine = {
           parts.push(`\nCharacters:`);
           project.characters.forEach(c => {
             let line = `  • ${c.name} (${c.role})`;
-            if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 80)}`;
+            if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
             parts.push(line);
           });
         }

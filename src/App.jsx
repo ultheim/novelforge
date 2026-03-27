@@ -779,9 +779,13 @@ const _detectMentionedCharacters = (text, characters) => {
           if (caseRegex.test(text)) { mentioned.add(c.id); break; }
         }
       } else {
-        const regex = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-        if (regex.test(text)) { mentioned.add(c.id); break; }
-      }
+		const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		if (!escaped || escaped.length === 0) continue;
+		try {
+		  const regex = new RegExp(`\\b${escaped}\\b`, 'i');
+		  if (regex.test(text)) { mentioned.add(c.id); break; }
+		} catch(e) { continue; }
+	  }
     }
   }
   return mentioned;
@@ -831,14 +835,18 @@ const _detectRelevantWorld = (text, worldEntries) => {
         const kw = String(rawKw).trim().toLowerCase();
         if (kw.length < 2) continue;
         if (kw.length <= 4) {
-          const regex = new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i');
-          if (regex.test(text)) { matched = true; break; }
-        } else {
-          if (lowerText.includes(kw)) { matched = true; break; }
-        }
-      }
-    }
-
+		  const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		  if (escaped && escaped.length > 0) {
+		    try {
+			  const regex = new RegExp(`\\b${escaped}\\b`, 'i');
+			  if (regex.test(text)) { matched = true; break; }
+			} catch(e) { /* skip bad regex */ }
+		  }
+	} else {
+	  if (lowerText.includes(kw)) { matched = true; break; }
+	}
+	  }
+	}
     // Strategy 4: Description-based detection — extract key noun phrases from description
     // and check if they appear in the text (catches entries referenced by description concepts)
     if (!matched && w.description) {
@@ -3104,7 +3112,7 @@ Render a photorealistic environment that matches every environmental detail desc
   const isLikelyNSFW = nsfwIndicators.test(selectedText);
 
   // Collect reference image data URLs — only when scene is INSIDE the matched world entry
-  const worldRefImages = useWorldImages && primaryWorld ? (primaryWorld.referenceImages || []).filter(img => img) : [];
+  const worldRefImages = useWorldImages && primaryWorld ? (Array.isArray(primaryWorld.referenceImages) ? primaryWorld.referenceImages : Object.values(primaryWorld.referenceImages || {})).filter(img => img) : [];
 
   // Return raw data for AI-powered prompt generation
   return {
@@ -3752,6 +3760,7 @@ export default function NovelForge() {
   const editorRef = useRef(null);
   const abortRef = useRef(null);
   const streamingContentRef = useRef("");
+  const pendingSelectionRef = useRef("");
   const _lastChapterPerProject = useRef({}); // C12: Remember last chapter per project
   const [undoState, undoDispatch] = useReducer(undoReducer, { past: [], future: [] });
 
@@ -6236,24 +6245,35 @@ INFER clothing when not described. ENHANCE clothing when described. Never say "n
             <button onClick={handlePerspectiveFlip} className="nf-btn-micro" disabled={!settings.apiKey} title="Rewrite from another character's perspective">
               <Icons.Eye /> Flip POV
             </button>
-            <button onClick={() => {
-              if (!settings.apiKey) { showToast("Set API key first", "error"); return; }
-              if (imagePromptData?.isGenerating) return; // ← Guard: don't open while generating
-              const domSel = (window.getSelection()?.toString() || "").trim();
-              const effectiveText = domSel || selectedText;
-              if (!effectiveText) { showToast("Select text first", "error"); return; }
-              // Abort any previous in-flight generation
-              if (imagePromptAbortRef.current) { imagePromptAbortRef.current.abort(); imagePromptAbortRef.current = null; }
-              const contextData = generateSceneImagePrompt(effectiveText, project, activeChapterIdx);
-              const modalData = { ...contextData, isGenerating: true, prompt: "", desensitizedPrompt: null };
-              setImagePromptData(modalData);
-              showToast("Generating image prompt...", "info");
-              // Force React to flush the modal render BEFORE starting the async call
-              setTimeout(async () => {
-                const abortController = new AbortController(); // ← Own controller
-                imagePromptAbortRef.current = abortController; // ← Store for close/abort
-                try {
-                  const aiPrompt = await callOpenRouter([
+            <button type="button" onMouseDown={(e) => {
+			  e.preventDefault();
+			  e.stopPropagation();
+			  if (!settings.apiKey) { showToast("Set API key first", "error"); return; }
+			  if (imagePromptData?.isGenerating) return;
+			  debouncedSyncEditor.cancel();
+			  if (imagePromptAbortRef.current) { imagePromptAbortRef.current.abort(); imagePromptAbortRef.current = null; }
+			  // Capture directly — onMouseDown fires before blur, so selection is guaranteed
+			  const capturedText = pendingSelectionRef.current
+				|| selectedText
+				|| (window.getSelection()?.toString() || "").trim();
+			  console.log("[ImagePrompt] capturedText length:", capturedText.length);
+			  if (!capturedText) { showToast("Select text first", "error"); return; }
+			  pendingSelectionRef.current = "";
+			  const MAX_SCENE_TEXT = 8000;
+			  const effectiveText = capturedText.length > MAX_SCENE_TEXT
+				? capturedText.slice(0, MAX_SCENE_TEXT) + "\n\n[...selected text truncated...]"
+				: capturedText;
+			  const contextData = generateSceneImagePrompt(effectiveText, project, activeChapterIdx);
+			  console.log("[ImagePrompt] contextData ok, chars:", contextData.mentionedChars.length);
+			  const modalData = { ...contextData, isGenerating: true, prompt: "", desensitizedPrompt: null };
+			  setImagePromptData(modalData);
+			  showToast("Generating image prompt...", "info");
+			  console.log("[ImagePrompt] modal opened, starting async...");
+			  setTimeout(async () => {
+				const abortController = new AbortController();
+				imagePromptAbortRef.current = abortController;
+				try {
+				  const aiPrompt = await callOpenRouter([
                   { role: "system", content: `You are a professional photography director creating exact image generation prompts. You will receive a scene from a novel, character profiles with look-alike references, and location details. You must output a COMPLETE, SELF-CONTAINED image generation prompt with ZERO ambiguity — every detail fully resolved. The output will be pasted directly into an image AI with NO other context.
 
 YOUR OUTPUT FORMAT (follow this EXACTLY):
@@ -6282,7 +6302,7 @@ CRITICAL RULES:
 - If world reference images exist, add "[Reference image attached]" and describe what the image shows
 - Be extremely specific about spatial relationships and body positioning` },
                   { role: "user", content: `SCENE TEXT (this is the EXACT passage — build the prompt from THIS):
-${effectiveText}
+${effectiveText.slice(0, 12000)}
 ${(() => {
   const worldView = activeChapter?.worldView || "";
   let extra = "";
@@ -6658,7 +6678,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 el.classList.toggle("nf-has-content", el.textContent.trim().length > 0);
               }}
               onBlur={() => { pushUndo(); syncEditorContent(); }}
-              onMouseUp={handleEditorSelect}
+              onMouseUp={(e) => {
+			    handleEditorSelect(e);
+			    const sel = window.getSelection();
+			    const text = sel ? sel.toString().trim() : "";
+			    if (text.length > 0) pendingSelectionRef.current = text;
+			  }}
               onKeyUp={handleEditorSelect}
               onKeyDown={(e) => {
                 // A8: Keyboard shortcuts for formatting
@@ -6679,7 +6704,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       const reader = new FileReader();
                       reader.onload = (ev) => {
                         const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                        const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+                        const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${url}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
                         document.execCommand('insertHTML', false, imgHtml);
                         syncEditorContent();
                         // Attach event handlers to the newly inserted image

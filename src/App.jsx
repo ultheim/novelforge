@@ -2788,6 +2788,205 @@ const CleanViewModal = memo(({ project, startChapter, onClose }) => {
   );
 });
 
+// ─── RELATIONSHIP WEB MODAL ───
+function computeWebLayout(characters, relationships) {
+  const chars = characters || [];
+  const rels = relationships || [];
+  if (!chars.length) return [];
+  const CX = 400, CY = 400, RADIUS = 220;
+  let nodes = chars.map((c, i) => {
+    const angle = (i / chars.length) * Math.PI * 2 - Math.PI / 2;
+    return {
+      id: c.id,
+      x: CX + Math.cos(angle) * RADIUS + (Math.random() - 0.5) * 50,
+      y: CY + Math.sin(angle) * RADIUS + (Math.random() - 0.5) * 50,
+      vx: 0, vy: 0,
+    };
+  });
+  const edgeSet = new Set();
+  rels.forEach(r => { if (r.char1 && r.char2) edgeSet.add([r.char1, r.char2].sort().join("::")); });
+  const edges = [...edgeSet].map(k => k.split("::"));
+  const SPRING_K = 0.025, REPULSION = 6000, TARGET_DIST = 170, CENTER_PULL = 0.008, DAMPING = 0.82, ITERS = 200;
+  for (let iter = 0; iter < ITERS; iter++) {
+    const temp = 1 - iter / ITERS;
+    nodes.forEach(n => {
+      n.vx = 0; n.vy = 0;
+      n.vx += (CX - n.x) * CENTER_PULL;
+      n.vy += (CY - n.y) * CENTER_PULL;
+      nodes.forEach(o => {
+        if (n.id === o.id) return;
+        const dx = n.x - o.x, dy = n.y - o.y;
+        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+        const f = REPULSION / (d * d);
+        n.vx += (dx / d) * f; n.vy += (dy / d) * f;
+      });
+    });
+    edges.forEach(([a, b]) => {
+      const na = nodes.find(n => n.id === a); const nb = nodes.find(n => n.id === b);
+      if (!na || !nb) return;
+      const dx = nb.x - na.x, dy = nb.y - na.y; const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - TARGET_DIST) * SPRING_K;
+      const fx = (dx / d) * f, fy = (dy / d) * f;
+      na.vx += fx; na.vy += fy; nb.vx -= fx; nb.vy -= fy;
+    });
+    nodes.forEach(n => {
+      n.x += n.vx * DAMPING * (0.5 + temp * 0.5); n.y += n.vy * DAMPING * (0.5 + temp * 0.5);
+      n.x = Math.max(70, Math.min(730, n.x)); n.y = Math.max(70, Math.min(730, n.y));
+    });
+  }
+  const connected = new Set(); edges.forEach(([a, b]) => { connected.add(a); connected.add(b); });
+  let isoIdx = 0; const isoCount = nodes.filter(n => !connected.has(n.id)).length;
+  nodes.forEach(n => { if (!connected.has(n.id)) { const angle = (isoIdx / Math.max(isoCount, 1)) * Math.PI * 2 - Math.PI / 2; n.x = CX + Math.cos(angle) * (RADIUS + 90); n.y = CY + Math.sin(angle) * (RADIUS + 90); isoIdx++; } });
+  return nodes;
+}
+
+const RelationshipWebModal = memo(({ characters, relationships, onClose, povCharId }) => {
+  const [nodes, setNodes] = useState(() => computeWebLayout(characters, relationships));
+  const [dragging, setDragging] = useState(null);
+  const [hoveredNode, setHoveredNode] = useState(null);
+  const [hoveredRel, setHoveredRel] = useState(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [panning, setPanning] = useState(false);
+  const svgRef = useRef(null);
+  const hoverTimer = useRef(null);
+  const dragOffset = useRef({ dx: 0, dy: 0 });
+  const panStart = useRef({ x: 0, y: 0, px: 0, py: 0 });
+  const zoomRef = useRef(1);
+  const N_R = 28; const CANVAS = 800;
+  useEffect(() => { const h = e => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
+  const chars = characters || []; const rels = relationships || [];
+  const TC = { none: "#6b9e78", low: "#8b9e6b", medium: "#c4953a", high: "#c4653a", explosive: "#c43a3a" };
+  const tColor = t => TC[t] || "rgba(180,140,100,0.3)";
+  const LS = { committed: "", lovers: "24 6", dating: "14 6", "friends-with-benefits": "10 6", friends: "8 6", developing: "6 6", acquaintances: "3 6", strangers: "2 8", enemies: "8 3", "enemies-to-lovers": "14 3 3 3", tension: "8 4", estranged: "2 12", exes: "10 4", forbidden: "6 3 2 3", unrequited: "4 8", complicated: "8 4 2 4", default: "6 6" };
+  const lDash = s => LS[s] || LS.default;
+  const conns = useMemo(() => { const m = {}; chars.forEach(c => { if (c.id) m[c.id] = 0; }); rels.forEach(r => { if (r.char1 && m[r.char1] !== undefined) m[r.char1]++; if (r.char2 && m[r.char2] !== undefined) m[r.char2]++; }); return m; }, [chars, rels]);
+  const effectivePovChar = useMemo(() => {
+    if (povCharId) { const c = chars.find(ch => ch.id === povCharId); if (c) return c.id; }
+    const p = chars.find(c => c.role === "protagonist"); return p?.id || null;
+  }, [chars, povCharId]);
+  const charMap = useMemo(() => { const m = {}; chars.forEach(c => { if (c.id) m[c.id] = c; }); return m; }, [chars]);
+  const svgCoords = useCallback((cx, cy) => { const svg = svgRef.current; if (!svg) return { x: cx, y: cy }; const pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy; const ctm = svg.getScreenCTM(); if (!ctm) return { x: cx, y: cy }; try { const p = pt.matrixTransform(ctm.inverse()); return { x: p.x, y: p.y }; } catch { return { x: cx, y: cy }; } }, []);
+  const onNodeDown = useCallback((nid, e) => { e.stopPropagation(); e.preventDefault(); const n = nodes.find(nd => nd.id === nid); if (!n) return; const p = svgCoords(e.clientX, e.clientY); dragOffset.current = { dx: n.x - p.x, dy: n.y - p.y }; setDragging(nid); setSelectedNode(prev => prev === nid ? null : nid); }, [nodes, svgCoords]);
+  const onCanvasMove = useCallback(e => { if (dragging) { e.preventDefault(); const p = svgCoords(e.clientX, e.clientY); setNodes(prev => prev.map(n => n.id === dragging ? { ...n, x: p.x + dragOffset.current.dx, y: p.y + dragOffset.current.dy } : n)); } else if (panning) { e.preventDefault(); const dx = (e.clientX - panStart.current.x) / zoomRef.current; const dy = (e.clientY - panStart.current.y) / zoomRef.current; setPan({ x: panStart.current.px + dx, y: panStart.current.py + dy }); } }, [dragging, panning, svgCoords]);
+  const onCanvasUp = useCallback(() => { setDragging(null); setPanning(false); }, []);
+  const onCanvasDown = useCallback(e => { if (e.target === svgRef.current || e.target.tagName === "rect" || e.target.tagName === "line") { if (!dragging) { setPanning(true); panStart.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y }; setSelectedNode(null); } } }, [dragging, pan]);
+  const onWheel = useCallback(e => { e.preventDefault(); setZoom(z => { const next = e.deltaY < 0 ? z * 1.08 : z / 1.08; const clamped = Math.max(0.25, Math.min(3, next)); zoomRef.current = clamped; return clamped; }); }, []);
+  const onNodeEnter = useCallback((nid) => { clearTimeout(hoverTimer.current); setHoveredNode(nid); setHoveredRel(null); }, []);
+  const onNodeLeave = useCallback(() => { hoverTimer.current = setTimeout(() => setHoveredNode(null), 80); }, []);
+  const onRelEnter = useCallback(rid => { clearTimeout(hoverTimer.current); setHoveredRel(rid); setHoveredNode(null); }, []);
+  const onRelLeave = useCallback(() => { hoverTimer.current = setTimeout(() => setHoveredRel(null), 80); }, []);
+  useEffect(() => () => clearTimeout(hoverTimer.current), []);
+  const procRels = useMemo(() => { const seen = {}; return (rels || []).filter(r => !(r.meetsInChapter > 0 && r.meetsInChapter > 999)).map(r => { const key = [r.char1, r.char2].sort().join("::"); if (!seen[key]) seen[key] = 0; seen[key]++; return { ...r, curveIdx: seen[key] - 1 }; }); }, [rels]);
+  const curvePath = (x1, y1, x2, y2, ci) => { if (ci === 0) return `M${x1},${y1}L${x2},${y2}`; const mx = (x1 + x2) / 2, my = (y1 + y2) / 2; const d = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) || 1; const nx = -(y2 - y1) / d, ny = (x2 - x1) / d; const off = d * 0.12 * (ci % 2 === 0 ? 1 : -1) * Math.ceil((ci + 1) / 2); return `M${x1},${y1}Q${mx + nx * off},${my + ny * off},${x2},${y2}`; };
+  const resetView = useCallback(() => { setNodes(computeWebLayout(chars, rels)); setPan({ x: 0, y: 0 }); setZoom(1); zoomRef.current = 1; setSelectedNode(null); setHoveredNode(null); setHoveredRel(null); }, [chars, rels]);
+  if (!chars.length) return (<div style={{ position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}><div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: 40, textAlign: "center", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-display)", fontStyle: "italic" }}>Add characters first to see their connections</div></div>);
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.2s ease-out" }} onClick={onClose}>
+      <style>{`.nf-rel-web-node{cursor:grab}.nf-rel-web-node:active{cursor:grabbing}.nf-rel-web-line{transition:opacity .2s}.nf-rel-web-line:hover{opacity:1!important}.nf-rel-web-hit{cursor:pointer}.nf-wl{position:absolute;bottom:14px;right:14px;background:var(--nf-bg-raised);border:1px solid var(--nf-border);border-radius:2px;padding:12px 16px;box-shadow:var(--nf-shadow);z-index:10;font-size:10px;color:var(--nf-text-muted);line-height:1.8;user-select:none}.nf-wl-t{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.12em;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid var(--nf-border);color:var(--nf-text-dim)}.nf-wl-s{margin-bottom:8px}.nf-wl-s:last-child{margin-bottom:0}.nf-wl-i{display:flex;align-items:center;gap:8px;padding:1px 0}.nf-wl-sw{width:24px;height:2px;flex-shrink:0;border-radius:1px}.nf-wl-d{width:8px;height:8px;border-radius:50%;flex-shrink:0}.nf-rel-web-tip{position:fixed;z-index:10001;pointer-events:none;background:var(--nf-dialog-bg);border:1px solid var(--nf-border);border-radius:3px;padding:12px 16px;box-shadow:var(--nf-shadow-lg);max-width:300px;animation:nf-fadeIn .12s ease-out;font-size:12px;line-height:1.6;color:var(--nf-text)}`}</style>
+      <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, width: "95vw", maxWidth: 1100, height: "88vh", maxHeight: 800, display: "flex", flexDirection: "column", boxShadow: "var(--nf-shadow-lg)", overflow: "hidden", animation: "nf-pop 0.25s ease-out" }}>
+        {/* Header */}
+        <div style={{ padding: "14px 22px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, background: "var(--nf-bg-raised)" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+            <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 22, fontWeight: 400, color: "var(--nf-text)", letterSpacing: "0.02em" }}>Relationship Web</span>
+            <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>{chars.length} characters · {rels.length} connections</span>
+          </div>
+          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+            <button onClick={resetView} className="nf-btn-micro">↻ Layout</button>
+            <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
+          </div>
+        </div>
+        {/* Stats bar */}
+        <div style={{ padding: "6px 22px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", display: "flex", gap: 12, alignItems: "center", fontSize: 10, color: "var(--nf-text-muted)", flexShrink: 0, flexWrap: "wrap" }}>
+          {Object.entries(TC).map(([k, c]) => (<span key={k} style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 6, height: 6, borderRadius: "50%", background: c }} />{k}</span>))}
+          <span style={{ margin: "0 2px", opacity: 0.3 }}>|</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 20, height: 0, borderTop: "2px solid var(--nf-text-muted)", display: "inline-block" }} /> committed</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 20, height: 0, borderTop: "2px dashed var(--nf-text-muted)", display: "inline-block" }} /> developing</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 20, height: 0, borderTop: "2px dotted var(--nf-text-muted)", display: "inline-block" }} /> strangers</span>
+          <span style={{ marginLeft: "auto", opacity: 0.6, fontSize: 9 }}>Scroll to zoom · Drag canvas to pan · Drag nodes to reposition</span>
+        </div>
+        {/* Canvas */}
+        <div style={{ flex: 1, background: "var(--nf-bg-deep)", cursor: panning || dragging ? "grabbing" : "grab", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+          <svg ref={svgRef} style={{ width: "100%", height: "100%", display: "block" }} viewBox={`0 0 ${CANVAS} ${CANVAS}`} onMouseDown={onCanvasDown} onMouseMove={onCanvasMove} onMouseUp={onCanvasUp} onMouseLeave={onCanvasUp} onWheel={onWheel}>
+            <defs>
+              <pattern id="nw-grid" width="32" height="32" patternUnits="userSpaceOnUse"><circle cx="16" cy="16" r="0.7" fill="rgba(180,140,100,0.06)" /></pattern>
+            </defs>
+            <g transform={`translate(${pan.x},${pan.y}) scale(${zoom})`}>
+              <rect width={CANVAS} height={CANVAS} fill="url(#nw-grid)" />
+              {/* Lines */}
+              {procRels.map(r => {
+                const n1 = nodes.find(n => n.id === r.char1); const n2 = nodes.find(n => n.id === r.char2);
+                if (!n1 || !n2) return null;
+                const c = tColor(r.tension); const isHov = hoveredRel === r.id; const isNodeHov = hoveredNode && (hoveredNode === r.char1 || hoveredNode === r.char2); const isSel = selectedNode && (selectedNode === r.char1 || selectedNode === r.char2);
+                const opa = isHov || isNodeHov || isSel ? 1 : 0.22; const sw = isHov ? 3 : isNodeHov || isSel ? 2.2 : 1.4;
+                const path = curvePath(n1.x, n1.y, n2.x, n2.y, r.curveIdx);
+                const mx = (n1.x + n2.x) / 2, my = (n1.y + n2.y) / 2;
+                const dist = Math.sqrt((n2.x - n1.x) ** 2 + (n2.y - n1.y) ** 2) || 1;
+                const curveOff = r.curveIdx > 0 ? dist * 0.12 * (r.curveIdx % 2 === 0 ? 1 : -1) * Math.ceil((r.curveIdx + 1) / 2) : 0;
+                const nx = -(n2.y - n1.y) / dist, ny = (n2.x - n1.x) / dist;
+                const labelX = r.curveIdx > 0 ? mx + nx * curveOff : mx;
+                const labelY = r.curveIdx > 0 ? my + ny * curveOff : my;
+                return (
+                  <g key={r.id}>
+                    <path d={path} fill="none" stroke="transparent" strokeWidth="12" onMouseEnter={() => onRelEnter(r.id)} onMouseLeave={onRelLeave} style={{ cursor: "pointer" }} />
+                    <path d={path} fill="none" stroke={c} strokeWidth={sw} strokeDasharray={lDash(r.status)} strokeLinecap="round" className="nf-rel-web-line" style={{ opacity: opa }} />
+                    {opa > 0.5 && (<path d={path} fill="none" stroke={c} strokeWidth={sw + 1} strokeDasharray="4 18" strokeLinecap="round" opacity="0.25"><animate attributeName="stroke-dashoffset" from="22" to="0" dur="2s" repeatCount="indefinite" /></path>)}
+                    {r.dynamic && opa > 0.5 && (<text x={labelX} y={labelY - 6} textAnchor="middle" dominantBaseline="central" fill={c} fontSize="7" fontWeight="600" fontFamily="var(--nf-font-body)" style={{ letterSpacing: "0.03em" }}>{r.dynamic.split(/[.!?]/)[0]?.trim().slice(0, 35)}{(r.dynamic.split(/[.!?]/)[0]?.trim().length || 0) > 35 ? "…" : ""}</text>)}
+                    {r.tension && r.tension !== "none" && opa > 0.5 && (<><rect x={labelX + 4} y={labelY + 2} width={r.tension.length * 4.5 + 8} height="12" rx="6" fill={c} opacity="0.2" /><text x={labelX + 8} y={labelY + 9.5} fill={c} fontSize="6.5" fontWeight="700" fontFamily="var(--nf-font-mono)" style={{ letterSpacing: "0.04em" }}>{r.tension}</text></>)}
+                    {r.status && opa > 0.5 && (<text x={labelX} y={labelY + 18} textAnchor="middle" dominantBaseline="central" fill="var(--nf-text-muted)" fontSize="6" fontFamily="var(--nf-font-body)" opacity="0.7" style={{ letterSpacing: "0.06em", textTransform: "uppercase" }}>{r.status}</text>)}
+                  </g>
+                );
+              })}
+              {/* Nodes */}
+              {nodes.map(n => {
+                const ch = charMap[n.id]; if (!ch) return null;
+                const isPov = effectivePovChar === n.id; const isHov = hoveredNode === n.id; const isSel = selectedNode === n.id; const isHighlighted = isHov || isSel;
+                const cc = conns[n.id] || 0; const isDead = ch.status === "dead"; const isAbsent = ch.status === "absent";
+                return (
+                  <g key={n.id} className="nf-rel-web-node" onMouseDown={e => onNodeDown(n.id, e)} onMouseEnter={() => onNodeEnter(n.id)} onMouseLeave={onNodeLeave} style={{ cursor: dragging === n.id ? "grabbing" : "grab" }}>
+                    {isPov && (<><circle cx={n.x} cy={n.y} r={N_R + 14} fill="none" stroke="var(--nf-accent)" strokeWidth="0.5" opacity="0.12" strokeDasharray="3 5"><animateTransform attributeName="transform" type="rotate" from={`0 ${n.x} ${n.y}`} to={`360 ${n.x} ${n.y}`} dur="20s" repeatCount="indefinite" /></circle><circle cx={n.x} cy={n.y} r={N_R + 8} fill="none" stroke="var(--nf-accent)" strokeWidth="0.8" opacity="0.2" /></>)}
+                    {(isHighlighted || isPov) && (<circle cx={n.x} cy={n.y} r={N_R + 5} fill="none" stroke="var(--nf-accent)" strokeWidth={isHighlighted ? 1.5 : 0.8} opacity={isHighlighted ? 0.5 : 0.25} style={{ transition: "all 0.2s" }} />)}
+                    <circle cx={n.x} cy={n.y} r={N_R + 8} fill="transparent" />
+                    <circle cx={n.x} cy={n.y} r={N_R} fill={isPov ? "rgba(196,101,58,0.08)" : "rgba(180,140,100,0.03)"} stroke={isHighlighted ? "var(--nf-accent)" : isPov ? "var(--nf-accent)" : "var(--nf-border)"} strokeWidth={isHighlighted || isPov ? 2 : 1.2} style={{ transition: "all 0.2s" }} />
+                    {ch.image ? (<><clipPath id={`nc-${n.id}`}><circle cx={n.x} cy={n.y} r={N_R - 1.5} /></clipPath><image href={ch.image} x={n.x - N_R + 1.5} y={n.y - N_R + 1.5} width={(N_R - 1.5) * 2} height={(N_R - 1.5) * 2} clipPath={`url(#nc-${n.id})`} preserveAspectRatio="xMidYMid slice" /></>) : (<text x={n.x} y={n.y + 1} textAnchor="middle" dominantBaseline="central" fill="var(--nf-text-muted)" fontSize="18" fontWeight="300" fontFamily="var(--nf-font-display)" opacity="0.5">{(ch.name || "?")[0].toUpperCase()}</text>)}
+                    {(isDead || isAbsent) && (<circle cx={n.x} cy={n.y} r={N_R - 1} fill="rgba(0,0,0,0.45)" />)}
+                    {isDead && (<text x={n.x} y={n.y + 1} textAnchor="middle" dominantBaseline="central" fill="#fff" fontSize="9" fontWeight="600" opacity="0.7" fontFamily="var(--nf-font-body)">†</text>)}
+                    {isAbsent && (<text x={n.x} y={n.y + 1} textAnchor="middle" dominantBaseline="central" fill="#fff" fontSize="8" fontWeight="600" opacity="0.6" fontFamily="var(--nf-font-body)">·</text>)}
+                    <text x={n.x} y={n.y + N_R + 14} textAnchor="middle" dominantBaseline="central" fill={isHighlighted ? "var(--nf-text)" : "var(--nf-text-dim)"} fontSize="10.5" fontWeight="600" fontFamily="var(--nf-font-body)" style={{ letterSpacing: "0.01em", transition: "fill 0.2s" }}>{ch.name || "Unnamed"}</text>
+                    <text x={n.x} y={n.y + N_R + 25} textAnchor="middle" dominantBaseline="central" fill={isPov ? "var(--nf-accent)" : "var(--nf-text-muted)"} fontSize="7.5" fontWeight={isPov ? "700" : "500"} fontFamily="var(--nf-font-body)" style={{ letterSpacing: "0.1em", textTransform: "uppercase" }}>{ch.role || "supporting"}</text>
+                    {isPov && (<text x={n.x} y={n.y + N_R + 35} textAnchor="middle" dominantBaseline="central" fill="var(--nf-accent)" fontSize="7" fontWeight="700" fontFamily="var(--nf-font-mono)" opacity="0.7" style={{ letterSpacing: "0.1em" }}>POV</text>)}
+                    {cc > 0 && (<><circle cx={n.x + N_R - 3} cy={n.y - N_R + 3} r="8" fill={isHighlighted ? "var(--nf-accent)" : "var(--nf-bg-surface)"} stroke="var(--nf-border)" strokeWidth="1" /><text x={n.x + N_R - 3} y={n.y - N_R + 4} textAnchor="middle" dominantBaseline="central" fill={isHighlighted ? "#fff" : "var(--nf-text-muted)"} fontSize="7.5" fontWeight="700" fontFamily="var(--nf-font-mono)">{cc}</text></>)}
+                    {isHighlighted && (<circle cx={n.x} cy={n.y} r={N_R - 1} fill="none" stroke="var(--nf-accent)" strokeWidth="1" strokeDasharray="3 3" opacity="0.6"><animateTransform attributeName="transform" type="rotate" from={`0 ${n.x} ${n.y}`} to={`360 ${n.x} ${n.y}`} dur="8s" repeatCount="indefinite" /></circle>)}
+                  </g>
+                );
+              })}
+            </g>
+          </svg>
+          {/* Legend */}
+          <div className="nf-wl">
+            <div className="nf-wl-t">Legend</div>
+            <div className="nf-wl-s">{Object.entries(TC).map(([k, c]) => (<div key={k} className="nf-wl-i"><div className="nf-wl-sw" style={{ background: c }} /><span style={{ textTransform: "capitalize" }}>{k}</span></div>))}</div>
+                          <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>{[{label: "Committed", dash: ""},{label: "Dating", dash: "14 6"},{label: "Developing", dash: "6 6"},{label: "Strangers", dash: "2 8"},{label: "Enemies", dash: "8 3"}].map(s => <div key={s.label} className="nf-wl-i"><svg width="24" height="4" className="nf-wl-sw"><line x1="0" y1="2" x2="24" y2="2" stroke="var(--nf-text-muted)" strokeWidth="2" strokeDasharray={s.dash} /></svg><span>{s.label}</span></div>)}</div>
+            <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>
+              <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "var(--nf-accent)", boxShadow: "0 0 6px var(--nf-accent)" }} /><span>POV / Protagonist</span></div>
+              <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "var(--nf-border)" }} /><span>Character</span></div>
+              <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "#c43a3a" }} /><span>Deceased</span></div>
+              <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "var(--nf-text-muted)", opacity: 0.5 }} /><span>Absent</span></div>
+            </div>
+          </div>
+          {/* Empty state */}
+          {chars.length === 0 && (<div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center" }}><div style={{ fontSize: 28, opacity: 0.12, marginBottom: 10 }}>✦</div><div style={{ color: "var(--nf-text-muted)", fontSize: 14, fontFamily: "var(--nf-font-display)", fontStyle: "italic" }}>Add characters to see their connections</div></div>)}
+        </div>
+        {/* Relationship tooltip on hover */}
+        {hoveredRel && (() => { const r = procRels.find(x => x.id === hoveredRel); if (!r) return null; const c1 = charMap[r.char1]; const c2 = charMap[r.char2]; if (!c1 || !c2) return null; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c1.name}</span><span style={{ color: tColor(r.tension), fontSize: 16 }}>↔</span><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c2.name}</span></div>{r.dynamic && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{r.dynamic}</div>}<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{r.status && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: `1px solid ${tColor(r.tension)}`, borderRadius: 3, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}{r.tensionType && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.tensionType}</span>}</div>{r.char1Perspective && <div style={{ marginTop: 6, fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic", lineHeight: 1.4 }}>{c1.name}'s view: {r.char1Perspective.slice(0, 100)}{r.char1Perspective.length > 100 ? "…" : ""}</div>}{r.char2Perspective && <div style={{ marginTop: 3, fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic", lineHeight: 1.4 }}>{c2.name}'s view: {r.char2Perspective.slice(0, 100)}{r.char2Perspective.length > 100 ? "…" : ""}</div>}</div>); })()}
+        {/* Selected node detail panel */}
+        {selectedNode && (() => { const ch = charMap[selectedNode]; if (!ch) return null; const nodeRels = procRels.filter(r => r.char1 === selectedNode || r.char2 === selectedNode); return (<div className="nf-rel-web-tip" style={{ top: 80, left: 20, transform: "none", maxWidth: 280 }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>{ch.image && <img src={ch.image} alt={ch.name} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} />}<div><div style={{ fontWeight: 700, fontSize: 13, color: "var(--nf-text)" }}>{ch.name}</div><div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{ch.role}</div></div></div>{ch.personality && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginBottom: 6, lineHeight: 1.4 }}>{ch.personality.slice(0, 120)}{ch.personality.length > 120 ? "…" : ""}</div>}{nodeRels.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Connections ({nodeRels.length})</div>{nodeRels.map(r => { const otherId = r.char1 === selectedNode ? r.char2 : r.char1; const other = charMap[otherId]; return (<div key={r.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 10.5 }}><span style={{ width: 8, height: 2, background: tColor(r.tension), borderRadius: 1, flexShrink: 0 }} /><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span>{r.status && <span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.7 }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 8, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}</div>); })}</div>)}<div style={{ fontSize: 9, color: "var(--nf-text-muted)", opacity: 0.5, marginTop: 6, fontStyle: "italic" }}>Click again to deselect</div></div>); })()}
+      </div>
+    </div>
+  );
+});
+
 // ─── PDF EXPORT ───
 const generatePdfHtml = (project, mode, chapterIdx) => {
   const chapters = project?.chapters || [];
@@ -3762,6 +3961,7 @@ export default function NovelForge() {
   const [charSuggestions, setCharSuggestions] = useState(null);
   const [whiteRoom, setWhiteRoom] = useState(null); // { char1Id, char2Id, tension, result, isGenerating }
   const [showTimeline, setShowTimeline] = useState(false);
+  const [showRelWeb, setShowRelWeb] = useState(false);
   const [cleanView, setCleanView] = useState(false); // Full-screen reader mode
   const [pdfExportMode, setPdfExportMode] = useState(null);
   const [imagePromptData, setImagePromptData] = useState(null); // { prompt, mentionedChars, primaryWorld, worldRefImages }
@@ -3862,26 +4062,26 @@ export default function NovelForge() {
 			  characters: chars,
               relationships,
               plotOutline,
-              worldBuilding: (proj.worldBuilding || []).map(w => ({
+              worldBuilding: (proj.worldBuilding || []).map(w => {
+              const base = {
                 keywords: "",
                 introducedInChapter: 0,
-                // Migrate imagePrompts from array to object
-                imagePrompts: Array.isArray(w.imagePrompts)
-                  ? { wall_a: w.imagePrompts[0] || "", wall_b: w.imagePrompts[1] || "", wall_c: w.imagePrompts[2] || "", wall_d: w.imagePrompts[3] || "" }
-                  : (w.imagePrompts || {}),
-                // Migrate referenceImages from array to object
-                referenceImages: Array.isArray(w.referenceImages)
-                  ? { wall_a: w.referenceImages[0] || "", wall_b: w.referenceImages[1] || "", wall_c: w.referenceImages[2] || "", wall_d: w.referenceImages[3] || "" }
-                  : (w.referenceImages || {}),
                 ...w,
-                // Re-apply after spread to ensure migration wins
-                imagePrompts: Array.isArray(w.imagePrompts)
-                  ? { wall_a: w.imagePrompts[0] || "", wall_b: w.imagePrompts[1] || "", wall_c: w.imagePrompts[2] || "", wall_d: w.imagePrompts[3] || "" }
-                  : (w.imagePrompts || {}),
-                referenceImages: Array.isArray(w.referenceImages)
-                  ? { wall_a: w.referenceImages[0] || "", wall_b: w.referenceImages[1] || "", wall_c: w.referenceImages[2] || "", wall_d: w.referenceImages[3] || "" }
-                  : (w.referenceImages || {}),
-              })),
+              };
+              // Migrate imagePrompts from array to object (wins over spread)
+              if (Array.isArray(w.imagePrompts)) {
+                base.imagePrompts = { wall_a: w.imagePrompts[0] || "", wall_b: w.imagePrompts[1] || "", wall_c: w.imagePrompts[2] || "", wall_d: w.imagePrompts[3] || "" };
+              } else if (!base.imagePrompts) {
+                base.imagePrompts = {};
+              }
+              // Migrate referenceImages from array to object (wins over spread)
+              if (Array.isArray(w.referenceImages)) {
+                base.referenceImages = { wall_a: w.referenceImages[0] || "", wall_b: w.referenceImages[1] || "", wall_c: w.referenceImages[2] || "", wall_d: w.referenceImages[3] || "" };
+              } else if (!base.referenceImages) {
+                base.referenceImages = {};
+              }
+              return base;
+            }),
               continuityNotes: proj.continuityNotes || "",
               wordGoal: proj.wordGoal || 0,
             };
@@ -6460,7 +6660,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 
       {/* White Room quick access */}
       <div style={{ padding: "4px 10px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "flex-end" }}>
-        <button onClick={() => setWhiteRoom({})} className="nf-btn-micro" title="Open the White Room — non-canon character voice testing">
+          <button onClick={() => setShowRelWeb(true)} className="nf-btn-micro" title="Visualize relationship web">
+            ◈ Web
+          </button>
+		<button onClick={() => setWhiteRoom({})} className="nf-btn-micro" title="Open the White Room — non-canon character voice testing">
           ◇ White Room
         </button>
       </div>
@@ -6690,8 +6893,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             </select>
             <button onClick={handleUndo} disabled={!undoState.past.length} className="nf-btn-icon-sm" title="Undo (Ctrl+Z)" aria-label="Undo"><Icons.Undo /></button>
             <button onClick={handleRedo} disabled={!undoState.future.length} className="nf-btn-icon-sm" title="Redo (Ctrl+Shift+Z)" aria-label="Redo"><Icons.Redo /></button>
-            <Tooltip text={isSummarizing ? "Summarizing..." : "Auto-summarize chapter"}>
-              <button onClick={() => autoSummarizeChapter(activeChapterIdx)} disabled={isSummarizing} className="nf-btn-icon-sm" aria-label="Summarize chapter">
+            <Tooltip text={isSummarizing ? "Summarizing..." : activeChapter?.summary ? "Re-summarize chapter" : "Auto-summarize chapter"}>
+              <button onClick={() => autoSummarizeChapter(activeChapterIdx)} disabled={isSummarizing} className="nf-btn-icon-sm"
+                style={activeChapter?.summary ? { borderColor: "var(--nf-success)", color: "var(--nf-success)" } : undefined}
+                aria-label="Summarize chapter">
                 {isSummarizing ? <Spinner /> : <Icons.Brain />}
                 {isSummarizing && <span style={{ fontSize: 10 }}>Summarizing...</span>}
               </button>
@@ -7548,6 +7753,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
             <h2 className="nf-page-title">Relationships</h2>
             <div style={{ display: "flex", gap: 6 }}>
+              <button onClick={() => setShowRelWeb(true)} className="nf-btn-icon-sm" style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}>
+                ◈ Web
+              </button>
               {rels.length > 1 && (
                 <button onClick={() => setExpandedRelIds(prev => prev.size === rels.length ? new Set() : new Set(rels.map(r => r.id)))} className="nf-btn-micro">
                   {expandedRelIds.size === rels.length ? "Collapse All" : "Expand All"}
@@ -8539,7 +8747,24 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         {whiteRoom && <WhiteRoomModal char1={whiteRoom.char1Id} char2={whiteRoom.char2Id} tension={whiteRoom.tension} result={whiteRoom.result} isGenerating={whiteRoom.isGenerating} onGenerate={handleWhiteRoomGenerate} onClose={() => setWhiteRoom(null)} settings={settings} characters={project?.characters} />}
         {showTimeline && <TimelineView plotOutline={project?.plotOutline} chapters={project?.chapters} characters={project?.characters} onClose={() => setShowTimeline(false)} />}
         {cleanView && <CleanViewModal project={project} startChapter={activeChapterIdx} onClose={() => setCleanView(false)} />}
-        {pdfExportMode === "menu" && (
+        {showRelWeb && (
+          <RelationshipWebModal
+            characters={project?.characters || []}
+            relationships={project?.relationships || []}
+            povCharId={(() => {
+              const chars = project?.characters || [];
+              const curChapter = project?.chapters?.[activeChapterIdx];
+              const curPlotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === activeChapterIdx + 1);
+              if (curPlotEntry?.povCharacterId) { const m = chars.find(c => c.id === curPlotEntry.povCharacterId); if (m) return m.id; }
+              const povStr = curChapter?.pov || project?.pov || "";
+              const povName = povStr.replace(/^(Third person limited|Third person deep|Third person omniscient|First person|First person present tense|Second person|Multiple POV[^-—:]*|Dual POV[^-—:]*)\s*[-—:]\s*/i, "").trim();
+              if (povName) { const m = chars.find(c => c.name && c.name.toLowerCase() === povName.toLowerCase()); if (m) return m.id; }
+              const p = chars.find(c => c.role === "protagonist"); return p?.id || null;
+            })()}
+            onClose={() => setShowRelWeb(false)}
+          />
+        )}
+		{pdfExportMode === "menu" && (
           <div style={{ position: "fixed", inset: 0, zIndex: 9998, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.12s ease-out" }} onClick={() => setPdfExportMode(null)}>
             <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: 28, maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)", animation: "nf-pop 0.2s ease-out" }}>
               <div style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, marginBottom: 6, color: "var(--nf-text)", letterSpacing: "0.02em" }}>Export PDF</div>
@@ -8727,7 +8952,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                         if (e.key === "Enter" && e.target.value.trim()) {
                           const url = e.target.value.trim();
                           const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                          const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+                          const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${url}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
                           const el = editorRef.current;
                           if (el) { el.innerHTML += imgHtml; syncEditorContent(); lastSyncedContentRef.current = el.innerHTML; }
                           showToast("Image inserted into chapter", "success");

@@ -2701,6 +2701,21 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
                             {!chContent && <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontStyle: "italic" }}>no chapter yet</span>}
                           </div>
                         </div>
+						{(() => {
+						  const html = (chapters || [])[chIdx]?.content || "";
+						  if (!html) return null;
+						  const imgs = [...html.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]);
+						  if (!imgs.length) return null;
+						  return (
+							<div style={{ display: "flex", gap: 6, marginTop: 8, overflowX: "auto" }}>
+							  {imgs.map((src, ii) => (
+								<img key={ii} src={src}
+								  style={{ width: 140, height: 100, objectFit: "cover", borderRadius: 2,
+									border: "1px solid var(--nf-border)", flexShrink: 0 }} />
+							  ))}
+							</div>
+						  );
+						})()}
                         </div>
                       );
                     })}

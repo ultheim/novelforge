@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useReducer, memo, createContext, useContext } from "react";
+import { createPortal } from "react-dom";
 
 // ─── CONSTANTS ───
 const MAX_UNDO = 60;
@@ -1378,11 +1379,38 @@ const ContextEngine = {
         if (!isFarFuture) {
           if (pl.summary) line += ` — ${pl.summary}`;
           // D1: Include beats for recent past chapters too (not just current/future)
-          if (pl.beats && (isCurrent || isNearby)) line += ` | Beats: ${pl.beats}`;
-        }
+          if (pl.beats && (isCurrent || isNearby)) {
+            const beats = Array.isArray(pl.beats) ? pl.beats : [];
+            if (beats.length > 0) {
+              // Hide future beats when cursor is inside a beat
+              const visibleBeats = (isCurrent && opts.activeBeatId)
+                ? beats.filter(b => {
+                    const idx = beats.findIndex(x => x.id === b.id);
+                    const activeIdx = beats.findIndex(x => x.id === opts.activeBeatId);
+                    return idx <= activeIdx;
+                  })
+                : beats;
+
+              if (visibleBeats.length > 0) {
+                const beatsStr = visibleBeats.map((b, i) => {
+                  const text = `${b.title || `Beat ${i+1}`}: ${b.description || ""}`;
+                  if (isCurrent && opts.activeBeatId && b.id === opts.activeBeatId) {
+                    return `◀ YOU ARE HERE ${text}`;
+                  }
+                  return text;
+                }).join("; ");
+                line += ` | Beats: ${beatsStr}`;
+                if (isCurrent && !visibleBeats.some(b => b.id === opts.activeBeatId)) {
+                  line += ` | ◀ YOU ARE HERE`;
+                }
+              }
+            }
+          }
+		}
         if (pl.sceneType) line += ` [${pl.sceneType}]`;
-        if (isCurrent) line += ` ◀ YOU ARE HERE`;
-        if (tokensUsed + this._estimateLen(line) < budgetPlot) {
+        const isFutureCh = chNum > currentChNum;
+        const shouldSkip = isFutureCh && opts.activeBeatId;
+        if (!shouldSkip && tokensUsed + this._estimateLen(line) < budgetPlot) {
           plotParts.push(line);
           tokensUsed += this._estimateLen(line);
         }
@@ -1538,7 +1566,7 @@ const ContextEngine = {
   },
 
   // REWRITTEN: Mode-specific context assembly — E11/E16/F3/F6/F8/F9/D6/I3
-  buildForMode(project, chapterIdx, sceneNotes, mode, selectedText, contextWindow) {
+  buildForMode(project, chapterIdx, sceneNotes, mode, selectedText, contextWindow, opts = {}) {
     const sections = [];
 
     // I3: Scale budgets based on model context window
@@ -1552,36 +1580,36 @@ const ContextEngine = {
 
     switch (mode) {
       case "summarize": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(30000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(30000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(60000 * scale), historyBudget: Math.round(15000 * scale) }));
         break;
       }
       case "brainstorm": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(45000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(45000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(40000 * scale), historyBudget: Math.round(20000 * scale) }));
         if (sceneNotes) sections.push(this.buildSceneContext(sceneNotes));
         break;
       }
       case "scene": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(50000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(50000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(30000 * scale), historyBudget: Math.round(20000 * scale) }));
         if (sceneNotes) sections.push(this.buildSceneContext(sceneNotes));
         break;
       }
       case "dialogue": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(55000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(55000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(30000 * scale), historyBudget: Math.round(15000 * scale) }));
         if (sceneNotes) sections.push(this.buildSceneContext(sceneNotes));
         break;
       }
       case "continue": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(40000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(40000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(50000 * scale), historyBudget: Math.round(20000 * scale) }));
         if (sceneNotes) sections.push(this.buildSceneContext(sceneNotes));
         break;
       }
       case "rewrite": {
-        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(35000 * scale) }));
+        sections.push(this.buildFullContext(project, chapterIdx, { tokenBudget: Math.round(35000 * scale), activeBeatId: opts.activeBeatId }));
         sections.push(this.buildChapterContext(project, chapterIdx, { currentChapterBudget: Math.round(35000 * scale), historyBudget: Math.round(15000 * scale) }));
         if (selectedText && project.chapters?.[chapterIdx]?.content) {
           const plain = _htmlToPlain(project.chapters[chapterIdx].content);
@@ -3218,6 +3246,89 @@ const _attachImageEvents = (fig, editorEl) => {
   dragSource.addEventListener('mousedown', onMouseDown);
 };
 
+const _attachBeatDragEvents = (markerEl, editorEl) => {
+  if (!markerEl) return;
+  const label = markerEl.querySelector('.nf-beat-title-el');
+  const handle = label || markerEl;
+  let isDragging = false;
+  let clone = null;
+
+  handle.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    isDragging = true;
+    markerEl.classList.add('dragging');
+
+    clone = markerEl.cloneNode(true);
+    clone.style.cssText = 'position:fixed;pointer-events:none;z-index:10000;opacity:0.8;width:'
+      + markerEl.offsetWidth + 'px;transition:none;';
+    document.body.appendChild(clone);
+
+    const moveClone = (ev) => {
+      if (clone) {
+        clone.style.left = (ev.clientX - markerEl.offsetWidth / 2) + 'px';
+        clone.style.top = (ev.clientY - 10) + 'px';
+      }
+    };
+    moveClone(e);
+
+    const onMove = (ev) => {
+      if (!isDragging) return;
+      moveClone(ev);
+    };
+
+    const onUp = (ev) => {
+      isDragging = false;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (clone) { clone.remove(); clone = null; }
+      markerEl.classList.remove('dragging');
+
+      // Find caret position at drop point
+      const range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      if (!range || !editorEl.contains(range.startContainer)) return;
+
+      // Don't drop inside another marker
+      if (range.startContainer.parentElement?.closest('.nf-beat-marker')) return;
+      if (range.startContainer.nodeType === 1 && range.startContainer.closest('.nf-beat-marker')) return;
+
+      // Move marker to new position
+      markerEl.remove();
+      range.insertNode(markerEl);
+
+      // Trigger save
+      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+};
+
+// Detect which beat the cursor/caret is currently inside
+// Detect which beat the cursor/caret is currently inside
+const detectCursorBeat = (el) => {
+  if (!el) return null;
+  const markers = el.querySelectorAll('.nf-beat-marker');
+  if (!markers.length) return null;
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return null;
+  const cursorNode = sel.anchorNode;
+  if (!el.contains(cursorNode)) return null;
+
+  // Walk in reverse — last marker BEFORE cursor wins
+  let activeBeatId = null;
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const marker = markers[i];
+    const pos = marker.compareDocumentPosition(cursorNode);
+    if (pos & (Node.DOCUMENT_POSITION_FOLLOWING | Node.DOCUMENT_POSITION_CONTAINED_BY)) {
+      activeBeatId = marker.getAttribute('data-beat-id');
+      break;
+    }
+  }
+  return activeBeatId;
+};
+
 // ─── VISUAL NOVEL IMAGE PROMPT GENERATOR ───
 // Follows the 7-section structure: Character → Clothing → (skip) → Activity → Backdrop → Time → Camera
 // Plus hardcoded suffix for candid realism
@@ -3920,6 +4031,78 @@ RULES:
   );
 });
 
+// ─── BEAT TOOLTIP ───
+const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
+  const [hoveredBeat, setHoveredBeat] = useState(null);
+  const [beatPos, setBeatPos] = useState(null);
+
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    const onOver = (e) => {
+      const marker = e.target.closest('.nf-beat-marker');
+      if (!marker) { setHoveredBeat(null); return; }
+      const rect = marker.getBoundingClientRect();
+      setHoveredBeat({
+        title: marker.getAttribute('data-beat-title') || '',
+        desc: marker.getAttribute('data-beat-desc') || '',
+        id: marker.getAttribute('data-beat-id'),
+      });
+      setBeatPos({ top: rect.bottom + 6, left: Math.max(10, Math.min(rect.left, window.innerWidth - 320)) });
+    };
+
+    const onOut = (e) => {
+      if (!e.relatedTarget || !e.relatedTarget.closest?.('.nf-beat-marker')) {
+        setHoveredBeat(null);
+      }
+    };
+
+    el.addEventListener('mouseover', onOver);
+    el.addEventListener('mouseout', onOut);
+    return () => {
+      el.removeEventListener('mouseover', onOver);
+      el.removeEventListener('mouseout', onOut);
+    };
+  }, [editorRef, chapterIdx]);
+
+  if (!hoveredBeat || !beatPos) return null;
+
+  return createPortal(
+    <div style={{
+      position: "fixed",
+      top: beatPos.top,
+      left: beatPos.left,
+      zIndex: 9999,
+      background: "var(--nf-dialog-bg)",
+      border: "1px solid var(--nf-border)",
+      borderRadius: 2,
+      padding: "10px 14px",
+      maxWidth: 300,
+      boxShadow: "var(--nf-shadow-lg)",
+      pointerEvents: "none",
+      animation: "nf-fadeIn 0.1s ease-out",
+    }}>
+      <div style={{
+        fontSize: 10,
+        fontWeight: 700,
+        color: "var(--nf-accent)",
+        textTransform: "uppercase",
+        letterSpacing: "0.08em",
+        marginBottom: 4,
+      }}>{hoveredBeat.title}</div>
+      {hoveredBeat.desc && (
+        <div style={{
+          fontSize: 12,
+          color: "var(--nf-text-dim)",
+          lineHeight: 1.5,
+        }}>{hoveredBeat.desc}</div>
+      )}
+    </div>,
+    document.body
+  );
+});
+
 
 // ════════════════════════════════════════
 // ─── MAIN APP ───
@@ -3977,6 +4160,7 @@ export default function NovelForge() {
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftsChapterFilter, setDraftsChapterFilter] = useState(false);
   const [viewingDraftId, setViewingDraftId] = useState(null);
+  const [activeBeatId, setActiveBeatId] = useState(null); // Tracks which beat cursor is in
   
   // ─── GOOGLE DRIVE STATE ───
   const [gdriveClientId, setGdriveClientId] = useState("");
@@ -4057,7 +4241,6 @@ export default function NovelForge() {
             const plotOutline = (proj.plotOutline || []).map(pl => {
               let charIds = pl.characters;
               if (typeof charIds === "string" && charIds.trim()) {
-                // Convert comma-separated names to ID array
                 charIds = charIds.split(",").map(n => n.trim()).filter(Boolean).map(name => {
                   const match = chars.find(c => c.name && c.name.toLowerCase() === name.toLowerCase());
                   return match ? match.id : null;
@@ -4065,7 +4248,18 @@ export default function NovelForge() {
               } else if (!Array.isArray(charIds)) {
                 charIds = [];
               }
-              return { ...pl, characters: charIds };
+              // Migrate beats from string to array format
+              let beats = pl.beats;
+              if (typeof beats === "string" && beats.trim()) {
+                beats = beats.split('\n').filter(b => b.trim()).map((b, i) => ({
+                  id: uid(),
+                  title: `Beat ${i + 1}`,
+                  description: b.trim(),
+                }));
+              } else if (!Array.isArray(beats)) {
+                beats = [];
+              }
+              return { ...pl, characters: charIds, beats };
             });
             return {
               ...proj,
@@ -4098,7 +4292,37 @@ export default function NovelForge() {
 			  drafts: proj.drafts || [],
             };
           });
-          setProjects(migrated);
+          // ── Fix plot entry ↔ chapter number mismatches ──
+          const fixPlotAlignment = (projs) => {
+            return projs.map(proj => {
+              const chapters = proj.chapters || [];
+              const plotOutline = [...(proj.plotOutline || [])];
+              if (plotOutline.length === 0 || chapters.length === 0) return proj;
+
+              // If no plot entry has chapter === 1, reassign by array position
+              const hasChapterOne = plotOutline.some(pl => (pl.chapter || 0) === 1);
+              if (!hasChapterOne) {
+                plotOutline.forEach((pl, i) => { pl.chapter = i + 1; });
+              }
+
+              // Deduplicate: if two entries share the same chapter number, bump the later one
+              const seen = new Set();
+              plotOutline.forEach(pl => {
+                const ch = pl.chapter || 0;
+                if (seen.has(ch)) {
+                  let next = ch;
+                  while (seen.has(next)) next++;
+                  pl.chapter = next;
+                }
+                seen.add(pl.chapter);
+              });
+
+              return { ...proj, plotOutline };
+            });
+          };
+
+          const aligned = fixPlotAlignment(migrated); 
+		  setProjects(aligned);
           setActiveProjectId(migrated[0].id);
         }
         if (s && typeof s === "object") {
@@ -4253,7 +4477,7 @@ export default function NovelForge() {
     const currentSceneNotes = project.chapters?.[activeChapterIdx]?.sceneNotes || "";
     // H1: Use currently selected genMode instead of hardcoded "continue"
     const previewMode = genMode || "continue";
-    const contextPayload = ContextEngine.buildForMode(project, activeChapterIdx, currentSceneNotes, previewMode, null, settings.modelContextWindow);
+    const contextPayload = ContextEngine.buildForMode(project, activeChapterIdx, currentSceneNotes, previewMode, null, settings.modelContextWindow, { activeBeatId });
     const contextTokens = estimateTokens(contextPayload);
 
     // H2: Estimate system prompt + chat history overhead
@@ -4421,10 +4645,12 @@ export default function NovelForge() {
         if (text.length > 0) {
           setSelectedText(text);
           try { setSelectionRange({ sel: sel.getRangeAt(0).cloneRange() }); } catch { setSelectionRange(null); }
+        } else {
+          // Clear stale selection — after 150ms debounce, the DOM selection
+          // is always stable and reflects reality. No re-render can corrupt it.
+          setSelectedText("");
+          setSelectionRange(null);
         }
-        // Don't clear selectedText on empty selection — it may be temporarily
-        // empty during re-renders triggered by onBlur/syncEditorContent.
-        // Only clear it explicitly: on chapter switch, mode switch, or new selection.
       }
     }, 150);
   }, []);
@@ -4459,9 +4685,11 @@ export default function NovelForge() {
     const el = editorRef.current;
     if (!el) return;
     const html = el.innerHTML;
-    // FIX 3: Update sync ref before state to prevent cursor jump
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
+    // Track which beat the cursor is in
+    const beatId = detectCursorBeat(el);
+    if (beatId) setActiveBeatId(beatId);
   }, [activeChapterIdx, updateChapter, debouncedSyncEditor]);
 
   // Cleanup debounced sync on unmount
@@ -4488,6 +4716,7 @@ export default function NovelForge() {
       lastSyncedContentRef.current = content;
       setTimeout(() => {
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
+		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
       }, 100);
       const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code)\b/i.test(content);
       if (looksLikeHtml) {
@@ -4645,9 +4874,9 @@ ${craftFocus}
         const chapterContent = project?.chapters?.[activeChapterIdx]?.content || "";
         const isEmpty = !chapterContent || wordCount(chapterContent) < 5;
         if (isEmpty) {
-          return `This chapter is empty. Write the opening of this chapter — establish the scene, set the mood, and ground the reader in a specific physical space and moment.${sceneTypeNote} (Tip: Use Scene mode with scene direction notes for more precise control of new scenes.)`;
+          return `Write the beats the author described — establish the scene, set the mood, and ground the reader in a specific physical space and moment.${sceneTypeNote} (Tip: Use Scene mode with scene direction notes for more precise control of new scenes.)`;
         }
-        return `Continue writing from exactly where the text leaves off. Match style, distance, register. Do not summarize or skip — write the next moment.${sceneTypeNote}`;
+        return `Continue writing the beats the author requested or described from exactly where the text leaves off. Match style, distance, register. Do not summarize or skip — write the next moment.${sceneTypeNote}`;
       }
       case "scene": {
         const hasSceneDir = !!(project?.chapters?.[activeChapterIdx]?.sceneNotes);
@@ -4657,7 +4886,7 @@ ${craftFocus}
         return `Write the next scene. Since no scene direction was provided, use the plot outline and chapter context to determine what should happen next. Ground in physical space with sensory detail. Let character dynamics drive pacing.${sceneTypeNote} (Tip: Add scene direction notes in the Write tab for more precise control.)`;
       }
       case "dialogue":
-        return `Write a dialogue-driven passage. Each character must have a distinct voice matching their speech pattern. Include action beats, body language, and internal reactions between lines. Advance both plot and emotional dynamics simultaneously.${sceneTypeNote}`;
+        return `Write a dialogue-driven passage from the beats the author described. Each character must have a distinct voice matching their speech pattern. Include action beats, body language, and internal reactions between lines. Advance both plot and emotional dynamics simultaneously.${sceneTypeNote}`;
       case "rewrite":
         return "Rewrite the selected passage. Preserve all plot points and story beats but elevate the prose: sharper imagery, better rhythm, deeper character interiority. The rewrite must flow seamlessly with the text before and after the selection.";
       case "brainstorm":
@@ -4765,7 +4994,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
           contextualUserMsg += `\n\n<text_to_rewrite>\n${selectedText}\n</text_to_rewrite>`;
         } else if (genMode === "continue") {
           // FIX 2.1: Override the continue prompt — the selected text IS the continuation point
-          contextualUserMsg = `[MODE: CONTINUE]\nContinue writing from EXACTLY where this selected passage ends. Ignore the chapter ending shown in context — the author has selected a specific mid-chapter point to continue from. Match style, distance, register. Do not repeat the selected text.\n\n<continue_from_here>\n${selectedText}\n</continue_from_here>`;
+          contextualUserMsg = `[MODE: CONTINUE]\nContinue writing from EXACTLY where this selected passage ends. Match style, distance, register. Do not repeat the selected text.\n\n<continue_from_here>\n${selectedText}\n</continue_from_here>`;
         } else if (genMode === "brainstorm") {
           contextualUserMsg += `\n\n<selected_reference>\nThe author wants brainstorm ideas branching from this passage:\n${selectedText}\n</selected_reference>`;
         } else if (genMode === "dialogue") {
@@ -4888,19 +5117,43 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     return html.split(/\n\n+/).map(p => `<p>${p.replace(/\n/g, '<br/>')}</p>`).join('');
   }, []);
 
-  const appendToChapter = useCallback((text) => {
-    if (!activeChapter) return;
-    pushUndo();
-    const el = editorRef.current;
-    if (el) {
-      el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
-      syncEditorContent();
-      lastSyncedContentRef.current = el.innerHTML; // B6: Keep in sync
+  // Insert a beat marker line into the editor
+const insertBeatMarker = useCallback((beatId, beatTitle, beatDescription) => {
+  const el = editorRef.current;
+  if (!el) return;
+  const desc = (beatDescription || "").slice(0, 200).replace(/"/g, '&quot;').replace(/</g, '&lt;');
+  const title = (beatTitle || "Beat").replace(/"/g, '&quot;');
+  const marker = `<div class="nf-beat-marker" contenteditable="false" data-beat-id="${beatId}" data-beat-title="${title}" data-beat-desc="${desc}"></div>`;
+  el.innerHTML += marker;
+  lastSyncedContentRef.current = el.innerHTML;
+  updateChapter(activeChapterIdx, { content: el.innerHTML });
+}, [activeChapterIdx, updateChapter]);
+
+const appendToChapter = useCallback((text) => {
+  if (!activeChapter) return;
+  pushUndo();
+  const el = editorRef.current;
+  if (el) {
+    // If there's an active beat, insert after the active beat marker
+    if (activeBeatId) {
+      const activeMarker = el.querySelector(`.nf-beat-marker[data-beat-id="${activeBeatId}"]`);
+      if (activeMarker) {
+        const contentNode = document.createElement('div');
+        contentNode.innerHTML = "<br/><br/>" + _markdownToEditorHtml(text);
+        activeMarker.after(contentNode);
+      } else {
+        el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
+      }
     } else {
-      updateChapter(activeChapterIdx, { content: (activeChapter.content || "") + "\n\n" + text });
+      el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
     }
-    showToast("Appended", "success");
-  }, [activeChapter, activeChapterIdx, updateChapter, pushUndo, showToast, syncEditorContent, _markdownToEditorHtml]);
+    syncEditorContent();
+    lastSyncedContentRef.current = el.innerHTML;
+  } else {
+    updateChapter(activeChapterIdx, { content: (activeChapter.content || "") + "\n\n" + text });
+  }
+  showToast("Appended", "success");
+}, [activeChapter, activeChapterIdx, updateChapter, pushUndo, showToast, syncEditorContent, _markdownToEditorHtml, activeBeatId]);
 
   // B8: insertAtCursor still uses execCommand (no better cross-browser alternative for contentEditable)
   // but we wrap it safely and sync after
@@ -5794,6 +6047,47 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       showToast(`Failed: ${_formatApiError(e)}`, "error");
     }
   }, [project, activeChapterIdx, settings.apiKey, callOpenRouter, updateChapter, showToast]);
+  const handleLinkPlotEntry = useCallback((plotId) => {
+    if (!plotId) return;
+
+    if (plotId === "__new__") {
+      const chNum = activeChapterIdx + 1;
+      const title = activeChapter?.title || `Chapter ${chNum}`;
+      const newPlot = {
+        id: uid(), chapter: chNum, title, summary: "",
+        beats: [], sceneType: "narrative", pov: "",
+        characters: [], date: "", povCharacterId: "",
+      };
+      updateProject({
+        plotOutline: [...(project?.plotOutline || []), newPlot],
+      });
+      showToast(`Created plot entry for Ch${chNum}`, "success");
+      return;
+    }
+
+    const currentChNum = activeChapterIdx + 1;
+    const outline = project?.plotOutline || [];
+    const currentLinked = outline.find(pl => (pl.chapter || 0) === currentChNum && pl.id !== plotId);
+
+    const updated = outline.map(r => {
+      if (r.id === plotId) {
+        return { ...r, chapter: currentChNum, title: r.title || activeChapter?.title || `Chapter ${currentChNum}` };
+      }
+      if (currentLinked && r.id === currentLinked.id) {
+        // Bump conflicting entry to next available chapter number
+        const used = new Set(updated.map(e => e.chapter));
+        let next = currentChNum + 1;
+        while (used.has(next)) next++;
+        showToast(`"${currentLinked.title}" moved to Ch${next}`, "info");
+        return { ...r, chapter: next };
+      }
+      return r;
+    });
+
+    updateProject({ plotOutline: updated });
+    const entry = outline.find(r => r.id === plotId);
+    if (entry) showToast(`Linked "${entry.title}" to Ch${currentChNum}`, "success");
+  }, [activeChapterIdx, activeChapter, project, updateProject, showToast]);
   
   const handleDeactivateChapter = useCallback(() => {
     const ch = project?.chapters?.[activeChapterIdx];
@@ -6548,7 +6842,19 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   // ─── AI PANEL ───
   const renderAiPanel = (asMobileOverlay = false) => (
     <div className={asMobileOverlay ? "nf-ai-mobile-overlay" : "nf-ai-panel"}>
-      {asMobileOverlay && (
+      <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--nf-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ color: "var(--nf-accent-2)" }}><Icons.Wand /></span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>AI</span>
+          {chatMessages.length > 0 && <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>({chatMessages.length})</span>}
+        </div>
+        {chatMessages.length > 0 && (
+          <button onClick={() => setChatMessages([])} className="nf-btn-micro">
+            <Icons.Trash /> Clear
+          </button>
+        )}
+      </div>
+	  {asMobileOverlay && (
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 12px", borderBottom: "1px solid var(--nf-border)" }}>
           <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>AI Assistant</span>
           <button onClick={() => setShowAiMobile(false)} className="nf-btn-icon"><Icons.X /></button>
@@ -7132,19 +7438,82 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         })()}
         {!viewingDraftId && (
         <div className="nf-chapter-header">
-          <input value={activeChapter?.title || ""} onChange={e => {
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <input value={activeChapter?.title || ""} onChange={e => {
               const newTitle = e.target.value;
               updateChapter(activeChapterIdx, { title: newTitle });
               const chNum = activeChapterIdx + 1;
               const plotOutline = project?.plotOutline || [];
-              const plotIdx = plotOutline.findIndex(pl => (pl.chapter || 0) === chNum);
-              if (plotIdx >= 0) {
-                updateProject({ plotOutline: plotOutline.map((pl, i) => i === plotIdx ? { ...pl, title: newTitle } : pl) });
+              const linkedIdx = plotOutline.findIndex(pl => (pl.chapter || 0) === chNum);
+              if (linkedIdx >= 0) {
+                updateProject({
+                  plotOutline: plotOutline.map((pl, i) => i === linkedIdx ? { ...pl, title: newTitle } : pl),
+                });
               }
             }}
-            maxLength={120}
-            className="nf-chapter-title-input" placeholder="Chapter title..."
-            aria-label="Chapter title" />
+              maxLength={120}
+              className="nf-chapter-title-input" placeholder="Chapter title..."
+              aria-label="Chapter title" />
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, paddingLeft: 2 }}>
+              {(() => {
+                const chNum = activeChapterIdx + 1;
+                const outline = project?.plotOutline || [];
+                const linkedPlot = outline.find(pl => (pl.chapter || 0) === chNum);
+                const unlinked = outline.filter(pl => (pl.chapter || 0) !== chNum);
+
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{
+                      fontSize: 9, fontWeight: 600,
+                      color: linkedPlot ? "var(--nf-success)" : "var(--nf-text-muted)",
+                      letterSpacing: "0.08em", textTransform: "uppercase",
+                      fontFamily: "var(--nf-font-body)", flexShrink: 0,
+                    }}>
+                      Plot{linkedPlot ? " ◈" : ""}
+                    </span>
+                    <select
+                      value={linkedPlot?.id || ""}
+                      onChange={e => {
+                        const val = e.target.value;
+                        if (val === "__new__") {
+                          handleLinkPlotEntry("__new__");
+                        } else if (val && val !== linkedPlot?.id) {
+                          handleLinkPlotEntry(val);
+                        }
+                      }}
+                      className="nf-select"
+                      style={{
+                        width: "auto", minWidth: 140, maxWidth: 300,
+                        padding: "2px 6px", fontSize: 10,
+                        height: 22, lineHeight: "16px",
+                        borderColor: linkedPlot ? "var(--nf-success)" : "var(--nf-border)",
+                        background: linkedPlot ? "var(--nf-success-bg)" : "var(--nf-bg-surface)",
+                      }}
+                      aria-label="Link to plot entry"
+                    >
+                      {linkedPlot ? (
+                        <option value={linkedPlot.id}>
+                          ✓ Ch{chNum}: {linkedPlot.title || "Untitled"}
+                        </option>
+                      ) : (
+                        <option value="">— No plot entry —</option>
+                      )}
+                      {unlinked.length > 0 && (
+                        <optgroup label="Link to other entry">
+                          {unlinked.map(pl => (
+                            <option key={pl.id} value={pl.id}>
+                              {pl.title || "Untitled"} ({(pl.chapter || 0) > 0 ? `Ch${pl.chapter}` : "unlinked"})
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      <option value="__new__">+ Create new plot entry</option>
+                    </select>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
           <SaveIndicator status={saveStatus} fileLinked={fileLinked} />
           <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words` : ""}</span>
           <div className="nf-header-actions">
@@ -7177,6 +7546,125 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 disabled={wordCount(activeChapter?.content) < 1}
                 className="nf-btn-icon-sm" aria-label="Save as draft">
                 <Icons.Book /> Draft
+              </button>
+            </Tooltip>
+            <Tooltip text="Insert beat markers from Plot outline">
+              <button onClick={() => {
+                const plotEntry = (project?.plotOutline || []).find(
+                  pl => (pl.chapter || 0) === activeChapterIdx + 1
+                );
+                const beats = Array.isArray(plotEntry?.beats) ? plotEntry.beats : [];
+                if (!beats.length) {
+                  showToast("No beats in plot outline for this chapter", "error");
+                  return;
+                }
+                const el = editorRef.current;
+                if (!el) return;
+                pushUndo();
+                syncEditorContent();
+                const existingMarkers = el.querySelectorAll('.nf-beat-marker');
+                const existingBeatIds = new Set();
+                existingMarkers.forEach(m => existingBeatIds.add(m.getAttribute('data-beat-id')));
+                const newBeats = beats.filter(b => !existingBeatIds.has(b.id));
+                const oldBeats = beats.filter(b => existingBeatIds.has(b.id));
+                if (newBeats.length === 0) {
+                  showToast("All beats already placed — drag markers to reposition", "info");
+                  return;
+                }
+                existingMarkers.forEach(m => {
+                  const bid = m.getAttribute('data-beat-id');
+                  const beat = oldBeats.find(b => b.id === bid);
+                  if (beat) {
+                    m.setAttribute('data-beat-title', beat.title || `Beat`);
+                    m.setAttribute('data-beat-desc', (beat.description || "").slice(0, 2000));
+                  }
+                });
+                const allMarkersSorted = [...existingMarkers].sort((a, b) =>
+                  a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1
+                );
+                const textNodes = [];
+                const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, null, false);
+                let node, totalText = 0;
+                while (node = walker.nextNode()) {
+                  if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('nf-beat-marker')) continue;
+                  if (node.nodeType === Node.TEXT_NODE) {
+                    textNodes.push({ node, offset: totalText, len: node.length });
+                    totalText += node.length;
+                  }
+                }
+                const markerOffsets = allMarkersSorted.map(m => {
+                  let off = 0;
+                  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, null, false);
+                  let n;
+                  while (n = w.nextNode()) {
+                    if (n === m) break;
+                    if (n.nodeType === Node.ELEMENT_NODE && n.classList.contains('nf-beat-marker')) continue;
+                    if (n.nodeType === Node.TEXT_NODE) off += n.length;
+                  }
+                  return off;
+                });
+                const gaps = [];
+                let prev = 0;
+                for (const mo of markerOffsets) {
+                  if (mo > prev + 10) gaps.push([prev, mo]);
+                  prev = mo;
+                }
+                if (totalText > prev + 10) gaps.push([prev, totalText]);
+                if (textNodes.length === 0) {
+                  let prevNode = existingMarkers.length > 0
+                    ? allMarkersSorted[allMarkersSorted.length - 1] : null;
+                  newBeats.forEach((beat) => {
+                    const placeholder = document.createElement('p');
+                    placeholder.innerHTML = '<br>';
+                    placeholder.setAttribute('data-placeholder', 'Start writing this beat...');
+                    const marker = document.createElement('div');
+                    marker.className = 'nf-beat-marker';
+                    marker.contentEditable = 'false';
+                    marker.setAttribute('data-beat-id', beat.id);
+                    marker.setAttribute('data-beat-title', beat.title || `Beat`);
+                    marker.setAttribute('data-beat-desc', (beat.description || "").slice(0, 2000));
+                    if (prevNode) {
+                      prevNode.after(placeholder);
+                      placeholder.after(marker);
+                    } else {
+                      el.appendChild(placeholder);
+                      el.appendChild(marker);
+                    }
+                    prevNode = marker;
+                    _attachBeatDragEvents(marker, el);
+                  });
+                } else {
+                  newBeats.forEach((beat, idx) => {
+                    const gap = gaps[Math.min(idx, gaps.length - 1)];
+                    const targetOffset = gap ? gap[0] + Math.floor((gap[1] - gap[0]) * 0.5) : 0;
+                    let walked = 0, insertAfter = null;
+                    for (const tn of textNodes) {
+                      if (walked >= targetOffset) { insertAfter = tn.node.parentElement; break; }
+                      walked += tn.len;
+                    }
+                    if (!insertAfter) insertAfter = el.lastElementChild || el;
+                    if (insertAfter.closest('.nf-beat-marker')) {
+                      insertAfter = insertAfter.closest('.nf-beat-marker').nextElementSibling || el;
+                    }
+                    const marker = document.createElement('div');
+                    marker.className = 'nf-beat-marker';
+                    marker.contentEditable = 'false';
+                    marker.setAttribute('data-beat-id', beat.id);
+                    marker.setAttribute('data-beat-title', beat.title || `Beat`);
+                    marker.setAttribute('data-beat-desc', (beat.description || "").slice(0, 2000));
+                    insertAfter.parentNode.insertBefore(marker, insertAfter);
+                    _attachBeatDragEvents(marker, el);
+                  });
+                }
+                syncEditorContent();
+                showToast(
+                  oldBeats.length > 0
+                    ? `Added ${newBeats.length} new beat marker${newBeats.length > 1 ? "s" : ""} (${oldBeats.length} existing kept)`
+                    : `Inserted ${newBeats.length} beat markers`,
+                  "success"
+                );
+              }} className="nf-btn-icon-sm" disabled={!project?.plotOutline?.some(pl => (pl.chapter || 0) === activeChapterIdx + 1 && Array.isArray(pl.beats) && pl.beats.length > 0)}>
+                <Icons.List /> Beats
               </button>
             </Tooltip>
             <button onClick={() => setFocusMode(!focusMode)} className="nf-btn-icon-sm" title={focusMode ? "Exit focus (⌘⇧F)" : "Focus mode (⌘⇧F)"} aria-label="Toggle focus mode">
@@ -7242,7 +7730,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 			    const text = sel ? sel.toString().trim() : "";
 			    if (text.length > 0) pendingSelectionRef.current = text;
 			  }}
-              onKeyUp={handleEditorSelect}
+              onKeyUp={(e) => {
+			    handleEditorSelect(e);
+			    // Detect which beat cursor is in
+			    const beatId = detectCursorBeat(editorRef.current);
+			    if (beatId) setActiveBeatId(beatId);
+			  }}
               onKeyDown={(e) => {
                 // A8: Keyboard shortcuts for formatting
                 const mod = e.metaKey || e.ctrlKey;
@@ -7318,7 +7811,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 });
               }} />
           </div>
-          {!isMobile && !focusMode && renderAiPanel()}
+          <BeatTooltip editorRef={editorRef} chapterIdx={activeChapterIdx} />
+		  {!isMobile && !focusMode && renderAiPanel()}
         </div>
       </div>
       {isMobile && showAiMobile && renderAiPanel(true)}
@@ -7935,7 +8429,72 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     <Field label="Summary" value={p.summary} onChange={v => updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, summary: v } : pl) })} multiline placeholder="What happens..." small />
                     <Field label="Story Date" value={p.date || ""} onChange={v => updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, date: v } : pl) })} placeholder="e.g. March 15, 1847 or Year 3, Day 12" small />
                   </div>
-                  <Field label="Beats" value={p.beats} onChange={v => updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: v } : pl) })} multiline placeholder="Key beats..." small />
+                  {/* Beats — individual beat entries */}
+				  <div className="nf-field" style={{ marginTop: 4 }}>
+				    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+					  <label className="nf-label" style={{ marginBottom: 0 }}>Beats</label>
+					  <button onClick={() => {
+					    const currentBeats = Array.isArray(p.beats) ? p.beats : (p.beats ? String(p.beats).split('\n').filter(b => b.trim()).map((b, i) => ({ id: uid(), title: `Beat ${i + 1}`, description: b.trim() })) : []);
+					    const newBeat = { id: uid(), title: `Beat ${currentBeats.length + 1}`, description: "" };
+					    updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: [...currentBeats, newBeat] } : pl) });
+					  }} className="nf-btn-micro" style={{ fontSize: 9 }}>
+					    <Icons.Plus /> Add Beat
+					  </button>
+				    </div>
+			  	    {(Array.isArray(p.beats) ? p.beats : []).length === 0 && (
+					  <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic", padding: "6px 0" }}>
+					    No beats yet — click Add Beat to plan scene-by-scene
+					  </div>
+				    )}
+				    {(Array.isArray(p.beats) ? p.beats : []).map((beat, bi) => (
+					  <div key={beat.id || bi} style={{
+					    display: "flex", gap: 8, alignItems: "start", marginBottom: 6,
+					    padding: "8px 10px", background: "var(--nf-bg-deep)",
+					    border: "1px solid var(--nf-border)", borderRadius: 2,
+					  }}>
+					    <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 4, paddingTop: 6 }}>
+						  <span style={{
+						    fontSize: 9, fontWeight: 700, color: "var(--nf-accent)",
+						    background: "var(--nf-bg-surface)", padding: "2px 6px",
+						    borderRadius: 2, border: "1px solid var(--nf-border)",
+						    fontFamily: "var(--nf-font-mono)", letterSpacing: "0.05em",
+						  }}>B{bi + 1}</span>
+					    </div>
+					    <div style={{ flex: 1 }}>
+					  	  <input
+						    value={beat.title || ""}
+						    onChange={e => {
+							  const newTitle = e.target.value;
+							  const currentBeats = Array.isArray(p.beats) ? [...p.beats] : [];
+							  currentBeats[bi] = { ...currentBeats[bi], title: newTitle };
+							  updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: currentBeats } : pl) });
+						    }}
+						    placeholder="Beat title..."
+						    className="nf-input"
+						    style={{ fontSize: 12, padding: "5px 8px", marginBottom: 4 }}
+						  />
+						  <textarea
+						    value={beat.description || ""}
+						    onChange={e => {
+							  const newDesc = e.target.value;
+							  const currentBeats = Array.isArray(p.beats) ? [...p.beats] : [];
+							  currentBeats[bi] = { ...currentBeats[bi], description: newDesc };
+							  updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: currentBeats } : pl) });
+						    }}
+						    placeholder="What happens in this beat..."
+						    className="nf-textarea nf-textarea-sm"
+						    style={{ fontSize: 11, minHeight: 36, padding: "5px 8px" }}
+						  />
+					    </div>
+					    <button onClick={() => {
+						  const currentBeats = (Array.isArray(p.beats) ? p.beats : []).filter((_, i) => i !== bi);
+						  updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: currentBeats } : pl) });
+					    }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0, marginTop: 4 }} aria-label="Remove beat">
+						  <Icons.X />
+					    </button>
+					  </div>
+				    ))}
+				  </div>
                   {/* FIX: Characters as multi-select from character list instead of free text */}
                   <div className="nf-field" style={{ marginTop: 4 }}>
                     <label className="nf-label">Characters in chapter</label>
@@ -8904,7 +9463,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               color: #000 !important; background: #fff !important;
             }
           }
-		            /* Image wrapper in editor — draggable scene illustrations */
+		  /* Image wrapper in editor — draggable scene illustrations */
           .nf-editor-contenteditable figure.nf-img-wrapper {
             cursor: default;
             user-select: contain;
@@ -8947,7 +9506,68 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-editor-contenteditable .nf-img-actions button:hover {
             background: rgba(0,0,0,0.85);
           }
+		  /* ── Beat markers in editor ── */
+          .nf-beat-marker {
+            display: block !important;
+            position: relative;
+            border-top: 2px solid var(--nf-border) !important;
+            margin: 28px 0 4px !important;
+            padding: 0 !important;
+            min-height: 4px !important;
+            pointer-events: auto !important;
+            -webkit-user-modify: read-only !important;
+            user-select: none !important;
+            cursor: pointer !important;
+          }
+          .nf-beat-marker::before {
+            content: attr(data-beat-title);
+            position: absolute;
+            top: -14px;
+            left: 0;
+            background: var(--nf-bg-deep);
+            padding: 2px 10px;
+            font-size: 9px;
+            font-weight: 700;
+            color: var(--nf-accent);
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            border-radius: 2px 2px 0 0;
+            font-family: var(--nf-font-body);
+            pointer-events: auto;
+            cursor: grab;
+            white-space: nowrap;
+            user-select: none;
+          }
+          .nf-beat-marker.dragging::before {
+            cursor: grabbing;
+          }
+          /* Description tooltip: hidden by default, shown on hover via JS */
+          .nf-beat-marker::after {
+            content: none !important;
+          }
+          .nf-beat-marker.nf-beat-active {
+            border-top-color: var(--nf-accent) !important;
+            box-shadow: 0 0 12px var(--nf-accent-glow);
+          }
+          .nf-beat-marker.nf-beat-active::before {
+            color: #fff;
+            background: var(--nf-accent);
+          }
+          /* Hover highlight */
+          .nf-beat-marker:hover {
+            border-top-color: var(--nf-accent-2) !important;
+          }
+          .nf-beat-marker:hover::before {
+            background: var(--nf-accent-2);
+            color: #fff;
+          }
+		  .nf-beat-marker.dragging {
+		    opacity: 0.3 !important;
+		    border-top-color: var(--nf-accent) !important;
+		    border-top-style: dashed !important;
+		  }
         `}</style>
+        
 
         {renderProjectList()}
 

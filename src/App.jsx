@@ -3024,6 +3024,13 @@ const generatePdfHtml = (project, mode, chapterIdx) => {
       .draft-meta h3 { font-size: 10pt; font-weight: 600; margin: 0 0 8px; color: #b85a35; text-transform: uppercase; letter-spacing: 0.1em; }
       .draft-section { margin-bottom: 20px; page-break-inside: avoid; }
       .draft-section h3 { color: #b85a35; }
+	  .nf-draft-viewing .nf-chapter-title-input { color: var(--nf-accent-2) !important; pointer-events: none; }
+      .nf-draft-viewing .nf-word-count { display: none; }
+      .nf-draft-viewing .nf-header-actions { display: none; }
+      .nf-draft-viewing .nf-scene-direction-box { display: none; }
+      .nf-draft-viewing .nf-mode-bar { opacity: 0.3; pointer-events: none; }
+      .nf-draft-viewing .nf-chat-textarea { pointer-events: none; opacity: 0.3; }
+      .nf-draft-viewing .nf-send-btn { pointer-events: none; opacity: 0.3; }
       @media print { .no-print { display: none; } }
     </style></head><body>`;
 
@@ -3969,6 +3976,7 @@ export default function NovelForge() {
   const imagePromptAbortRef = useRef(null); // Tracks in-flight image prompt API call for cancellation
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftsChapterFilter, setDraftsChapterFilter] = useState(false);
+  const [viewingDraftId, setViewingDraftId] = useState(null);
   
   // ─── GOOGLE DRIVE STATE ───
   const [gdriveClientId, setGdriveClientId] = useState("");
@@ -4463,12 +4471,14 @@ export default function NovelForge() {
   useEffect(() => {
     const el = editorRef.current;
     if (!el) return;
-    const key = `${activeProjectId}-${activeChapterIdx}`;
-    const content = activeChapter?.content || "";
+    const isViewingDraft = !!viewingDraftId;
+    const viewingDraft = isViewingDraft ? (project?.drafts || []).find(d => d.id === viewingDraftId) : null;
+    const key = isViewingDraft ? `draft:${viewingDraftId}` : `${activeProjectId}-${activeChapterIdx}`;
+    const content = isViewingDraft ? (viewingDraft?.content || "") : (activeChapter?.content || "");
     const editorEmpty = !el.innerHTML || el.innerHTML === "<br>";
     const hasContent = !!content;
 
-    // Re-populate if: chapter changed, tab switched, content changed externally (undo/AI append), or editor empty with content
+    // Re-populate if: chapter/draft changed, editor empty with content, or external content change
     const needsRepopulate = lastSyncedChapterRef.current !== key
       || (editorEmpty && hasContent)
       || (lastSyncedContentRef.current !== null && lastSyncedContentRef.current !== content && el.innerHTML !== content);
@@ -4479,7 +4489,6 @@ export default function NovelForge() {
       setTimeout(() => {
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
       }, 100);
-	  // B3: Better HTML detection — check for actual HTML tags, not just angle brackets
       const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code)\b/i.test(content);
       if (looksLikeHtml) {
         el.innerHTML = content;
@@ -4487,10 +4496,9 @@ export default function NovelForge() {
         el.innerHTML = content ? content.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
       }
     } else {
-      // Update the tracked content even if we didn't re-populate
       lastSyncedContentRef.current = content;
     }
-  }, [activeChapter?.content, activeChapterIdx, activeProjectId, activeTab]);
+  }, [activeChapter?.content, activeChapterIdx, activeProjectId, activeTab, viewingDraftId, project?.drafts]);
 
   // ─── API CALLS ───
   const callOpenRouterStream = useCallback(async (messages, opts = {}) => {
@@ -5842,7 +5850,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         originalIndex: targetIdx,
       });
     }
-    // Restore draft as the active chapter
+	// Restore draft as the active chapter
     const chapters = [...(project?.chapters || [])];
     chapters[targetIdx] = {
       id: chapters[targetIdx]?.id || uid(),
@@ -5866,6 +5874,35 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     updateProject({ drafts: (project?.drafts || []).filter(x => x.id !== draftId) });
     showToast(d ? `Deleted draft of "${d.title}"` : "Draft deleted", "success");
   }, [project, updateProject, showToast]);
+  
+  const handleViewDraft = useCallback((draftId) => {
+    const draft = (project?.drafts || []).find(d => d.id === draftId);
+    if (!draft) return;
+    if (editorRef.current) syncEditorContent();
+    setViewingDraftId(draftId);
+    lastSyncedChapterRef.current = null;
+    lastSyncedContentRef.current = null;
+  }, [project?.drafts, syncEditorContent]);
+
+  const handleSaveDraft = useCallback(() => {
+    const el = editorRef.current;
+    if (!el || !viewingDraftId) return;
+    const html = el.innerHTML;
+    updateProject({
+      drafts: (project?.drafts || []).map(d =>
+        d.id === viewingDraftId ? { ...d, content: html } : d
+      ),
+    });
+    lastSyncedContentRef.current = html;
+    showToast("Draft saved", "success");
+  }, [viewingDraftId, project?.drafts, updateProject, showToast]);
+
+  const handleCloseDraft = useCallback(() => {
+    handleSaveDraft();
+    setViewingDraftId(null);
+    lastSyncedChapterRef.current = null;
+    lastSyncedContentRef.current = null;
+  }, [handleSaveDraft]);
   
   const handleGenerateImagePrompts = useCallback(async (itemId) => {
     if (!settings.apiKey) { showToast("Set your OpenRouter API key in Settings first", "error"); return; }
@@ -6937,6 +6974,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             {project?.chapters?.map((ch, i) => (
               <div key={ch.id || i}>
                 <div onClick={() => {
+                  if (viewingDraftId) { handleCloseDraft(); }
                   if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); lastSyncedChapterRef.current = null; setSelectedText(""); setSelectionRange(null); }
                 }}
                   draggable
@@ -7047,18 +7085,56 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           </div>
         </div>
       )}
-      <div className="nf-editor-area">
+      <div className={`nf-editor-area ${viewingDraftId ? "nf-draft-viewing" : ""}`}>
         {/* A10: Focus mode escape hatch */}
         {focusMode && (
           <button className="nf-focus-exit-btn" onClick={() => setFocusMode(false)}>
             <Icons.Minimize /> Exit Focus
           </button>
         )}
+        {viewingDraftId && (() => {
+          const draft = (project?.drafts || []).find(d => d.id === viewingDraftId);
+          if (!draft) return null;
+          return (
+            <div className="nf-draft-banner">
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+                <span style={{ color: "var(--nf-accent)", fontSize: 12 }}>◇</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 9, color: "var(--nf-accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em" }}>
+                    Viewing Draft — Ch{(draft.originalIndex ?? activeChapterIdx) + 1}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {draft.title}
+                  </div>
+                  {draft.deactivatedAt && (
+                    <div style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>
+                      Saved {new Date(draft.deactivatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 5, alignItems: "center", flexShrink: 0 }}>
+                <button onClick={handleSaveDraft} className="nf-btn-micro" style={{ borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                  <Icons.Save /> Save
+                </button>
+                <button onClick={handleCloseDraft} className="nf-btn-micro">
+                  ← Back
+                </button>
+                <button onClick={() => {
+                  handleRestoreDraft(viewingDraftId);
+                  setViewingDraftId(null);
+                }} className="nf-btn-micro" style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}>
+                  ↩ Restore
+                </button>
+              </div>
+            </div>
+          );
+        })()}
+        {!viewingDraftId && (
         <div className="nf-chapter-header">
           <input value={activeChapter?.title || ""} onChange={e => {
               const newTitle = e.target.value;
               updateChapter(activeChapterIdx, { title: newTitle });
-              // FIX: Sync title to matching plot outline entry
               const chNum = activeChapterIdx + 1;
               const plotOutline = project?.plotOutline || [];
               const plotIdx = plotOutline.findIndex(pl => (pl.chapter || 0) === chNum);
@@ -7088,7 +7164,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 {isSummarizing && <span style={{ fontSize: 10 }}>Summarizing...</span>}
               </button>
             </Tooltip>
-			<Tooltip text="Generate world view for image prompts">
+            <Tooltip text="Generate world view for image prompts">
               <button onClick={handleGenerateChapterWorldView} disabled={isGenerating || !settings.apiKey || !activeChapter?.content || wordCount(activeChapter?.content) < 20}
                 className="nf-btn-icon-sm" style={activeChapter?.worldView ? { borderColor: "var(--nf-success)", color: "var(--nf-success)" } : undefined}
                 aria-label="Generate chapter world view">
@@ -7096,11 +7172,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 {!activeChapter?.worldView && <span style={{ fontSize: 9, opacity: 0.6 }}>World View</span>}
               </button>
             </Tooltip>
-			<Tooltip text={wordCount(activeChapter?.content) > 0 ? "Save current content as draft, start fresh" : "Write some content first"}>
+            <Tooltip text={wordCount(activeChapter?.content) > 0 ? "Save current content as draft, start fresh" : "Write some content first"}>
               <button onClick={handleDeactivateChapter}
                 disabled={wordCount(activeChapter?.content) < 1}
-                className="nf-btn-icon-sm" aria-label="Save as draft"
-                title="Save as draft">
+                className="nf-btn-icon-sm" aria-label="Save as draft">
                 <Icons.Book /> Draft
               </button>
             </Tooltip>
@@ -7131,6 +7206,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             )}
           </div>
         </div>
+        )}
         <WordGoalBar current={totalProjectWords} goal={project?.wordGoal || 0} sessionWords={sessionWords} />
         <RichTextToolbar editorRef={editorRef} onContentChange={syncEditorContent} />
         <div className="nf-editor-split">
@@ -7144,8 +7220,18 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               aria-multiline="true"
               aria-label={`Editor for ${activeChapter?.title || 'chapter'}`}
               onInput={(e) => {
-                debouncedSyncEditor();
-                // A3: Toggle placeholder class based on actual text content
+                if (viewingDraftId) {
+                  // Save draft content directly to project state
+                  const html = e.currentTarget.innerHTML;
+                  updateProject({
+                    drafts: (project?.drafts || []).map(d =>
+                      d.id === viewingDraftId ? { ...d, content: html } : d
+                    ),
+                  });
+                  lastSyncedContentRef.current = html;
+                } else {
+                  debouncedSyncEditor();
+                }
                 const el = e.currentTarget;
                 el.classList.toggle("nf-has-content", el.textContent.trim().length > 0);
               }}

@@ -3967,6 +3967,8 @@ export default function NovelForge() {
   const [pdfExportMode, setPdfExportMode] = useState(null);
   const [imagePromptData, setImagePromptData] = useState(null); // { prompt, mentionedChars, primaryWorld, worldRefImages }
   const imagePromptAbortRef = useRef(null); // Tracks in-flight image prompt API call for cancellation
+  const [showDrafts, setShowDrafts] = useState(false);
+  const [draftsChapterFilter, setDraftsChapterFilter] = useState(false);
   
   // ─── GOOGLE DRIVE STATE ───
   const [gdriveClientId, setGdriveClientId] = useState("");
@@ -4085,6 +4087,7 @@ export default function NovelForge() {
             }),
               continuityNotes: proj.continuityNotes || "",
               wordGoal: proj.wordGoal || 0,
+			  drafts: proj.drafts || [],
             };
           });
           setProjects(migrated);
@@ -5784,6 +5787,86 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     }
   }, [project, activeChapterIdx, settings.apiKey, callOpenRouter, updateChapter, showToast]);
   
+  const handleDeactivateChapter = useCallback(() => {
+    const ch = project?.chapters?.[activeChapterIdx];
+    if (!ch || wordCount(ch.content) < 1) { showToast("Write some content first before saving as draft", "error"); return; }
+    const drafts = [...(project?.drafts || [])];
+    drafts.push({
+      id: uid(),
+      title: ch.title,
+      content: ch.content,
+      summary: ch.summary || "",
+      sceneNotes: ch.sceneNotes || "",
+      pov: ch.pov || "",
+      notes: ch.notes || "",
+      worldView: ch.worldView || "",
+      deactivatedAt: new Date().toISOString(),
+      originalIndex: activeChapterIdx,
+    });
+    const chapters = [...(project?.chapters || [])];
+    chapters[activeChapterIdx] = {
+      ...ch,
+      title: ch.title,
+      content: "",
+      summary: "",
+      sceneNotes: ch.sceneNotes || "",
+      pov: ch.pov || "",
+      notes: "",
+      worldView: "",
+    };
+    updateProject({ chapters, drafts });
+    lastSyncedChapterRef.current = null;
+    setShowDrafts(true);
+    showToast(`"${ch.title}" saved as draft — write a new version`, "success");
+  }, [project, activeChapterIdx, updateProject, showToast]);
+
+  const handleRestoreDraft = useCallback((draftId) => {
+    const drafts = project?.drafts || [];
+    const draft = drafts.find(d => d.id === draftId);
+    if (!draft) return;
+    const targetIdx = draft.originalIndex ?? activeChapterIdx;
+    const ch = project?.chapters?.[targetIdx];
+    // Save current active chapter as new draft
+    const newDrafts = drafts.filter(d => d.id !== draftId);
+    if (ch && wordCount(ch.content) > 0) {
+      newDrafts.push({
+        id: uid(),
+        title: ch.title,
+        content: ch.content,
+        summary: ch.summary || "",
+        sceneNotes: ch.sceneNotes || "",
+        pov: ch.pov || "",
+        notes: ch.notes || "",
+        worldView: ch.worldView || "",
+        deactivatedAt: new Date().toISOString(),
+        originalIndex: targetIdx,
+      });
+    }
+    // Restore draft as the active chapter
+    const chapters = [...(project?.chapters || [])];
+    chapters[targetIdx] = {
+      id: chapters[targetIdx]?.id || uid(),
+      title: draft.title,
+      content: draft.content,
+      summary: draft.summary || "",
+      sceneNotes: draft.sceneNotes || "",
+      pov: draft.pov || "",
+      notes: draft.notes || "",
+      worldView: draft.worldView || "",
+      summaryGeneratedAt: "",
+    };
+    updateProject({ chapters, drafts: newDrafts });
+    setActiveChapterIdx(targetIdx);
+    lastSyncedChapterRef.current = null;
+    showToast(`"${draft.title}" restored`, "success");
+  }, [project, activeChapterIdx, updateProject, showToast]);
+
+  const handleDeleteDraft = useCallback((draftId) => {
+    const d = (project?.drafts || []).find(x => x.id === draftId);
+    updateProject({ drafts: (project?.drafts || []).filter(x => x.id !== draftId) });
+    showToast(d ? `Deleted draft of "${d.title}"` : "Draft deleted", "success");
+  }, [project, updateProject, showToast]);
+  
   const handleGenerateImagePrompts = useCallback(async (itemId) => {
     if (!settings.apiKey) { showToast("Set your OpenRouter API key in Settings first", "error"); return; }
     const item = project?.worldBuilding?.find(w => w.id === itemId);
@@ -6852,30 +6935,113 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           </div>
           <div className="nf-chapter-list">
             {project?.chapters?.map((ch, i) => (
-              <div key={ch.id || i} onClick={() => {
-                if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); lastSyncedChapterRef.current = null; setSelectedText(""); setSelectionRange(null); }
-              }}
-                draggable
-                onDragStart={e => { e.dataTransfer.setData("text/plain", i.toString()); e.dataTransfer.effectAllowed = "move"; e.currentTarget.style.opacity = "0.4"; }}
-                onDragEnd={e => { e.currentTarget.style.opacity = "1"; setDragOverIdx(null); }}
-                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverIdx(i); }}
-                onDragLeave={() => setDragOverIdx(null)}
-                onDrop={e => { e.preventDefault(); setDragOverIdx(null); const from = parseInt(e.dataTransfer.getData("text/plain")); if (!isNaN(from) && from !== i) moveChapter(from, i); }}
-                className={`nf-chapter-item ${i === activeChapterIdx ? "active" : ""}`}
-                style={dragOverIdx === i ? { borderTop: "2px solid var(--nf-accent-2)", paddingTop: 7 } : undefined}>
-                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ opacity: 0.25, cursor: "grab" }} aria-hidden="true"><Icons.Grip /></span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="nf-chapter-item-title">{ch.title}</div>
-                    <div className="nf-chapter-item-meta">
-                      {chapterWordCounts[i] > 0 ? `${chapterWordCounts[i].toLocaleString()} w` : "Empty"}
-                      {ch.summary ? " · ✦" : ""}
+              <div key={ch.id || i}>
+                <div onClick={() => {
+                  if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); lastSyncedChapterRef.current = null; setSelectedText(""); setSelectionRange(null); }
+                }}
+                  draggable
+                  onDragStart={e => { e.dataTransfer.setData("text/plain", i.toString()); e.dataTransfer.effectAllowed = "move"; e.currentTarget.style.opacity = "0.4"; }}
+                  onDragEnd={e => { e.currentTarget.style.opacity = "1"; setDragOverIdx(null); }}
+                  onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverIdx(i); }}
+                  onDragLeave={() => setDragOverIdx(null)}
+                  onDrop={e => { e.preventDefault(); setDragOverIdx(null); const from = parseInt(e.dataTransfer.getData("text/plain")); if (!isNaN(from) && from !== i) moveChapter(from, i); }}
+                  className={`nf-chapter-item ${i === activeChapterIdx ? "active" : ""}`}
+                  style={dragOverIdx === i ? { borderTop: "2px solid var(--nf-accent-2)", paddingTop: 7 } : undefined}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ opacity: 0.25, cursor: "grab" }} aria-hidden="true"><Icons.Grip /></span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <div className="nf-chapter-item-title">{ch.title}</div>
+                        {(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length > 0 && (
+                          <span style={{ fontSize: 8, padding: "0 4px", borderRadius: 2, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 600, lineHeight: "14px", flexShrink: 0 }}
+                            title={`${(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length} draft(s)`}>
+                            {(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length} drafts
+                          </span>
+                        )}
+                      </div>
+                      <div className="nf-chapter-item-meta">
+                        {chapterWordCounts[i] > 0 ? `${chapterWordCounts[i].toLocaleString()} w` : "Empty"}
+                        {ch.summary ? " · ✦" : ""}
+                      </div>
                     </div>
                   </div>
+                </div>
+                {/* Drafts for this chapter — shown inline when sidebar drafts section is open */}
+                {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).map(draft => (
+                  <div key={draft.id} style={{
+                    padding: "5px 10px 5px 28px", fontSize: 10, color: "var(--nf-text-muted)",
+                    borderLeft: "2px solid var(--nf-accent)", marginLeft: 14, marginBottom: 1,
+                    background: "var(--nf-accent-glow)", borderRadius: "0 2px 2px 0",
+                    lineHeight: 1.4,
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}
+                        title={draft.title}>
+                        ↳ {draft.title}
+                      </span>
+                      <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4, flexShrink: 0 }}>
+                        {wordCount(draft.content)}w
+                      </span>
+                    </div>
+                    <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
+                      <button onClick={(e) => { e.stopPropagation(); handleRestoreDraft(draft.id); }}
+                        className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                        ↩ Restore
+                      </button>
+                      <button onClick={(e) => { e.stopPropagation(); handleDeleteDraft(draft.id); }}
+                        className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px" }}>
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+            {/* Drafts for chapters that no longer exist (position out of range) */}
+            {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? 0) >= (project?.chapters?.length || 0)).map(draft => (
+              <div key={draft.id} style={{
+                padding: "5px 10px", fontSize: 10, color: "var(--nf-text-muted)",
+                borderLeft: "2px solid var(--nf-accent-2)", marginLeft: 14, marginBottom: 1,
+                background: "var(--nf-bg-surface)", borderRadius: "0 2px 2px 0",
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                    ↳ {draft.title} <span style={{ opacity: 0.5 }}>(no chapter)</span>
+                  </span>
+                  <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>{wordCount(draft.content)}w</span>
+                </div>
+                <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
+                  <button onClick={() => {
+                    // Create a new chapter at the end and restore draft there
+                    const newCh = {
+                      id: uid(), title: draft.title, content: draft.content,
+                      summary: draft.summary || "", sceneNotes: draft.sceneNotes || "",
+                      pov: draft.pov || "", notes: draft.notes || "",
+                      worldView: draft.worldView || "", summaryGeneratedAt: "",
+                    };
+                    const chapters = [...(project?.chapters || []), newCh];
+                    updateProject({ chapters, drafts: (project?.drafts || []).filter(d => d.id !== draft.id) });
+                    setActiveChapterIdx(chapters.length - 1);
+                    lastSyncedChapterRef.current = null;
+                    showToast(`"${draft.title}" restored as new chapter`, "success");
+                  }} className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                    ↩ Add as Ch{(project?.chapters?.length || 0) + 1}
+                  </button>
+                  <button onClick={() => handleDeleteDraft(draft.id)} className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px" }}>
+                    ✕
+                  </button>
                 </div>
               </div>
             ))}
           </div>
+          {/* Drafts toggle */}
+          {(project?.drafts || []).length > 0 && (
+            <div style={{ padding: "6px 10px", borderTop: "1px solid var(--nf-border)", display: "flex", gap: 4 }}>
+              <button onClick={() => setShowDrafts(!showDrafts)} className="nf-btn-micro" style={{ flex: 1, justifyContent: "center", fontSize: 9 }}>
+                ◇ {showDrafts ? "Hide" : "Show"} {(project?.drafts || []).length} Draft{(project?.drafts || []).length > 1 ? "s" : ""}
+              </button>
+            </div>
+          )}
           <div style={{ padding: "8px 12px", borderTop: "1px solid var(--nf-border)", fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
             {totalProjectWords.toLocaleString()} words total
           </div>
@@ -6928,6 +7094,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 aria-label="Generate chapter world view">
                 <Icons.Map />
                 {!activeChapter?.worldView && <span style={{ fontSize: 9, opacity: 0.6 }}>World View</span>}
+              </button>
+            </Tooltip>
+			<Tooltip text={wordCount(activeChapter?.content) > 0 ? "Save current content as draft, start fresh" : "Write some content first"}>
+              <button onClick={handleDeactivateChapter}
+                disabled={wordCount(activeChapter?.content) < 1}
+                className="nf-btn-icon-sm" aria-label="Save as draft"
+                title="Save as draft">
+                <Icons.Book /> Draft
               </button>
             </Tooltip>
             <button onClick={() => setFocusMode(!focusMode)} className="nf-btn-icon-sm" title={focusMode ? "Exit focus (⌘⇧F)" : "Focus mode (⌘⇧F)"} aria-label="Toggle focus mode">

@@ -183,10 +183,17 @@ const ImageUtils = {
   },
 
   async hashBase64(str) {
-    const clean = str.split(",")[1] || str;
-    const bytes = Uint8Array.from(atob(clean), c => c.charCodeAt(0));
-    const hash = await crypto.subtle.digest("SHA-256", bytes);
-    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+    try {
+      const clean = str.split(",")[1] || str;
+      const bytes = Uint8Array.from(atob(clean), c => c.charCodeAt(0));
+      const hash = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+      // Fallback: simple string hash for malformed base64
+      let h = 0;
+      for (let i = 0; i < Math.min(str.length, 1000); i++) { h = ((h << 5) - h + str.charCodeAt(i)) | 0; }
+      return Math.abs(h).toString(16).padStart(8, "0");
+    }
   },
 
   base64ToBlob(base64) {
@@ -455,8 +462,8 @@ const GDriveImages = {
     this._imageFolderId = null;
     this._hashToDriveId = {};
     this._driveIdToBase64 = {};
-    this._pathToBase64 = {};    // ← NEW: clear this too
-	this._pathToDriveId = {};
+    this._pathToBase64 = {};
+    this._pathToDriveId = {};
   },
 };
 
@@ -666,19 +673,26 @@ const renderMarkdown = (text) => {
   html = html.replace(/\n/g, '<br/>');
   // Restore code blocks
   codeBlocks.forEach((block, i) => { html = html.replace(`%%CODEBLOCK_${i}%%`, block); });
+  // Sanitize: strip any raw HTML-like patterns that survived escaping (e.g., from markdown edge cases)
+  // Since we escaped < and > at the start, this is defense-in-depth
   return html;
 };
 
 // H1: Memoization cache for rendered markdown
 const _mdCache = new Map();
-const _MD_CACHE_MAX = 100;
+const _MD_CACHE_MAX = 200; // Increased from 100 for long sessions
 const renderMarkdownCached = (text) => {
   if (!text) return "";
   if (_mdCache.has(text)) return _mdCache.get(text);
   const result = renderMarkdown(text);
   if (_mdCache.size >= _MD_CACHE_MAX) {
-    const firstKey = _mdCache.keys().next().value;
-    _mdCache.delete(firstKey);
+    // Delete oldest entries (first 20% to avoid frequent evictions)
+    const deleteCount = Math.ceil(_MD_CACHE_MAX * 0.2);
+    const iter = _mdCache.keys();
+    for (let i = 0; i < deleteCount; i++) {
+      const key = iter.next().value;
+      if (key !== undefined) _mdCache.delete(key);
+    }
   }
   _mdCache.set(text, result);
   return result;
@@ -887,14 +901,38 @@ const _resolveCharId = (nameOrId, characters) => {
 const ContextEngine = {
   // D7: Clear POV priority cascade — chapter override > plot outline > project default
   _effectivePov(project, chapterIdx) {
-    const chPov = project?.chapters?.[chapterIdx]?.pov;
+    const ch = project?.chapters?.[chapterIdx];
+    const chPov = ch?.pov;
     if (chPov) return chPov;
     // D7: Check plot outline for this chapter's POV
-    const chNum = chapterIdx + 1;
+    const chNum = this._chapterNum(project, chapterIdx);
     const plotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chNum);
     if (plotEntry?.pov) return plotEntry.pov;
     return project?.pov || "";
   },
+  
+  // Map array index → actual story chapter number (from linked plot entry)
+  _chapterNum(project, chapterIdx) {
+    const ch = project?.chapters?.[chapterIdx];
+    if (ch?.linkedPlotId) {
+      const plot = (project?.plotOutline || []).find(pl => pl.id === ch.linkedPlotId);
+      if (plot?.chapter) return plot.chapter;
+    }
+    return chapterIdx + 1;
+  },
+  
+  // Look up the plot entry for a chapter by its linkedPlotId, falling back to position
+  _plotEntryForChapter(project, chapterIdx) {
+    const ch = project?.chapters?.[chapterIdx];
+    if (!ch) return null;
+    if (ch.linkedPlotId) {
+      const match = (project?.plotOutline || []).find(pl => pl.id === ch.linkedPlotId);
+      if (match) return match;
+    }
+    const chNum = this._chapterNum(project, chapterIdx);
+    return (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chNum) || null;
+  },
+
 
   // I4: Better token estimation for structured text — XML tags and field labels tokenize at ~3.3 chars/token
   _estimateLen(text) {
@@ -945,7 +983,7 @@ const ContextEngine = {
     const pov = this._effectivePov(project, chapterIdx);
     const tokenBudget = opts.tokenBudget || 6000;
     let tokensUsed = 0;
-    const currentChNum = chapterIdx + 1;
+    const currentChNum = this._chapterNum(project, chapterIdx);
 
     // --- Determine scene context for intelligent filtering ---
     const curChapter = project.chapters?.[chapterIdx];
@@ -1373,10 +1411,14 @@ const ContextEngine = {
         const isNearby = Math.abs(chNum - currentChNum) <= 2;
         // D4: For distant future chapters (>3 ahead), only show titles (no summaries/beats)
         const isFarFuture = chNum > currentChNum + 3;
-        let prefix = isCurrent ? "[CURRENT] " : isNearby ? "  " : "  ";
+        // Show current and nearby chapters fully; skip distant future entirely
+        if (isFarFuture) return;
+        let prefix = isCurrent ? "[CURRENT] " : "  ";
         let line = `${prefix}Ch${chNum}: ${pl.title || "Untitled"}`;
         if (pl.pov) line += ` (POV: ${pl.pov})`;
-        if (!isFarFuture) {
+        // Show full details for current and nearby, titles only for future
+        const isNearFuture = chNum > currentChNum && chNum <= currentChNum + 3;
+        if (isCurrent || isNearby || !isNearFuture) {
           if (pl.summary) line += ` — ${pl.summary}`;
           // D1: Include beats for recent past chapters too (not just current/future)
           if (pl.beats && (isCurrent || isNearby)) {
@@ -1408,9 +1450,7 @@ const ContextEngine = {
           }
 		}
         if (pl.sceneType) line += ` [${pl.sceneType}]`;
-        const isFutureCh = chNum > currentChNum;
-        const shouldSkip = isFutureCh && opts.activeBeatId;
-        if (!shouldSkip && tokensUsed + this._estimateLen(line) < budgetPlot) {
+        if (tokensUsed + this._estimateLen(line) < budgetPlot) {
           plotParts.push(line);
           tokensUsed += this._estimateLen(line);
         }
@@ -1428,7 +1468,7 @@ const ContextEngine = {
     if (!project?.chapters?.length) return "";
     const parts = [];
     const totalChapters = project.chapters.length;
-    const currentChNum = currentChapterIdx + 1;
+    const currentChNum = this._chapterNum(project, currentChapterIdx);
     // E4: Track cumulative budget for all chapter history
     const historyBudget = opts.historyBudget || 3000; // chars for prior chapters
     let historyUsed = 0;
@@ -1439,9 +1479,9 @@ const ContextEngine = {
     let hasHistory = false;
     for (let i = 0; i < currentChapterIdx; i++) {
       const ch = project.chapters[i];
-      const distance = currentChapterIdx - i;
+      const chNum = this._chapterNum(project, i);
+      const distance = currentChNum - chNum;
       const isRecent = distance <= lookbackWindow;
-	  console.log(`[MEMORY] Ch${i+1}: distance=${distance} isRecent=${isRecent} summary=${!!ch.summary}(${ch.summary?.length||0}) content=${!!ch.content}(${ch.content?.length||0})`);
 
       if (ch.summary) {
         if (!hasHistory) { parts.push(`\n<chapter_history>`); hasHistory = true; }
@@ -1575,7 +1615,7 @@ const ContextEngine = {
     const scale = ctxK >= 128 ? 1.0 : ctxK >= 32 ? 0.8 : ctxK >= 16 ? 0.5 : 0.35;
 
     // D6: Detect scene type from plot for context modulation
-    const curPlotEntry = (project.plotOutline || []).find(pl => (pl.chapter || 0) === chapterIdx + 1);
+    const curPlotEntry = (project.plotOutline || []).find(pl => (pl.chapter || 0) === this._chapterNum(project, chapterIdx));
     const sceneType = curPlotEntry?.sceneType || "";
 
     switch (mode) {
@@ -1660,6 +1700,7 @@ const ContextEngine = {
   // REWRITTEN: Tab-specific context with much richer information
   // Fixes: G1-G10, B9, B16, C9
   buildTabContext(project, chapterIdx, tabName, editingEntity) {
+	const currentChNum = this._chapterNum(project, chapterIdx);
     if (!project) return "";
     const parts = [];
 
@@ -1676,7 +1717,7 @@ const ContextEngine = {
     if (project.continuityNotes) parts.push(`Continuity notes: ${project.continuityNotes}`);
     // G7: Include current chapter info
     const curChapter = project.chapters?.[chapterIdx];
-    parts.push(`\nCurrently writing: Chapter ${chapterIdx + 1}${curChapter?.title ? ` "${curChapter.title}"` : ""} (${project.chapters?.length || 0} chapters total)`);
+    parts.push(`\nCurrently writing: Chapter ${currentChNum}${curChapter?.title ? ` "${curChapter.title}"` : ""} (${project.chapters?.length || 0} chapters total)`);
     if (curChapter?.summary) parts.push(`Current chapter summary: ${curChapter.summary}`);
     parts.push(`</novel>`);
 
@@ -1764,7 +1805,7 @@ const ContextEngine = {
         // FIX: Use original chapter index, not filtered index
         const writtenSummaries = [];
         (project.chapters || []).forEach((ch, i) => {
-          if (ch.summary) writtenSummaries.push(`Ch${i + 1}: ${ch.summary}`);
+          if (ch.summary) writtenSummaries.push(`Ch${this._chapterNum(project, i)}: ${ch.summary}`);
         });
         if (writtenSummaries.length) {
           parts.push(`\n<written_chapter_summaries>`);
@@ -1777,7 +1818,7 @@ const ContextEngine = {
           const curPlain = _htmlToPlain(curCh.content);
           if (curPlain && curPlain.length > 50) {
             const tail = _sliceAtBoundary(curPlain, 600);
-            parts.push(`\n<current_writing_position chapter="${chapterIdx + 1}" words="${wordCount(curCh.content)}">\n...${tail}\n</current_writing_position>`);
+            parts.push(`\n<current_writing_position chapter="${currentChNum}" words="${wordCount(curCh.content)}">\n...${tail}\n</current_writing_position>`);
           }
         }
         // D13: Total project progress
@@ -1797,8 +1838,8 @@ const ContextEngine = {
         // B9/B16: Include full relationship details — FIX 1.21/6.6: gate by meetsInChapter
         if (project.relationships?.length) {
           const chars = project.characters || [];
-          const currentChNum = chapterIdx + 1;
-          const visibleRels = project.relationships.filter(r => !(r.meetsInChapter > 0 && currentChNum < r.meetsInChapter));
+          const tabCurrentChNum = this._chapterNum(project, chapterIdx);
+          const visibleRels = project.relationships.filter(r => !(r.meetsInChapter > 0 && tabCurrentChNum < r.meetsInChapter));
           if (visibleRels.length) {
             parts.push(`\n<existing_relationships>`);
             visibleRels.forEach(r => {
@@ -1831,7 +1872,7 @@ const createDefaultProject = () => ({
   contentPrefs: "", avoidList: "", writingStyle: "",
   characters: [], worldBuilding: [], plotOutline: [], relationships: [],
   continuityNotes: "",
-  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "" }],
+  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "", linkedPlotId: "", }],
   createdAt: new Date().toISOString(),
   wordGoal: 0,
 });
@@ -2048,6 +2089,10 @@ const Storage = {
       return true;
     } catch (e) {
       console.error("Save failed:", e);
+      // Detect quota exceeded errors from IDB
+      if (e?.name === "QuotaExceededError" || e?.message?.includes("quota")) {
+        return "quota";
+      }
       return false;
     }
   },
@@ -2907,7 +2952,7 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
   const onRelEnter = useCallback(rid => { clearTimeout(hoverTimer.current); setHoveredRel(rid); setHoveredNode(null); }, []);
   const onRelLeave = useCallback(() => { hoverTimer.current = setTimeout(() => setHoveredRel(null), 80); }, []);
   useEffect(() => () => clearTimeout(hoverTimer.current), []);
-  const procRels = useMemo(() => { const seen = {}; return (rels || []).filter(r => !(r.meetsInChapter > 0 && r.meetsInChapter > 999)).map(r => { const key = [r.char1, r.char2].sort().join("::"); if (!seen[key]) seen[key] = 0; seen[key]++; return { ...r, curveIdx: seen[key] - 1 }; }); }, [rels]);
+  const procRels = useMemo(() => { const seen = {}; return (rels || []).filter(r => true).map(r => { const key = [r.char1, r.char2].sort().join("::"); if (!seen[key]) seen[key] = 0; seen[key]++; return { ...r, curveIdx: seen[key] - 1 }; }); }, [rels]);
   const curvePath = (x1, y1, x2, y2, ci) => { if (ci === 0) return `M${x1},${y1}L${x2},${y2}`; const mx = (x1 + x2) / 2, my = (y1 + y2) / 2; const d = Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) || 1; const nx = -(y2 - y1) / d, ny = (x2 - x1) / d; const off = d * 0.12 * (ci % 2 === 0 ? 1 : -1) * Math.ceil((ci + 1) / 2); return `M${x1},${y1}Q${mx + nx * off},${my + ny * off},${x2},${y2}`; };
   const resetView = useCallback(() => { setNodes(computeWebLayout(chars, rels)); setPan({ x: 0, y: 0 }); setZoom(1); zoomRef.current = 1; setSelectedNode(null); setHoveredNode(null); setHoveredRel(null); }, [chars, rels]);
   if (!chars.length) return (<div style={{ position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}><div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: 40, textAlign: "center", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-display)", fontStyle: "italic" }}>Add characters first to see their connections</div></div>);
@@ -3147,7 +3192,8 @@ const _sceneCaption = (text, chapterIdx, chapterTitle) => {
 
 // Attach drag and delete handlers to an image wrapper element
 const _attachImageEvents = (fig, editorEl) => {
-  if (!fig) return;
+  if (!fig || fig._nfEventsAttached) return;
+  fig._nfEventsAttached = true;
 
   // Delete button
   const delBtn = fig.querySelector('.nf-img-del');
@@ -3206,9 +3252,17 @@ const _attachImageEvents = (fig, editorEl) => {
     moveClone(e);
 
     // Find drop target
-    const target = document.caretRangeFromPoint
-      ? document.caretRangeFromPoint(e.clientX, e.clientY)
-      : null;
+    let target;
+    if (document.caretRangeFromPoint) {
+      target = document.caretRangeFromPoint(e.clientX, e.clientY);
+    } else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+      if (pos) {
+        target = document.createRange();
+        target.setStart(pos.offsetNode, pos.offset);
+        target.collapse(true);
+      }
+    }
 
     if (target && editorEl.contains(target.startContainer) && target.startContainer !== fig) {
       if (placeholder.parentNode !== editorEl || !isAfter(placeholder, target)) {
@@ -3247,7 +3301,8 @@ const _attachImageEvents = (fig, editorEl) => {
 };
 
 const _attachBeatDragEvents = (markerEl, editorEl) => {
-  if (!markerEl) return;
+  if (!markerEl || markerEl._nfDragAttached) return;
+  markerEl._nfDragAttached = true;
   const label = markerEl.querySelector('.nf-beat-title-el');
   const handle = label || markerEl;
   let isDragging = false;
@@ -3285,7 +3340,18 @@ const _attachBeatDragEvents = (markerEl, editorEl) => {
       markerEl.classList.remove('dragging');
 
       // Find caret position at drop point
-      const range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      let range;
+      if (document.caretRangeFromPoint) {
+        range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      } else if (document.caretPositionFromPoint) {
+        // Firefox fallback
+        const pos = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+        if (pos) {
+          range = document.createRange();
+          range.setStart(pos.offsetNode, pos.offset);
+          range.collapse(true);
+        }
+      }
       if (!range || !editorEl.contains(range.startContainer)) return;
 
       // Don't drop inside another marker
@@ -3306,7 +3372,6 @@ const _attachBeatDragEvents = (markerEl, editorEl) => {
 };
 
 // Detect which beat the cursor/caret is currently inside
-// Detect which beat the cursor/caret is currently inside
 const detectCursorBeat = (el) => {
   if (!el) return null;
   const markers = el.querySelectorAll('.nf-beat-marker');
@@ -3316,12 +3381,14 @@ const detectCursorBeat = (el) => {
   const cursorNode = sel.anchorNode;
   if (!el.contains(cursorNode)) return null;
 
-  // Walk in reverse — last marker BEFORE cursor wins
+  // Walk backwards through markers — the last marker that appears
+  // BEFORE the cursor position is the active beat
   let activeBeatId = null;
   for (let i = markers.length - 1; i >= 0; i--) {
     const marker = markers[i];
+    // compareDocumentPosition: if cursorNode is AFTER marker, marker has DOCUMENT_POSITION_FOLLOWING
     const pos = marker.compareDocumentPosition(cursorNode);
-    if (pos & (Node.DOCUMENT_POSITION_FOLLOWING | Node.DOCUMENT_POSITION_CONTAINED_BY)) {
+    if (pos & Node.DOCUMENT_POSITION_FOLLOWING || pos & Node.DOCUMENT_POSITION_CONTAINED_BY) {
       activeBeatId = marker.getAttribute('data-beat-id');
       break;
     }
@@ -3335,7 +3402,7 @@ const detectCursorBeat = (el) => {
 const generateSceneImagePrompt = (selectedText, project, chapterIdx) => {
   const chars = project?.characters || [];
   const worlds = project?.worldBuilding || [];
-  const plotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chapterIdx + 1);
+  const plotEntry = (project?.plotOutline || []).find(pl => pl.id === (project?.chapters?.[chapterIdx]?.linkedPlotId)) || (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chapterIdx + 1);
 
   // Detect characters in the selected text
   const mentionedIds = _detectMentionedCharacters(selectedText, chars);
@@ -3629,7 +3696,7 @@ const ModelSelector = memo(({ apiKey, value, onChange }) => {
 
   useEffect(() => {
     if (!open) return;
-    const handler = (e) => { if (dropdownRef.current && !dropdownRef.current.contains(e.target)) setOpen(false); };
+    const handler = (e) => { if (dropdownRef.current && !dropdownRef.current.contains(e.target)) { setOpen(false); setSearch(""); } };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
@@ -3766,7 +3833,17 @@ const RichTextToolbar = memo(({ editorRef, onContentChange }) => {
   const exec = useCallback((cmd, val = null) => {
     const el = editorRef.current;
     if (!el) return;
+    // Save selection before focusing, in case focus clears it
+    const savedSel = window.getSelection()?.rangeCount > 0
+      ? window.getSelection().getRangeAt(0).cloneRange()
+      : null;
     el.focus();
+    // Restore selection if it was lost
+    if (savedSel && el.contains(savedSel.startContainer)) {
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(savedSel);
+    }
     document.execCommand(cmd, false, val);
     if (onContentChange) setTimeout(onContentChange, 0);
   }, [editorRef, onContentChange]);
@@ -4176,6 +4253,7 @@ export default function NovelForge() {
   const abortRef = useRef(null);
   const streamingContentRef = useRef("");
   const pendingSelectionRef = useRef("");
+  const chatMessagesRef = useRef([]);
   const _lastChapterPerProject = useRef({}); // C12: Remember last chapter per project
   const [undoState, undoDispatch] = useReducer(undoReducer, { past: [], future: [] });
 
@@ -4211,6 +4289,7 @@ export default function NovelForge() {
           const migrated = p.map(proj => {
 			// Ensure chapters have worldView field
             const chapters = (proj.chapters || []).map(ch => ({
+			  linkedPlotId: "",
               worldView: "",
               ...ch,
             }));
@@ -4323,7 +4402,7 @@ export default function NovelForge() {
 
           const aligned = fixPlotAlignment(migrated); 
 		  setProjects(aligned);
-          setActiveProjectId(migrated[0].id);
+          setActiveProjectId(aligned[0]?.id || null);
         }
         if (s && typeof s === "object") {
           const knownKeys = ["apiKey", "model", "maxTokens", "temperature", "systemPrompt", "frequencyPenalty", "presencePenalty", "modelContextWindow"];
@@ -4343,15 +4422,20 @@ export default function NovelForge() {
     } catch(e) { console.error("Load:", e); }
     setIsLoaded(true);
     })();
-    // FIX 8.3: Multi-tab detection — warn user visibly when data changes in another tab
-    const handleStorage = (e) => {
-      if (e.key === LS_PROJECTS && e.newValue !== null) {
-        // Another tab saved — show a persistent warning
-        setToast({ message: "Data changed in another browser tab — reload this tab to avoid conflicts.", type: "error", key: Date.now() });
-      }
-    };
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
+    // FIX: Multi-tab detection via BroadcastChannel (works with IDB unlike storage events)
+    // Use a single instance — BroadcastChannel only delivers to OTHER contexts using the same channel name
+    let bc;
+    try {
+      bc = new BroadcastChannel("novelforge-sync");
+      bc.onmessage = (e) => {
+        if (e.data === "data-changed") {
+          setToast({ message: "Data changed in another browser tab — reload this tab to avoid conflicts.", type: "error", key: Date.now() });
+        }
+      };
+      // Store on window so the save function can reuse the SAME instance
+      window._nfSyncChannel = bc;
+    } catch {}
+    return () => { try { bc?.close(); window._nfSyncChannel = null; } catch {} };
   }, []);
 
   // ─── DEBOUNCED SAVE ───
@@ -4360,18 +4444,15 @@ export default function NovelForge() {
     const result = await Storage.saveProjects(p);
     if (result === "quota") {
       setSaveStatus("error");
-      // FIX 8.2: Critical — data was NOT saved. Notify user loudly.
       showToast("Storage full! Export your project as JSON immediately to avoid data loss.", "error");
-    } else if (result === "warning") {
-      setSaveStatus("saved");
-      // FIX 8.2: Data was saved but running low. Warn user.
-      showToast("Storage nearly full — link a JSON file in Settings to prevent data loss.", "error");
-      setTimeout(() => setSaveStatus(prev => prev === "saved" ? "idle" : prev), 4000);
     } else if (result) {
       setSaveStatus("saved");
+      // Notify other tabs of data change (same instance = won't self-notify)
+      try { window._nfSyncChannel?.postMessage("data-changed"); } catch {}
       setTimeout(() => setSaveStatus(prev => prev === "saved" ? "idle" : prev), 2000);
     } else {
       setSaveStatus("error");
+      showToast("Save failed — export your data as JSON to prevent loss.", "error");
     }
   }, SAVE_DEBOUNCE_MS), [showToast]);
 
@@ -4402,6 +4483,7 @@ export default function NovelForge() {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { themeRef.current = theme; }, [theme]);
   useEffect(() => { tabChatHistoriesRef.current = tabChatHistories; }, [tabChatHistories]);
+  useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
 
   useEffect(() => {
     const handler = (e) => {
@@ -4516,7 +4598,7 @@ export default function NovelForge() {
     };
 
     return { fullPayload: contextPayload, tokenEstimate: totalTokenEstimate, sectionBreakdown, selectedMode: previewMode };
-  }, [project, activeChapterIdx, genMode, chatMessages]);
+  }, [project, activeChapterIdx, genMode, chatMessages, settings.modelContextWindow, activeBeatId]);
 
   // C5/C6: Bounds-check activeChapterIdx — only depends on length, not content
   useEffect(() => {
@@ -4572,15 +4654,20 @@ export default function NovelForge() {
     const [moved] = chs.splice(fromIdx, 1);
     chs.splice(toIdx, 0, moved);
     updateProject({ chapters: chs });
-    // I6: Correct index tracking — track where the active chapter ended up after the splice
+    // I6: Correct index tracking after chapter reorder
     if (activeChapterIdx === fromIdx) {
-      setActiveChapterIdx(toIdx);
+      // The moved chapter goes to toIdx, but if moving forward, the removal
+      // shifts the target position left by 1
+      setActiveChapterIdx(fromIdx < toIdx ? toIdx - 1 : toIdx);
     } else {
       let newIdx = activeChapterIdx;
-      // If active was after from, the splice shifted it left
-      if (activeChapterIdx > fromIdx) newIdx--;
-      // If active is at or after the insertion point, the insert shifted it right
-      if (newIdx >= toIdx) newIdx++;
+      if (fromIdx < toIdx) {
+        // Moving forward: items between (from, to] shift left by 1
+        if (activeChapterIdx > fromIdx && activeChapterIdx <= toIdx - 1) newIdx--;
+      } else {
+        // Moving backward: items between [to, from) shift right by 1
+        if (activeChapterIdx >= toIdx && activeChapterIdx < fromIdx) newIdx++;
+      }
       setActiveChapterIdx(newIdx);
     }
     lastSyncedChapterRef.current = null;
@@ -4590,45 +4677,65 @@ export default function NovelForge() {
   // B4: Track which chapter lastContentRef belongs to, reset on chapter switch
   const lastContentRef = useRef(null);
   const lastContentChapterRef = useRef(null);
+  
+  // B10: Debounce sync on input to avoid per-keystroke state updates
+  // FIX: Use ref for chapter index to avoid stale closure when debounce fires after chapter switch
+  const activeChapterIdxRef = useRef(activeChapterIdx);
+  useEffect(() => { activeChapterIdxRef.current = activeChapterIdx; }, [activeChapterIdx]);
+  
+  const debouncedSyncEditor = useMemo(() => debounce(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const html = el.innerHTML;
+    // FIX 3: Update the sync ref BEFORE updating state, so the re-populate effect
+    // doesn't see it as an external change and reset the cursor
+    lastSyncedContentRef.current = html;
+    updateChapter(activeChapterIdxRef.current, { content: html });
+  }, 300), [updateChapter]);
+  
+  
   const pushUndo = useCallback(() => {
-    // B4: If chapter changed since last push, reset the ref
     if (lastContentChapterRef.current !== activeChapterIdx) {
       lastContentRef.current = null;
       lastContentChapterRef.current = activeChapterIdx;
     }
-    // FIX 7.1/7.2: Read content from DOM if available (avoids 300ms debounce lag)
+    debouncedSyncEditor.cancel();
     const liveContent = editorRef.current ? editorRef.current.innerHTML : activeChapter?.content;
+    // Compare BEFORE updating lastContentRef so we catch all changes
     if (liveContent != null && liveContent !== lastContentRef.current) {
       undoDispatch({ type: "push", snapshot: { chapterIdx: activeChapterIdx, content: liveContent } });
-      lastContentRef.current = liveContent;
     }
-  }, [activeChapter, activeChapterIdx]);
+    // Update ref AFTER comparison (not before)
+    lastContentRef.current = liveContent;
+  }, [activeChapter, activeChapterIdx, debouncedSyncEditor]);
 
   // B5: Only undo/redo if the snapshot targets the chapter we're currently viewing
   const handleUndo = useCallback(() => {
     if (!undoState.past.length) return;
     const snap = undoState.past[undoState.past.length - 1];
     if (snap.chapterIdx !== activeChapterIdx) {
-      showToast("Undo targets a different chapter", "error");
+      showToast("Undo is for a different chapter — switch to it first", "info");
       return;
     }
     undoDispatch({ type: "undo", current: { chapterIdx: activeChapterIdx, content: activeChapter?.content || "" } });
     updateChapter(snap.chapterIdx, { content: snap.content });
     lastSyncedChapterRef.current = null; // B6: Force editor re-populate
-    showToast("Undone", "success");
+    lastContentRef.current = snap.content;
+	showToast("Undone", "success");
   }, [undoState.past, activeChapterIdx, activeChapter, updateChapter, showToast]);
 
   const handleRedo = useCallback(() => {
     if (!undoState.future.length) return;
     const snap = undoState.future[0];
     if (snap.chapterIdx !== activeChapterIdx) {
-      showToast("Redo targets a different chapter", "error");
+      showToast("Redo is for a different chapter — switch to it first", "info");
       return;
     }
     undoDispatch({ type: "redo", current: { chapterIdx: activeChapterIdx, content: activeChapter?.content || "" } });
     updateChapter(snap.chapterIdx, { content: snap.content });
     lastSyncedChapterRef.current = null; // B6: Force editor re-populate
-    showToast("Redone", "success");
+    lastContentRef.current = snap.content;
+	showToast("Redone", "success");
   }, [undoState.future, activeChapterIdx, activeChapter, updateChapter, showToast]);
 
   // ─── EDITOR TEXT SELECTION ───
@@ -4655,6 +4762,31 @@ export default function NovelForge() {
     }, 150);
   }, []);
   useEffect(() => () => clearTimeout(_selectionTimer.current), []);
+  
+  // Sync beat marker titles/descriptions when plot data changes
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el || activeTab !== "write") return;
+    const markers = el.querySelectorAll('.nf-beat-marker');
+    if (!markers.length) return;
+    const plotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
+    const beats = Array.isArray(plotEntry?.beats) ? plotEntry.beats : [];
+    if (!beats.length) return;
+    markers.forEach(marker => {
+      const bid = marker.getAttribute('data-beat-id');
+      const beat = beats.find(b => b.id === bid);
+      if (beat) {
+        const newTitle = beat.title || `Beat`;
+        const newDesc = (beat.description || "").slice(0, 200);
+        if (marker.getAttribute('data-beat-title') !== newTitle) {
+          marker.setAttribute('data-beat-title', newTitle);
+        }
+        if (marker.getAttribute('data-beat-desc') !== newDesc) {
+          marker.setAttribute('data-beat-desc', newDesc);
+        }
+      }
+    });
+  }, [project?.plotOutline, activeChapterIdx, activeTab]);
 
   // A14: Periodic undo snapshots during continuous typing (every 30s)
   const _undoIntervalRef = useRef(null);
@@ -4667,17 +4799,7 @@ export default function NovelForge() {
     return () => clearInterval(_undoIntervalRef.current);
   }, [activeTab, pushUndo]);
 
-  // ─── EDITOR CONTENT SYNC ───
-  // B10: Debounce sync on input to avoid per-keystroke state updates
-  const debouncedSyncEditor = useMemo(() => debounce(() => {
-    const el = editorRef.current;
-    if (!el) return;
-    const html = el.innerHTML;
-    // FIX 3: Update the sync ref BEFORE updating state, so the re-populate effect
-    // doesn't see it as an external change and reset the cursor
-    lastSyncedContentRef.current = html;
-    updateChapter(activeChapterIdx, { content: html });
-  }, 300), [activeChapterIdx, updateChapter]);
+
 
   // Immediate sync for explicit actions (blur, before AI call, etc.)
   const syncEditorContent = useCallback(() => {
@@ -4686,18 +4808,19 @@ export default function NovelForge() {
     if (!el) return;
     const html = el.innerHTML;
     lastSyncedContentRef.current = html;
-    updateChapter(activeChapterIdx, { content: html });
+    updateChapter(activeChapterIdxRef.current, { content: html });
     // Track which beat the cursor is in
     const beatId = detectCursorBeat(el);
     if (beatId) setActiveBeatId(beatId);
-  }, [activeChapterIdx, updateChapter, debouncedSyncEditor]);
+  }, [updateChapter, debouncedSyncEditor]);
 
   // Cleanup debounced sync on unmount
   useEffect(() => () => debouncedSyncEditor.cancel(), [debouncedSyncEditor]);
 
   // B6: Track a content version to detect external changes (undo, AI append)
   useEffect(() => {
-    const el = editorRef.current;
+    debouncedSyncEditor.cancel(); // Cancel any pending sync from previous chapter
+	const el = editorRef.current;
     if (!el) return;
     const isViewingDraft = !!viewingDraftId;
     const viewingDraft = isViewingDraft ? (project?.drafts || []).find(d => d.id === viewingDraftId) : null;
@@ -4714,16 +4837,17 @@ export default function NovelForge() {
     if (needsRepopulate) {
       lastSyncedChapterRef.current = key;
       lastSyncedContentRef.current = content;
-      setTimeout(() => {
-        el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
-		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
-      }, 100);
       const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code)\b/i.test(content);
       if (looksLikeHtml) {
         el.innerHTML = content;
       } else {
         el.innerHTML = content ? content.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
       }
+      // Attach event handlers after DOM is updated (use rAF for reliable timing)
+      requestAnimationFrame(() => {
+        el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
+        el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
+      });
     } else {
       lastSyncedContentRef.current = content;
     }
@@ -4732,10 +4856,11 @@ export default function NovelForge() {
   // ─── API CALLS ───
   const callOpenRouterStream = useCallback(async (messages, opts = {}) => {
     if (!settings.apiKey) throw new Error("Set your OpenRouter API key in Settings first.");
-    // E4: Abort any existing request before starting new one
-    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    // E4: Abort any existing streaming request before starting new one
+    const existingController = abortRef.current;
     const controller = new AbortController();
     abortRef.current = controller;
+    if (existingController) { try { existingController.abort(); } catch {} }
     // E8: Wrap in retryable fetch
     const res = await _retryableFetch(async () => {
       const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -4762,8 +4887,6 @@ export default function NovelForge() {
   const callOpenRouter = useCallback(async (messages, opts = {}) => {
     if (!settings.apiKey) throw new Error("Set your OpenRouter API key in Settings first.");
     const controller = new AbortController();
-    // Store in a local ref so callers can abort if needed
-    const abortableResult = { controller };
     // E8: Wrap in retryable fetch
     const data = await _retryableFetch(async () => {
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -4860,11 +4983,11 @@ ${craftFocus}
 
     // F10: User directives sandwiched between context (high position) and actual content
     return `${directives}\n\n${novelContext}${customDirectives}`;
-  }, [project, activeChapterIdx, settings.systemPrompt, settings.modelContextWindow]);
+  }, [project, activeChapterIdx, settings.systemPrompt, settings.modelContextWindow, genMode]);
 
   // F2/F7/F14: Mode prompts now adapt to scene type and give clearer instructions
   const getModePrompt = useCallback((mode) => {
-    const curPlotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === activeChapterIdx + 1);
+    const curPlotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
     const sceneType = curPlotEntry?.sceneType || "";
     const sceneTypeNote = sceneType ? ` The current scene type is "${sceneType}".` : "";
 
@@ -4902,7 +5025,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
       default:
         return "";
     }
-  }, [project?.plotOutline, activeChapterIdx]);
+  }, [project?.plotOutline, project?.chapters, activeChapterIdx]);
 
   // Keep backward-compatible modePrompts object for UI tooltips and default messages
   const modePrompts = useMemo(() => ({
@@ -4978,10 +5101,14 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     const currentModePrompt = getModePrompt(genMode);
     const userMsg = chatInput.trim() || currentModePrompt;
     if (!userMsg) return;
-    if (editorRef.current) syncEditorContent();
+    if (editorRef.current) { debouncedSyncEditor.cancel(); syncEditorContent(); }
     setIsGenerating(true); setStreamingContent(""); streamingContentRef.current = "";
     const userMsgObj = { id: uid(), role: "user", content: userMsg, mode: genMode, chapterIdx: activeChapterIdx };
-    setChatMessages(prev => [...prev.slice(-(CHAT_HISTORY_LIMIT - 1)), userMsgObj]);
+    setChatMessages(prev => {
+      const updated = [...prev.slice(-(CHAT_HISTORY_LIMIT - 1)), userMsgObj];
+      chatMessagesRef.current = updated;
+      return updated;
+    });
     setChatInput("");
 
     try {
@@ -5009,10 +5136,11 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
         contextualUserMsg = `<author_direction priority="highest">\n${userMsg}\n</author_direction>\n\n${contextualUserMsg}`;
       }
 
-      // FIX 2.6: Include current chapter messages + recent cross-chapter brainstorm/arc messages
-      const currentChapterMsgs = chatMessages.filter(m => !m.isError && m.chapterIdx === activeChapterIdx);
+      // FIX 2.6: Use ref to get latest messages to avoid stale closure
+      const latestMessages = chatMessagesRef.current;
+      const currentChapterMsgs = latestMessages.filter(m => !m.isError && m.chapterIdx === activeChapterIdx);
       // Also include recent brainstorm/summarize messages from adjacent chapters (story-level context)
-      const crossChapterMsgs = chatMessages.filter(m =>
+      const crossChapterMsgs = latestMessages.filter(m =>
         !m.isError && m.chapterIdx !== activeChapterIdx &&
         (m.mode === "brainstorm" || m.mode === "summarize") &&
         m.role === "assistant"
@@ -5068,8 +5196,14 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
       if (err.name === "AbortError") {
         const partial = stripThinkingTokens(streamingContentRef.current);
         if (partial) {
-          const sentenceEnd = partial.search(/[.!?]["'»)]*\s*$/);
-          const cleanPartial = sentenceEnd > partial.length * 0.3 ? partial.slice(0, sentenceEnd + 1) : partial;
+          // Find last complete sentence in partial content
+          const sentenceEndRegex = /[.!?]["'»)]*\s*/g;
+          let lastSentenceEnd = -1;
+          let match;
+          while ((match = sentenceEndRegex.exec(partial)) !== null) {
+            lastSentenceEnd = match.index + match[0].length;
+          }
+          const cleanPartial = lastSentenceEnd > partial.length * 0.3 ? partial.slice(0, lastSentenceEnd) : partial;
           if (cleanPartial.trim()) {
             setChatMessages(prev => [...prev, { id: uid(), role: "assistant", content: cleanPartial.trim() + "\n\n*[generation stopped]*", mode: genMode, chapterIdx: activeChapterIdx, isPartial: true }]);
           }
@@ -5081,7 +5215,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     }
     setStreamingContent(""); streamingContentRef.current = "";
     abortRef.current = null; setIsGenerating(false);
-  }, [isGenerating, chatInput, genMode, getModePrompt, buildSystemPrompt, chatMessages, callOpenRouterStream, processStream, selectedText, showToast, syncEditorContent, activeChapterIdx, updateChapter]);
+  }, [isGenerating, chatInput, genMode, getModePrompt, buildSystemPrompt, callOpenRouterStream, processStream, selectedText, showToast, syncEditorContent, activeChapterIdx, updateChapter, debouncedSyncEditor, settings.apiKey]);
 
   // ─── KEYBOARD SHORTCUTS ───
   useEffect(() => {
@@ -5096,6 +5230,26 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [handleGenerate, activeTab]);
+  
+  // Close plot dropdowns on outside click or Escape
+  useEffect(() => {
+    const clickHandler = (e) => {
+      if (!e.target.closest('[id^="plot-dd-"]') && !e.target.closest('.nf-btn-icon-sm')) {
+        document.querySelectorAll('[id^="plot-dd-"]').forEach(d => d.style.display = "none");
+      }
+    };
+    const keyHandler = (e) => {
+      if (e.key === "Escape") {
+        document.querySelectorAll('[id^="plot-dd-"]').forEach(d => d.style.display = "none");
+      }
+    };
+    document.addEventListener("click", clickHandler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("click", clickHandler);
+      document.removeEventListener("keydown", keyHandler);
+    };
+  }, []);
 
   // ─── INSERT METHODS ───
   // B7: Convert AI markdown to simple HTML paragraphs suitable for contentEditable
@@ -5124,7 +5278,10 @@ const insertBeatMarker = useCallback((beatId, beatTitle, beatDescription) => {
   const desc = (beatDescription || "").slice(0, 200).replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const title = (beatTitle || "Beat").replace(/"/g, '&quot;');
   const marker = `<div class="nf-beat-marker" contenteditable="false" data-beat-id="${beatId}" data-beat-title="${title}" data-beat-desc="${desc}"></div>`;
-  el.innerHTML += marker;
+  el.insertAdjacentHTML('beforeend', marker);
+  // Attach drag events to the newly inserted marker
+  const newMarker = el.querySelector(`.nf-beat-marker[data-beat-id="${beatId}"]`);
+  if (newMarker) _attachBeatDragEvents(newMarker, el);
   lastSyncedContentRef.current = el.innerHTML;
   updateChapter(activeChapterIdx, { content: el.innerHTML });
 }, [activeChapterIdx, updateChapter]);
@@ -5134,18 +5291,17 @@ const appendToChapter = useCallback((text) => {
   pushUndo();
   const el = editorRef.current;
   if (el) {
+    const htmlToInsert = "<br/><br/>" + _markdownToEditorHtml(text);
     // If there's an active beat, insert after the active beat marker
     if (activeBeatId) {
       const activeMarker = el.querySelector(`.nf-beat-marker[data-beat-id="${activeBeatId}"]`);
       if (activeMarker) {
-        const contentNode = document.createElement('div');
-        contentNode.innerHTML = "<br/><br/>" + _markdownToEditorHtml(text);
-        activeMarker.after(contentNode);
+        activeMarker.insertAdjacentHTML('afterend', htmlToInsert);
       } else {
-        el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
+        el.insertAdjacentHTML('beforeend', htmlToInsert);
       }
     } else {
-      el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
+      el.insertAdjacentHTML('beforeend', htmlToInsert);
     }
     syncEditorContent();
     lastSyncedContentRef.current = el.innerHTML;
@@ -5218,7 +5374,7 @@ const appendToChapter = useCallback((text) => {
         onInsertAtCursor: () => { insertAtCursor(content); setDiffReview(null); },
       });
     }
-  }, [selectedText, replaceSelection, appendToChapter, insertAtCursor]);
+  }, [selectedText, replaceSelection, appendToChapter, insertAtCursor, activeChapterIdx, updateChapter, showToast]);
 
   // ─── CHARACTER SUGGESTION HANDLERS ───
   const handleAcceptSuggestion = useCallback((suggestionId) => {
@@ -5268,13 +5424,37 @@ const appendToChapter = useCallback((text) => {
     const pending = charSuggestions.items.filter(s => s.status === "pending");
     const directReplaceFields = new Set(["status", "statusChangedChapter"]);
 
-    // FIX: Process in order, re-reading current value each time (earlier accepts may have changed it)
-    const appliedItems = [];
-    for (const s of pending) {
+    // FIX: Batch all updates into a single setProjects call to avoid reading stale state
+    setProjects(prev => prev.map(p => {
+      if (p.id !== activeProjectId) return p;
+      const characters = p.characters.map(c => {
+        const charUpdates = pending.filter(s => s.charId === c.id);
+        if (charUpdates.length === 0) return c;
+        const updated = { ...c };
+        for (const s of charUpdates) {
+          const currentValue = updated[s.field] || "";
+          if (directReplaceFields.has(s.field) || !currentValue.trim()) {
+            updated[s.field] = s.suggested;
+          } else {
+            const currentNorm = currentValue.trim().toLowerCase();
+            const suggestedNorm = s.suggested.trim().toLowerCase();
+            if (!suggestedNorm.includes(currentNorm.slice(0, Math.min(50, currentNorm.length)))) {
+              updated[s.field] = `${currentValue.trim()}\n[Ch${(charSuggestions.chapterIdx || 0) + 1}]: ${s.suggested.trim()}`;
+            } else {
+              updated[s.field] = s.suggested;
+            }
+          }
+        }
+        return updated;
+      });
+      return { ...p, characters };
+    }));
+
+    // Build applied items for status tracking
+    const appliedItems = pending.map(s => {
       const char = project?.characters?.find(c => c.id === s.charId);
       const currentValue = char ? (char[s.field] || "") : "";
       let finalValue = s.suggested;
-
       if (!directReplaceFields.has(s.field) && currentValue.trim()) {
         const currentNorm = currentValue.trim().toLowerCase();
         const suggestedNorm = s.suggested.trim().toLowerCase();
@@ -5282,10 +5462,8 @@ const appendToChapter = useCallback((text) => {
           finalValue = `${currentValue.trim()}\n[Ch${(charSuggestions.chapterIdx || 0) + 1}]: ${s.suggested.trim()}`;
         }
       }
-
-      updateCharById(s.charId, s.field, finalValue);
-      appliedItems.push({ ...s, applied: finalValue });
-    }
+      return { ...s, applied: finalValue };
+    });
 
     setCharSuggestions(prev => prev ? {
       ...prev,
@@ -5295,7 +5473,7 @@ const appendToChapter = useCallback((text) => {
       }),
     } : null);
     showToast(`Applied ${pending.length} character update${pending.length !== 1 ? "s" : ""}`, "success");
-  }, [charSuggestions, updateCharById, showToast, project?.characters]);
+  }, [charSuggestions, activeProjectId, showToast, project?.characters]);
 
   const handleRejectAllSuggestions = useCallback(() => {
     setCharSuggestions(prev => prev ? {
@@ -5448,6 +5626,13 @@ const appendToChapter = useCallback((text) => {
 
   const autoSummarizeChapter = useCallback(async (idx) => {
     const ch = project?.chapters?.[idx];
+    const chNum = (() => {
+      if (ch?.linkedPlotId) {
+        const plot = (project?.plotOutline || []).find(pl => pl.id === ch.linkedPlotId);
+        if (plot?.chapter) return plot.chapter;
+      }
+      return idx + 1;
+    })();
     if (!ch?.content || wordCount(ch.content) < 50) { showToast("Chapter too short", "error"); return; }
     setIsSummarizing(true);
     try {
@@ -5491,7 +5676,7 @@ Write a detailed summary in 3-5 sentences that a writing AI can use to maintain 
 - Unresolved threads and cliffhangers that future chapters must address
 
 Be specific with character names. Write as a factual reference, not a story recap.` },
-        { role: "user", content: `Summarize Chapter ${idx + 1}: "${ch.title || 'Untitled'}":\n\n${sample}` },
+        { role: "user", content: `Summarize Chapter ${chNum}: "${ch.title || 'Untitled'}":\n\n${sample}` },
       ], { maxTokens: 10000, temperature: 0.3 });
 
       // E1: Track when summary was generated for stale detection
@@ -5552,7 +5737,7 @@ For each character who changed, output:
 
 Fields you can suggest: desires, arc, status, statusChangedChapter, canonNotes, backstory, speechPattern.
 If no updates are needed, respond "No character updates needed."` },
-            { role: "user", content: `Chapter ${idx + 1} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${idx + 1}` },
+            { role: "user", content: `Chapter ${chNum} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${chNum}` },
           ], { maxTokens: 10000, temperature: 0.4 });
 
           if (suggestions && !suggestions.toLowerCase().includes("no character updates needed")) {
@@ -5594,13 +5779,13 @@ If no updates are needed, respond "No character updates needed."` },
             parsedSuggestions = parsedSuggestions.filter(s => s.field !== "relationships");
 
             if (parsedSuggestions.length > 0) {
-              setCharSuggestions({ chapterIdx: idx, chapterTitle: ch.title || `Chapter ${idx + 1}`, items: parsedSuggestions });
+              setCharSuggestions({ chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum}`, items: parsedSuggestions });
               showToast(`${parsedSuggestions.length} character update suggestion${parsedSuggestions.length > 1 ? "s" : ""} ready for review`, "info");
             } else if (suggestions && suggestions.trim() && !suggestions.toLowerCase().includes("no character updates needed")) {
               // Fallback: show raw text if JSON parsing failed but AI returned content
               setChatMessages(prev => [...prev, {
                 id: uid(), role: "assistant", mode: "summarize", chapterIdx: idx,
-                content: `**Character Update Suggestions** (from Ch${idx + 1} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
+                content: `**Character Update Suggestions** (from Ch${chNum} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
               }]);
               showToast("Character suggestions ready — check the AI panel", "info");
             }
@@ -5670,7 +5855,7 @@ Example output:
 \`\`\`
 
 If no relationship changes, respond "No relationship updates needed."` },
-              { role: "user", content: `Chapter ${idx + 1} summary: ${summary}\n\nChapter number: ${idx + 1}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
+              { role: "user", content: `Chapter ${chNum} summary: ${summary}\n\nChapter number: ${chNum}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
             ], { maxTokens: 10000, temperature: 0.5 });
 
             if (relSuggestions && !relSuggestions.toLowerCase().includes("no relationship updates needed")) {
@@ -5711,7 +5896,7 @@ If no relationship changes, respond "No relationship updates needed."` },
                               const curNorm = currentVal.trim().toLowerCase();
                               const sugNorm = item[field].trim().toLowerCase();
                               if (!sugNorm.includes(curNorm.slice(0, Math.min(50, curNorm.length)))) {
-                                finalVal = `${currentVal.trim()}\n[Ch${idx + 1}]: ${item[field].trim()}`;
+                                finalVal = `${currentVal.trim()}\n[Ch${chNum}]: ${item[field].trim()}`;
                               }
                             }
                             parsedRelSuggestions.push({
@@ -5737,8 +5922,8 @@ If no relationship changes, respond "No relationship updates needed."` },
                           char1Perspective: item.char1Perspective || "",
                           char2Perspective: item.char2Perspective || "",
                           notes: item.notes || "",
-                          meetsInChapter: idx + 1,
-                          evolutionTimeline: item.notes ? `Ch${idx + 1}: ${item.notes}` : "",
+                          meetsInChapter: chNum,
+                          evolutionTimeline: item.notes ? `Ch${chNum}: ${item.notes}` : "",
                           suggestionStatus: "pending",
                         });
                       }
@@ -5749,7 +5934,7 @@ If no relationship changes, respond "No relationship updates needed."` },
 
               if (parsedRelSuggestions.length > 0) {
                 setCharSuggestions(prev => {
-                  const existing = prev || { chapterIdx: idx, chapterTitle: ch.title || `Chapter ${idx + 1}`, items: [] };
+                  const existing = prev || { chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum}`, items: [] };
                   return {
                     ...existing,
                     relSuggestions: [...(existing.relSuggestions || []), ...parsedRelSuggestions],
@@ -5810,7 +5995,7 @@ If no relationship changes, respond "No relationship updates needed."` },
         const data = await GDrive.loadFromDrive();
         if (data && data.projects?.length > 0) {
           // Check if Drive backup is newer or has more data than local
-          const localProjectCount = projects.length;
+          const localProjectCount = projectsRef.current.length;
           const driveProjectCount = data.projects.length;
           const driveSavedAt = data._savedAt ? new Date(data._savedAt) : null;
 
@@ -5860,7 +6045,7 @@ If no relationship changes, respond "No relationship updates needed."` },
     } catch (e) {
       showToast(`Drive connect failed: ${e.message}`, "error");
     }
-  }, [gdriveClientId, showToast, projects.length, setProjects, setActiveProjectId, setSettings, setTabChatHistories, setGdriveConnected, setGdriveLastSync]);
+  }, [gdriveClientId, showToast, setProjects, setActiveProjectId, setSettings, setTabChatHistories, setGdriveConnected, setGdriveLastSync]);
 
   const handleFlushAll = useCallback(async () => {
     // 1. Save unsaved editor content to state before flushing
@@ -5885,11 +6070,14 @@ If no relationship changes, respond "No relationship updates needed."` },
         const req = indexedDB.deleteDatabase(IDB_DB_NAME);
         req.onsuccess = () => resolve();
         req.onerror = () => reject(req.error);
-        req.onblocked = () => resolve(); // Proceed even if blocked
+        req.onblocked = () => {
+          // Force close any open connections
+          if (_idb._db) { _idb._db.close(); _idb._db = null; }
+          resolve();
+        };
       });
-      localStorage.removeItem(LS_PROJECTS);
-      localStorage.removeItem(LS_SETTINGS);
-      localStorage.removeItem(LS_TAB_CHATS);
+      // Reset IDB singleton so it reopens fresh
+      _idb._db = null;
     } catch (e) { console.error("Flush failed:", e); }
 
     // 3. Disconnect Google Drive and clear image caches
@@ -5951,7 +6139,7 @@ If no relationship changes, respond "No relationship updates needed."` },
     if (!ch?.content || wordCount(ch.content) < 20) { showToast("Write some content first", "error"); return; }
 
     const plain = _htmlToPlain(ch.content);
-    const currentChNum = activeChapterIdx + 1;
+    const currentChNum = ContextEngine._chapterNum(project, activeChapterIdx);
 
     // Previous chapter's world view for consistency
     let prevWorldView = "";
@@ -6047,17 +6235,25 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       showToast(`Failed: ${_formatApiError(e)}`, "error");
     }
   }, [project, activeChapterIdx, settings.apiKey, callOpenRouter, updateChapter, showToast]);
+  
   const handleLinkPlotEntry = useCallback((plotId) => {
     if (!plotId) return;
 
     if (plotId === "__new__") {
       const chNum = activeChapterIdx + 1;
       const title = activeChapter?.title || `Chapter ${chNum}`;
+      const newPlotId = uid();
       const newPlot = {
-        id: uid(), chapter: chNum, title, summary: "",
+        id: newPlotId, chapter: chNum, title, summary: "",
         beats: [], sceneType: "narrative", pov: "",
         characters: [], date: "", povCharacterId: "",
       };
+      
+      // Link this chapter to the new plot entry
+      updateChapter(activeChapterIdx, { 
+        title,
+        linkedPlotId: newPlotId,  // ← EXPLICIT LINK
+      });
       updateProject({
         plotOutline: [...(project?.plotOutline || []), newPlot],
       });
@@ -6065,29 +6261,23 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       return;
     }
 
-    const currentChNum = activeChapterIdx + 1;
-    const outline = project?.plotOutline || [];
-    const currentLinked = outline.find(pl => (pl.chapter || 0) === currentChNum && pl.id !== plotId);
+    const outline = [...(project?.plotOutline || [])];
+    const entry = outline.find(pl => pl.id === plotId);
+    if (!entry) return;
 
-    const updated = outline.map(r => {
-      if (r.id === plotId) {
-        return { ...r, chapter: currentChNum, title: r.title || activeChapter?.title || `Chapter ${currentChNum}` };
-      }
-      if (currentLinked && r.id === currentLinked.id) {
-        // Bump conflicting entry to next available chapter number
-        const used = new Set(updated.map(e => e.chapter));
-        let next = currentChNum + 1;
-        while (used.has(next)) next++;
-        showToast(`"${currentLinked.title}" moved to Ch${next}`, "info");
-        return { ...r, chapter: next };
-      }
-      return r;
-    });
+    // Update chapter title AND store the explicit link
+    if (entry.title) {
+      updateChapter(activeChapterIdx, { 
+        title: entry.title,
+        linkedPlotId: entry.id,  // ← EXPLICIT LINK
+      });
+    }
 
-    updateProject({ plotOutline: updated });
-    const entry = outline.find(r => r.id === plotId);
-    if (entry) showToast(`Linked "${entry.title}" to Ch${currentChNum}`, "success");
-  }, [activeChapterIdx, activeChapter, project, updateProject, showToast]);
+    showToast(
+      `Linked "${entry.title || 'Untitled'}" (Ch${entry.chapter}) to manuscript Ch${activeChapterIdx + 1}`,
+      "success"
+    );
+  }, [activeChapterIdx, activeChapter, project, updateProject, updateChapter, showToast]);
   
   const handleDeactivateChapter = useCallback(() => {
     const ch = project?.chapters?.[activeChapterIdx];
@@ -6115,6 +6305,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       pov: ch.pov || "",
       notes: "",
       worldView: "",
+      linkedPlotId: ch.linkedPlotId || "",
     };
     updateProject({ chapters, drafts });
     lastSyncedChapterRef.current = null;
@@ -6148,6 +6339,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     const chapters = [...(project?.chapters || [])];
     chapters[targetIdx] = {
       id: chapters[targetIdx]?.id || uid(),
+      linkedPlotId: chapters[targetIdx]?.linkedPlotId || "",
       title: draft.title,
       content: draft.content,
       summary: draft.summary || "",
@@ -6165,9 +6357,23 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
   const handleDeleteDraft = useCallback((draftId) => {
     const d = (project?.drafts || []).find(x => x.id === draftId);
-    updateProject({ drafts: (project?.drafts || []).filter(x => x.id !== draftId) });
-    showToast(d ? `Deleted draft of "${d.title}"` : "Draft deleted", "success");
-  }, [project, updateProject, showToast]);
+    const draftTitle = d?.title || "Untitled";
+    setConfirmDialog({
+      message: `Delete draft "${draftTitle}"? This cannot be undone.`,
+      confirmLabel: "Delete Draft",
+      onConfirm: () => {
+        updateProject({ drafts: (project?.drafts || []).filter(x => x.id !== draftId) });
+        if (viewingDraftId === draftId) {
+          setViewingDraftId(null);
+          lastSyncedChapterRef.current = null;
+          lastSyncedContentRef.current = null;
+        }
+        showToast(`Deleted draft of "${draftTitle}"`, "success");
+        setConfirmDialog(null);
+      },
+      onCancel: () => setConfirmDialog(null),
+    });
+  }, [project, updateProject, showToast, viewingDraftId]);
   
   const handleViewDraft = useCallback((draftId) => {
     const draft = (project?.drafts || []).find(d => d.id === draftId);
@@ -6375,19 +6581,20 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   useEffect(() => {
     if (gdriveAutoSync && gdriveConnected && gdriveSyncInterval > 0) {
       gdriveSyncTimerRef.current = setInterval(async () => {
-        if (!GDrive.isConnected() || projects.length === 0) return;
+        if (!GDrive.isConnected() || projectsRef.current.length === 0) return;
         try {
+          const currentProjects = projectsRef.current;
           const allImages = [];
-          for (const proj of projects) allImages.push(...(await GDriveImages.collectAllImages(proj)));
+          for (const proj of currentProjects) allImages.push(...(await GDriveImages.collectAllImages(proj)));
           if (allImages.length > 0) await GDriveImages.syncUpload(allImages);
 
-          const projectsForDrive = projects.map(p => GDriveImages.markImages(JSON.parse(JSON.stringify(p))));
+          const projectsForDrive = currentProjects.map(p => GDriveImages.markImages(JSON.parse(JSON.stringify(p))));
 
-          // ✅ Use the SAME keys as the manual sync handler
+          // Use refs to get latest data
           await GDrive.saveToDrive({
             projects: projectsForDrive,
-            settings,
-            tabChats: tabChatHistories,
+            settings: settingsRef.current,
+            tabChats: tabChatHistoriesRef.current,
             _hashToDriveId: GDriveImages._hashToDriveId,
             _pathToDriveId: GDriveImages._pathToDriveId,
             _format: "novelforge-backup-v2",
@@ -6404,7 +6611,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       }, gdriveSyncInterval * 60 * 1000);
       return () => clearInterval(gdriveSyncTimerRef.current);
     }
-  }, [gdriveAutoSync, gdriveConnected, gdriveSyncInterval, projects, settings, tabChatHistories]);
+  }, [gdriveAutoSync, gdriveConnected, gdriveSyncInterval]);
  
   useEffect(() => {
     if (settings.googleClientId) { setGdriveClientId(settings.googleClientId); GDrive.setClientId(settings.googleClientId); }
@@ -7168,13 +7375,13 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 {msg.isError && (
                   <div className="nf-chat-actions">
                     <button onClick={() => {
-                      // FIX 2.10: Find the last user message and re-inject its content into chatInput, then generate
+                      // FIX: Find the last user message and re-send directly
                       const lastUser = [...chatMessages].reverse().find(m => m.role === "user");
                       if (lastUser) {
+                        // Remove error message, then re-send the last user message content
                         setChatMessages(prev => prev.filter(m => m.id !== msg.id));
+                        // Set input and let user click send (avoids stale closure timing issues)
                         setChatInput(lastUser.content);
-                        // Trigger generate on next tick after state updates
-                        setTimeout(() => handleGenerate(), 50);
                       }
                     }} className="nf-btn-micro" style={{ borderColor: "var(--nf-accent)" }}>↻ Retry</button>
                     <button onClick={() => setChatMessages(prev => prev.filter(m => m.id !== msg.id))} className="nf-btn-micro"><Icons.X /> Dismiss</button>
@@ -7266,21 +7473,43 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             <button onClick={() => {
               const chNum = (project?.chapters?.length || 0) + 1;
               const title = `Chapter ${chNum}`;
-              const chs = [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "" }];
-              // FIX 7: Also create matching plot entry if one doesn't exist for this chapter number
+              const newChId = uid();
+              const chs = [...(project?.chapters || []), {
+                id: newChId, title, content: "", summary: "", notes: "",
+                sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "",
+                linkedPlotId: "",
+              }];
+            
               const existingPlot = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chNum);
               const plotUpdate = existingPlot ? {} : {
-                plotOutline: [...(project?.plotOutline || []), { id: uid(), chapter: chNum, title, summary: "", beats: "", sceneType: "narrative", pov: "", characters: [], date: "", povCharacterId: "" }],
+                plotOutline: [...(project?.plotOutline || []), {
+                  id: uid(), chapter: chNum, title, summary: "", beats: "",
+                  sceneType: "narrative", pov: "", characters: [], date: "",
+                  povCharacterId: "",
+                }],
               };
-              updateProject({ chapters: chs, ...plotUpdate }); setActiveChapterIdx(chs.length - 1);
+            
+              if (existingPlot) {
+                chs[chs.length - 1].linkedPlotId = existingPlot.id;
+                if (existingPlot.title) chs[chs.length - 1].title = existingPlot.title;
+              } else if (plotUpdate.plotOutline) {
+                const lastPlot = plotUpdate.plotOutline[plotUpdate.plotOutline.length - 1];
+                if (lastPlot?.id) chs[chs.length - 1].linkedPlotId = lastPlot.id;
+              }
+            
+              // ✅ All statements inside onClick handler, including these two:
+              updateProject({ chapters: chs, ...plotUpdate });
+              setActiveChapterIdx(chs.length - 1);
               lastSyncedChapterRef.current = null;
-            }} className="nf-btn-icon-sm" aria-label="Add chapter"><Icons.Plus /> Add</button>
+            }} className="nf-btn-icon-sm" aria-label="Add chapter">
+              <Icons.Plus /> Add
+            </button>
           </div>
           <div className="nf-chapter-list">
             {project?.chapters?.map((ch, i) => (
               <div key={ch.id || i}>
                 <div onClick={() => {
-                  if (viewingDraftId) { handleCloseDraft(); }
+                  if (viewingDraftId) { handleCloseDraft(); setSelectedText(""); setSelectionRange(null); }
                   if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); lastSyncedChapterRef.current = null; setSelectedText(""); setSelectionRange(null); }
                 }}
                   draggable
@@ -7439,80 +7668,209 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         {!viewingDraftId && (
         <div className="nf-chapter-header">
           <div style={{ flex: 1, minWidth: 0 }}>
-            <input value={activeChapter?.title || ""} onChange={e => {
-              const newTitle = e.target.value;
-              updateChapter(activeChapterIdx, { title: newTitle });
+            {(() => {
               const chNum = activeChapterIdx + 1;
-              const plotOutline = project?.plotOutline || [];
-              const linkedIdx = plotOutline.findIndex(pl => (pl.chapter || 0) === chNum);
-              if (linkedIdx >= 0) {
-                updateProject({
-                  plotOutline: plotOutline.map((pl, i) => i === linkedIdx ? { ...pl, title: newTitle } : pl),
-                });
-              }
-            }}
-              maxLength={120}
-              className="nf-chapter-title-input" placeholder="Chapter title..."
-              aria-label="Chapter title" />
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, paddingLeft: 2 }}>
-              {(() => {
-                const chNum = activeChapterIdx + 1;
-                const outline = project?.plotOutline || [];
-                const linkedPlot = outline.find(pl => (pl.chapter || 0) === chNum);
-                const unlinked = outline.filter(pl => (pl.chapter || 0) !== chNum);
+              const outline = project?.plotOutline || [];
+              // Find the plot entry linked to this manuscript position
+              // A plot is "linked" to this chapter if the manuscript chapter title matches
+              // the plot entry's title, or if it was the last one selected
+              // REPLACE the title-matching logic with explicit ID lookup:
+              const linkedPlot = (() => {
+                const linkedId = activeChapter?.linkedPlotId;
+                if (linkedId) {
+                  const match = (project?.plotOutline || []).find(pl => pl.id === linkedId);
+                  if (match) return match;
+                }
+                // Fallback: legacy title match (for pre-fix data)
+                return (project?.plotOutline || []).find(pl => 
+                  activeChapter?.title && pl.title && activeChapter.title === pl.title
+                );
+              })();
+              const unlinked = outline.filter(pl => pl.id !== linkedPlot?.id);
 
-                return (
-                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    <span style={{
-                      fontSize: 9, fontWeight: 600,
-                      color: linkedPlot ? "var(--nf-success)" : "var(--nf-text-muted)",
-                      letterSpacing: "0.08em", textTransform: "uppercase",
-                      fontFamily: "var(--nf-font-body)", flexShrink: 0,
-                    }}>
-                      Plot{linkedPlot ? " ◈" : ""}
-                    </span>
-                    <select
-                      value={linkedPlot?.id || ""}
-                      onChange={e => {
-                        const val = e.target.value;
-                        if (val === "__new__") {
-                          handleLinkPlotEntry("__new__");
-                        } else if (val && val !== linkedPlot?.id) {
-                          handleLinkPlotEntry(val);
+              return (
+                <div style={{ display: "flex", alignItems: "center", gap: 0, width: "100%" }}>
+                  <input
+                    value={activeChapter?.title || ""}
+                    onChange={e => {
+                      const newTitle = e.target.value;
+                      updateChapter(activeChapterIdx, { title: newTitle });
+                      if (linkedPlot) {
+                        updateProject({
+                          plotOutline: outline.map(pl =>
+                            pl.id === linkedPlot.id ? { ...pl, title: newTitle } : pl
+                          ),
+                        });
+                      }
+                    }}
+                    maxLength={120}
+                    className="nf-chapter-title-input"
+                    placeholder="Chapter title..."
+                    aria-label="Chapter title"
+                  />
+
+                  {/* Plot link dropdown — custom, not native select */}
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <button
+                      onClick={() => {
+                        // Toggle: clicking the same button closes, clicking different opens
+                        const el = document.getElementById(`plot-dd-${activeChapterIdx}`);
+                        if (el) {
+                          const isOpen = el.style.display === "block";
+                          // Close all open ones first
+                          document.querySelectorAll('[id^="plot-dd-"]').forEach(d => d.style.display = "none");
+                          if (!isOpen) el.style.display = "block";
                         }
                       }}
-                      className="nf-select"
+                      className="nf-btn-icon-sm"
                       style={{
-                        width: "auto", minWidth: 140, maxWidth: 300,
-                        padding: "2px 6px", fontSize: 10,
-                        height: 22, lineHeight: "16px",
-                        borderColor: linkedPlot ? "var(--nf-success)" : "var(--nf-border)",
-                        background: linkedPlot ? "var(--nf-success-bg)" : "var(--nf-bg-surface)",
+                        borderColor: linkedPlot ? "var(--nf-success)" : undefined,
+                        color: linkedPlot ? "var(--nf-success)" : undefined,
+                        fontSize: 10,
+                        padding: "4px 10px",
+                        whiteSpace: "nowrap",
+                        fontWeight: 600,
                       }}
-                      aria-label="Link to plot entry"
                     >
-                      {linkedPlot ? (
-                        <option value={linkedPlot.id}>
-                          ✓ Ch{chNum}: {linkedPlot.title || "Untitled"}
-                        </option>
-                      ) : (
-                        <option value="">— No plot entry —</option>
+                      {linkedPlot ? "◈ Linked" : "◇ Plot"} <Icons.ChevDown />
+                    </button>
+
+                    <div
+                      id={`plot-dd-${activeChapterIdx}`}
+                      style={{
+                        display: "none",
+                        position: "absolute",
+                        top: "100%",
+                        right: 0,
+                        zIndex: 200,
+                        background: "var(--nf-dialog-bg)",
+                        border: "1px solid var(--nf-border)",
+                        borderRadius: 8,
+                        boxShadow: "var(--nf-shadow-lg)",
+                        minWidth: 280,
+                        maxHeight: 320,
+                        overflowY: "auto",
+                        marginTop: 4,
+                        animation: "nf-fadeIn 0.1s ease-out",
+                      }}
+                    >
+                      {/* Close on click outside */}
+                      {(() => {
+                        // Use a ref-based approach: close this dropdown when clicking outside
+                        // Handled by the button toggle above + global click listener
+                        return null;
+                      })()}
+
+                      {linkedPlot && (
+                        <div style={{
+                          padding: "8px 12px",
+                          borderBottom: "1px solid var(--nf-border)",
+                          background: "var(--nf-success-bg)",
+                        }}>
+                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                            Currently Linked
+                          </div>
+                          <div style={{
+                            fontSize: 13, color: "var(--nf-text)", marginTop: 3,
+                            fontWeight: 500, fontFamily: "var(--nf-font-display)",
+                          }}>
+                            Ch{linkedPlot.chapter || chNum}: {linkedPlot.title || "Untitled"}
+                          </div>
+                          {linkedPlot.sceneType && (
+                            <span style={{
+                              fontSize: 9, padding: "1px 6px",
+                              background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)",
+                              borderRadius: 3, color: "var(--nf-text-muted)", marginTop: 3, display: "inline-block",
+                            }}>{linkedPlot.sceneType}</span>
+                          )}
+                        </div>
                       )}
+					  
+                      {linkedPlot && (
+                        <button
+                          onClick={() => {
+                            updateChapter(activeChapterIdx, { linkedPlotId: "" });
+                            document.getElementById(`plot-dd-${activeChapterIdx}`)?.style.setProperty("display", "none");
+                          }}
+                          style={{
+                            display: "block", width: "100%", textAlign: "left",
+                            padding: "6px 12px", border: "none", borderBottom: "1px solid var(--nf-border)",
+                            background: "transparent", cursor: "pointer",
+                            color: "var(--nf-accent)", fontSize: 11,
+                          }}
+                        >
+                          ✕ Unlink from "{linkedPlot.title}"
+                        </button>
+                      )}
+					  
                       {unlinked.length > 0 && (
-                        <optgroup label="Link to other entry">
+                        <>
+                          <div style={{
+                            padding: "6px 12px",
+                            fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)",
+                            textTransform: "uppercase", letterSpacing: "0.1em",
+                          }}>
+                            Relink to...
+                          </div>
                           {unlinked.map(pl => (
-                            <option key={pl.id} value={pl.id}>
-                              {pl.title || "Untitled"} ({(pl.chapter || 0) > 0 ? `Ch${pl.chapter}` : "unlinked"})
-                            </option>
+                            <button
+                              key={pl.id}
+                              onClick={() => {
+                                handleLinkPlotEntry(pl.id);
+                                if (pl.title) {
+                                  updateChapter(activeChapterIdx, { title: pl.title });
+                                }
+                                // Close dropdown
+                                document.getElementById(`plot-dd-${activeChapterIdx}`)?.style.setProperty("display", "none");
+                              }}
+                              style={{
+                                display: "block", width: "100%", textAlign: "left",
+                                padding: "8px 12px", border: "none", borderBottom: "1px solid var(--nf-border)",
+                                background: "transparent", cursor: "pointer",
+                                color: "var(--nf-text)", fontSize: 12,
+                                transition: "background 0.1s",
+                              }}
+                              onMouseEnter={e => e.currentTarget.style.background = "var(--nf-bg-hover)"}
+                              onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                            >
+                              <div style={{ fontWeight: 500 }}>{pl.title || "Untitled"}</div>
+                              <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 1 }}>
+                                {(pl.chapter || 0) > 0 ? `Ch${pl.chapter}` : "unlinked"}
+                                {pl.sceneType ? ` · ${pl.sceneType}` : ""}
+                              </div>
+                            </button>
                           ))}
-                        </optgroup>
+                        </>
                       )}
-                      <option value="__new__">+ Create new plot entry</option>
-                    </select>
+
+                      {unlinked.length === 0 && !linkedPlot && (
+                        <div style={{ padding: "12px", fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic", textAlign: "center" }}>
+                          All plot entries are linked to chapters
+                        </div>
+                      )}
+
+                      <button
+                        onClick={() => {
+                          handleLinkPlotEntry("__new__");
+                          document.getElementById(`plot-dd-${activeChapterIdx}`)?.style.setProperty("display", "none");
+                        }}
+                        style={{
+                          display: "block", width: "100%", textAlign: "left",
+                          padding: "8px 12px", border: "none",
+                          background: "transparent", cursor: "pointer",
+                          color: "var(--nf-accent-2)", fontSize: 12, fontWeight: 600,
+                          transition: "background 0.1s",
+                        }}
+                        onMouseEnter={e => e.currentTarget.style.background = "var(--nf-bg-hover)"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+                      >
+                        + Create new plot entry for Ch{chNum}
+                      </button>
+                    </div>
                   </div>
-                );
-              })()}
-            </div>
+                </div>
+              );
+            })()}
           </div>
           <SaveIndicator status={saveStatus} fileLinked={fileLinked} />
           <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words` : ""}</span>
@@ -7550,9 +7908,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             </Tooltip>
             <Tooltip text="Insert beat markers from Plot outline">
               <button onClick={() => {
-                const plotEntry = (project?.plotOutline || []).find(
-                  pl => (pl.chapter || 0) === activeChapterIdx + 1
-                );
+                const plotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
                 const beats = Array.isArray(plotEntry?.beats) ? plotEntry.beats : [];
                 if (!beats.length) {
                   showToast("No beats in plot outline for this chapter", "error");
@@ -7663,7 +8019,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     : `Inserted ${newBeats.length} beat markers`,
                   "success"
                 );
-              }} className="nf-btn-icon-sm" disabled={!project?.plotOutline?.some(pl => (pl.chapter || 0) === activeChapterIdx + 1 && Array.isArray(pl.beats) && pl.beats.length > 0)}>
+              }} className="nf-btn-icon-sm" disabled={!ContextEngine._plotEntryForChapter(project, activeChapterIdx)?.beats?.length}>
                 <Icons.List /> Beats
               </button>
             </Tooltip>
@@ -7681,9 +8037,19 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               <button onClick={() => setConfirmDialog({
                 message: `Delete "${activeChapter?.title}"?`,
                 onConfirm: () => {
-                  const chs = project.chapters.filter((_, i) => i !== activeChapterIdx);
-                  updateProject({ chapters: chs.length ? chs : [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }] });
-                  setActiveChapterIdx(Math.min(activeChapterIdx, Math.max(0, chs.length - 1)));
+                  const deletedIdx = activeChapterIdx;
+                  const chs = project.chapters.filter((_, i) => i !== deletedIdx);
+                  // Fix draft originalIndex references after deletion
+                  const fixedDrafts = (project.drafts || []).map(d => {
+                    if (d.originalIndex === deletedIdx) return { ...d, originalIndex: -1 }; // orphan it
+                    if (d.originalIndex > deletedIdx) return { ...d, originalIndex: d.originalIndex - 1 };
+                    return d;
+                  });
+                  updateProject({
+                    chapters: chs.length ? chs : [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "", linkedPlotId: "" }],
+                    drafts: fixedDrafts,
+                  });
+                  setActiveChapterIdx(Math.min(deletedIdx, Math.max(0, chs.length - 1)));
                   lastSyncedChapterRef.current = null; setConfirmDialog(null); showToast("Deleted", "success");
                 },
               })} className="nf-btn-icon-sm nf-btn-icon-danger" aria-label="Delete chapter"><Icons.Trash /></button>
@@ -7699,17 +8065,15 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         <RichTextToolbar editorRef={editorRef} onContentChange={syncEditorContent} />
         <div className="nf-editor-split">
           <div className="nf-text-editor">
-            <div ref={editorRef} contentEditable suppressContentEditableWarning
+            <div ref={editorRef} contentEditable="true" suppressContentEditableWarning
               className="nf-editor-contenteditable"
               spellCheck="true"
-              autoCorrect="on"
-              autoCapitalize="sentences"
               role="textbox"
               aria-multiline="true"
               aria-label={`Editor for ${activeChapter?.title || 'chapter'}`}
+              data-placeholder="Begin writing your chapter..."
               onInput={(e) => {
                 if (viewingDraftId) {
-                  // Save draft content directly to project state
                   const html = e.currentTarget.innerHTML;
                   updateProject({
                     drafts: (project?.drafts || []).map(d =>
@@ -7723,7 +8087,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 const el = e.currentTarget;
                 el.classList.toggle("nf-has-content", el.textContent.trim().length > 0);
               }}
-              onBlur={() => { pushUndo(); syncEditorContent(); }}
+              onBlur={() => { debouncedSyncEditor.cancel(); pushUndo(); syncEditorContent(); }}
               onMouseUp={(e) => {
 			    handleEditorSelect(e);
 			    const sel = window.getSelection();
@@ -7742,6 +8106,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 if (mod && e.key === 'b') { e.preventDefault(); document.execCommand('bold'); syncEditorContent(); }
                 else if (mod && e.key === 'i') { e.preventDefault(); document.execCommand('italic'); syncEditorContent(); }
                 else if (mod && e.shiftKey && e.key === 'x') { e.preventDefault(); document.execCommand('strikeThrough'); syncEditorContent(); }
+                // Intercept Ctrl+Z/Ctrl+Shift+Z to use our undo system instead of browser's
+                else if (mod && !e.shiftKey && e.key === 'z') { e.preventDefault(); handleUndo(); }
+                else if (mod && e.shiftKey && e.key === 'z') { e.preventDefault(); handleRedo(); }
+                else if (mod && e.key === 'y') { e.preventDefault(); handleRedo(); }
               }}
               onPaste={(e) => {
                 // Check for image data in clipboard
@@ -7750,19 +8118,21 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   for (const item of items) {
                     if (item.type.startsWith('image/')) {
                       e.preventDefault();
-                      const file = item.getAsFile();
+                      debouncedSyncEditor.cancel();
+					  const file = item.getAsFile();
                       if (!file) continue;
                       const reader = new FileReader();
                       reader.onload = (ev) => {
                         const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                        const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${url}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-                        document.execCommand('insertHTML', false, imgHtml);
-                        syncEditorContent();
-                        // Attach event handlers to the newly inserted image
-                        const el = editorRef.current;
-                        if (el) {
-                          const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
-                          if (newFig) _attachImageEvents(newFig, el);
+						const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+						const editorNode = editorRef.current;
+						if (editorNode) {
+						  editorNode.focus();
+						  document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
+                          syncEditorContent();
+                          // Attach event handlers to the newly inserted image
+                          const newFig = editorNode.querySelector('figure.nf-img-wrapper:last-of-type');
+                          if (newFig) _attachImageEvents(newFig, editorNode);
                         }
                       };
                       reader.readAsDataURL(file);
@@ -7777,11 +8147,16 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 if (html) {
                   document.execCommand('insertHTML', false, _sanitizePastedHtml(html));
                 } else {
-                  document.execCommand('insertText', false, plain);
+                  // Convert markdown-like formatting in plain text
+                  const formatted = plain
+                    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+                    .replace(/\n\n/g, '</p><p>')
+                    .replace(/\n/g, '<br/>');
+                  document.execCommand('insertHTML', false, `<p>${formatted}</p>`);
                 }
                 syncEditorContent();
               }}
-              data-placeholder="Begin writing your chapter..."
               onDragOver={(e) => {
                 if (e.dataTransfer?.types?.includes('Files')) {
                   e.preventDefault();
@@ -7794,15 +8169,15 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
                 if (imageFiles.length === 0) return;
                 e.preventDefault();
-                const el = editorRef.current;
+                debouncedSyncEditor.cancel();
+				const el = editorRef.current;
                 if (!el) return;
                 imageFiles.forEach(file => {
                   const reader = new FileReader();
                   reader.onload = (ev) => {
                     const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
                     const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-                    el.focus();
-                    document.execCommand('insertHTML', false, imgHtml);
+                    document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
                     syncEditorContent();
                     const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
                     if (newFig) _attachImageEvents(newFig, el);
@@ -8741,7 +9116,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
     // F6: Detect which entities are currently detected
     const curChapter = project?.chapters?.[activeChapterIdx];
     const curPlain = curChapter?.content ? _htmlToPlain(curChapter.content) : "";
-    const currentChNum = activeChapterIdx + 1;
+    const currentChNum = (() => {
+      const ch = project?.chapters?.[activeChapterIdx];
+      if (ch?.linkedPlotId) {
+        const plot = (project?.plotOutline || []).find(pl => pl.id === ch.linkedPlotId);
+        if (plot?.chapter) return plot.chapter;
+      }
+      return activeChapterIdx + 1;
+    })();
     const curPlotEntry = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === currentChNum);
     const plotBeatsForDetect = curPlotEntry ? `${curPlotEntry.title || ""} ${curPlotEntry.summary || ""} ${curPlotEntry.beats || ""}` : "";
     const memDetectionText = curPlain + " " + (curChapter?.sceneNotes || "") + " " + plotBeatsForDetect;
@@ -9257,17 +9639,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-btn-micro:hover { border-color: var(--nf-accent); transform: scale(1.04); }
           .nf-btn-micro:disabled { opacity: 0.3; cursor: default; }
           .nf-btn-micro-danger:hover { color: var(--nf-accent); border-color: var(--nf-accent); }
-          
-          .nf-field { margin-bottom: 10px; }
-          .nf-label { display: block; font-size: 9px; font-weight: 500; color: var(--nf-text-muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.15em; font-family: var(--nf-font-body); }
-          .nf-input { width: 100%; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 2px; color: var(--nf-text); font-size: 13px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.15s; }
-          .nf-textarea { width: 100%; min-height: 76px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 2px; color: var(--nf-text); font-size: 13px; line-height: 1.6; resize: vertical; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.15s; }
-          .nf-textarea-sm { min-height: 56px; }
-          .nf-select { width: 100%; padding: 9px 10px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 2px; color: var(--nf-text); font-size: 12px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.15s; }
-          .nf-range { width: 100%; accent-color: var(--nf-accent); }
-          .nf-hint { color: var(--nf-text-muted); font-size: 12px; margin-bottom: 20px; line-height: 1.6; }
-          .nf-char-section { margin-bottom: 20px; padding: 16px; background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: 2px; }
-          .nf-char-section-label { font-size: 9px; font-weight: 500; color: var(--nf-accent); text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--nf-border); font-family: var(--nf-font-body); }
+
           
           /* Physical card interactions — Japandi paper feel */
           .nf-card { margin-bottom: 14px; padding: 16px; background: var(--nf-bg-raised); border-radius: 2px; border: 1px solid var(--nf-border); transition: transform 0.2s ease, box-shadow 0.2s ease; }
@@ -9276,7 +9648,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-polaroid:hover { transform: rotate(-1.5deg) translateY(-3px); box-shadow: var(--nf-shadow-lg); }
           
           .nf-field { margin-bottom: 10px; }
-          .nf-label { display: block; font-size: 10px; font-weight: 700; color: var(--nf-text-dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.1em; }
+          .nf-label { display: block; font-size: 10px; font-weight: 700; color: var(--nf-text-dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--nf-font-body); }
           .nf-input { width: 100%; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.15s; }
           .nf-textarea { width: 100%; min-height: 76px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; line-height: 1.6; resize: vertical; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.15s; }
           .nf-textarea-sm { min-height: 56px; }
@@ -9284,7 +9656,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-range { width: 100%; accent-color: var(--nf-accent); }
           .nf-hint { color: var(--nf-text-muted); font-size: 12px; margin-bottom: 20px; line-height: 1.6; }
           .nf-char-section { margin-bottom: 20px; padding: 16px; background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: var(--nf-radius); }
-          .nf-char-section-label { font-size: 10px; font-weight: 700; color: var(--nf-accent-2); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--nf-border); }
+          .nf-char-section-label { font-size: 10px; font-weight: 700; color: var(--nf-accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--nf-border); font-family: var(--nf-font-body); }
           
           .nf-tab-bar { display: flex; align-items: center; border-bottom: 1px solid var(--nf-border); background: var(--nf-bg); padding: 0 12px; min-height: 46px; }
           .nf-tab-scroll-area { display: flex; align-items: center; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, black 90%, transparent 100%); }
@@ -9336,7 +9708,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             overflow-y: auto; min-height: 0; max-width: 860px;
             transition: background 0.35s, color 0.35s;
           }
-          .nf-editor-contenteditable:not(.nf-has-content)::before {
+          .nf-editor-contenteditable:not(.nf-has-content):empty::before,
+          .nf-editor-contenteditable:not(.nf-has-content) p:empty::before {
             content: attr(data-placeholder);
             color: var(--nf-editor-placeholder);
             font-style: italic;
@@ -9827,7 +10200,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                             // Move cursor out of the image if it's inside one
                             const curSel = window.getSelection();
                             if (curSel.rangeCount > 0) {
-                              const node = curSel.anchorNode;
+                              let node = curSel.anchorNode;
+                              // Walk up to element node since text nodes don't have .closest
+                              if (node && node.nodeType === Node.TEXT_NODE) node = node.parentElement;
                               if (node && node.closest && node.closest('.nf-img-wrapper')) {
                                 const afterFig = node.closest('.nf-img-wrapper').nextSibling;
                                 if (afterFig) {
@@ -9854,10 +10229,21 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       onKeyDown={e => {
                         if (e.key === "Enter" && e.target.value.trim()) {
                           const url = e.target.value.trim();
+                          // Validate URL to prevent HTML injection
+                          try {
+                            const parsed = new URL(url);
+                            if (!['http:', 'https:'].includes(parsed.protocol)) {
+                              showToast("Only HTTP/HTTPS URLs are supported", "error");
+                              return;
+                            }
+                          } catch {
+                            showToast("Invalid URL format", "error");
+                            return;
+                          }
                           const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
                           const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${url}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
                           const el = editorRef.current;
-                          if (el) { el.innerHTML += imgHtml; syncEditorContent(); lastSyncedContentRef.current = el.innerHTML; }
+                          if (el) { el.insertAdjacentHTML('beforeend', imgHtml); syncEditorContent(); lastSyncedContentRef.current = el.innerHTML; }
                           showToast("Image inserted into chapter", "success");
                           // Attach image event handlers
                           if (el) {

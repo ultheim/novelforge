@@ -243,7 +243,10 @@ const GDriveImages = {
       if (ch.content) {
         // Base64 images (fresh, never synced)
         const b64Matches = [...ch.content.matchAll(/src="(data:image\/[^"]+)"/g)];
-        for (const m of b64Matches) images.push({ data: m[1], path: `chapters/${ch.id}`, key: ch.id, isNew: true });
+        for (let mi = 0; mi < b64Matches.length; mi++) {
+          const m = b64Matches[mi];
+          images.push({ data: m[1], path: `chapters/${ch.id}/img${mi}`, key: `${ch.id}_img${mi}`, isNew: true });
+        }
         // Already-marked images from a previous sync
         const markerMatches = [...ch.content.matchAll(/src="GDRIVE_IMAGE:([^"]+)"/g)];
         for (const m of markerMatches) {
@@ -435,7 +438,12 @@ const GDriveImages = {
   markImages(project) {
     for (const ch of (project.chapters || [])) {
       if (ch.content) {
-        ch.content = ch.content.replace(/src="(data:image\/[^"]+)"/g, (match, b64) => `src="GDRIVE_IMAGE:chapters/${ch.id}"`);
+        let imgIdx = 0;
+        ch.content = ch.content.replace(/src="(data:image\/[^"]+)"/g, (match, b64) => {
+          const path = `chapters/${ch.id}/img${imgIdx++}`;
+          this._pathToBase64[path] = b64;
+          return `src="GDRIVE_IMAGE:${path}"`;
+        });
       }
     }
     for (const c of (project.characters || [])) {
@@ -1924,31 +1932,37 @@ const GDrive = {
   _folderId: null,
   _fileId: null,  // ← Track the backup file ID after first create
 
+  _tokenClient: null,
+
   setClientId(id) { this._clientId = id; },
 
-  async authenticate() {
+  async authenticate(forceConsent = false) {
     if (!this._clientId) throw new Error("Client ID not set");
     return new Promise((resolve, reject) => {
       if (typeof google === "undefined" || !google.accounts?.oauth2) {
         return reject(new Error("Google Identity Services not loaded. Check your <script> tag."));
       }
-      const tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: this._clientId,
-        scope: "https://www.googleapis.com/auth/drive.file",
-        callback: (resp) => {
-          if (resp.error) return reject(new Error(resp.error));
-          this._token = resp.access_token;
-          this._tokenExpiry = Date.now() + (resp.expires_in || 3600) * 1000;
-          resolve(resp.access_token);
-        },
-      });
-      tokenClient.requestAccessToken({ prompt: "consent" });
+      // Reuse the token client to avoid creating multiple instances
+      if (!this._tokenClient) {
+        this._tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: this._clientId,
+          scope: "https://www.googleapis.com/auth/drive.file",
+          callback: (resp) => {
+            if (resp.error) return reject(new Error(resp.error));
+            this._token = resp.access_token;
+            this._tokenExpiry = Date.now() + (resp.expires_in || 3600) * 1000;
+            resolve(resp.access_token);
+          },
+        });
+      }
+      // Only force consent on first auth or explicit request; otherwise silent re-auth
+      this._tokenClient.requestAccessToken({ prompt: forceConsent || !this._token ? "consent" : "" });
     });
   },
 
   async ensureToken() {
     if (this._token && Date.now() < this._tokenExpiry - 60000) return this._token;
-    return this.authenticate();
+    return this.authenticate(false);
   },
 
   async findOrCreateFolder(name = "NovelForge Backups") {
@@ -2061,7 +2075,7 @@ const GDrive = {
   },
 
   isConnected() { return !!this._token && Date.now() < this._tokenExpiry; },
-  disconnect() { this._token = null; this._tokenExpiry = 0; this._folderId = null; this._fileId = null; },
+  disconnect() { this._token = null; this._tokenExpiry = 0; this._folderId = null; this._fileId = null; this._tokenClient = null; },
 };
 
 // ─── Storage (IndexedDB — handles unlimited data including images) ───
@@ -2613,6 +2627,26 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
 
 // ─── PLOT TIMELINE VISUALIZATION ───
 const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
+  const [lightbox, setLightbox] = useState(null); // { images: [], index: 0 }
+
+  // Lightbox keyboard navigation
+  useEffect(() => {
+    if (!lightbox) return;
+    const handler = (e) => {
+      if (e.key === "Escape") { setLightbox(null); return; }
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        e.preventDefault();
+        setLightbox(prev => prev ? { ...prev, index: Math.min(prev.index + 1, prev.images.length - 1) } : null);
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setLightbox(prev => prev ? { ...prev, index: Math.max(prev.index - 1, 0) } : null);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [lightbox]);
+
   // Parse date string to a sortable timestamp — handles many formats
   const parseDateToTimestamp = (dateStr) => {
     if (!dateStr) return null;
@@ -2781,9 +2815,11 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
 						  return (
 							<div style={{ display: "flex", gap: 6, marginTop: 8, overflowX: "auto" }}>
 							  {imgs.map((src, ii) => (
-								<img key={ii} src={src}
+								<img key={ii} src={src} onClick={() => setLightbox({ images: imgs, index: ii })}
 								  style={{ width: 140, height: 100, objectFit: "cover", borderRadius: 2,
-									border: "1px solid var(--nf-border)", flexShrink: 0 }} />
+									border: "1px solid var(--nf-border)", flexShrink: 0, cursor: "pointer", transition: "transform 0.15s" }}
+								  onMouseEnter={e => e.currentTarget.style.transform = "scale(1.04)"}
+								  onMouseLeave={e => e.currentTarget.style.transform = "scale(1)"} />
 							  ))}
 							</div>
 						  );
@@ -2798,6 +2834,35 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
           )}
         </div>
       </div>
+      {/* Image Lightbox */}
+      {lightbox && createPortal(
+        <div style={{
+          position: "fixed", inset: 0, zIndex: 10002, background: "rgba(0,0,0,0.85)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          animation: "nf-fadeIn 0.15s ease-out", cursor: "pointer",
+        }} onClick={() => setLightbox(null)}>
+          <div onClick={e => e.stopPropagation()} style={{ position: "relative", maxWidth: "90vw", maxHeight: "90vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <img src={lightbox.images[lightbox.index]} alt="" style={{ maxWidth: "90vw", maxHeight: "85vh", objectFit: "contain", borderRadius: 3, boxShadow: "0 0 60px rgba(0,0,0,0.5)" }} />
+            {lightbox.images.length > 1 && (
+              <>
+                <button onClick={() => setLightbox(prev => ({ ...prev, index: Math.max(prev.index - 1, 0) }))}
+                  disabled={lightbox.index === 0}
+                  style={{ position: "absolute", left: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === 0 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  aria-label="Previous">‹</button>
+                <button onClick={() => setLightbox(prev => ({ ...prev, index: Math.min(prev.index + 1, prev.images.length - 1) }))}
+                  disabled={lightbox.index === lightbox.images.length - 1}
+                  style={{ position: "absolute", right: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === lightbox.images.length - 1 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  aria-label="Next">›</button>
+              </>
+            )}
+            <div style={{ position: "absolute", bottom: -30, left: "50%", transform: "translateX(-50%)", color: "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: "var(--nf-font-mono)" }}>
+              {lightbox.index + 1} / {lightbox.images.length}
+              <span style={{ marginLeft: 12, fontSize: 10, opacity: 0.5 }}>← → navigate · Esc close</span>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 });
@@ -6287,7 +6352,7 @@ If no relationship changes, respond "No relationship updates needed."` },
     try {
       showToast("Connecting to Google Drive...", "info");
       GDrive.setClientId(gdriveClientId);
-      await GDrive.authenticate();
+      await GDrive.authenticate(true);
       setGdriveConnected(true);
       setSettings(prev => ({ ...prev, googleClientId: gdriveClientId }));
       showToast("Connected to Google Drive", "success");
@@ -6904,7 +6969,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   const handleGenerateImage = useCallback(async (prompt) => {
     if (!settings.apiKey || !prompt?.trim()) return;
     setImageGenStatus({ status: "generating", imageUrl: null, retryCount: 0, error: null });
-    const maxRetries = 6;
+    const maxRetries = 3;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         setImageGenStatus(prev => ({ ...prev, retryCount: attempt }));
@@ -6912,7 +6977,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
           body: JSON.stringify({
-            model: "google/gemini-3.1-flash-image-preview",
+            model: "google/gemini-2.0-flash-exp:free",
             messages: [{ role: "user", content: prompt.trim() }],
             modalities: ["image", "text"],
             max_tokens: 4096,
@@ -6973,7 +7038,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     const el = editorRef.current;
     if (!el) return;
     const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
     el.focus();
     document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
     syncEditorContent();
@@ -7342,7 +7407,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
                         const el = editorRef.current;
                         if (!el) { showToast("Switch to Write tab first", "error"); return; }
                         const caption = img.chapterTitle || "Generated image";
-                        const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${img.imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+                        const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${img.imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
                         el.focus();
                         document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
                         syncEditorContent();
@@ -8574,7 +8639,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       const reader = new FileReader();
                       reader.onload = (ev) => {
                         const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-						const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+						const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
 						el.focus();
 						document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
                         syncEditorContent();
@@ -8627,7 +8692,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   const reader = new FileReader();
                   reader.onload = (ev) => {
                     const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:inline-block;max-width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+                    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
                     document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
                     syncEditorContent();
                     const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
@@ -10495,6 +10560,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-editor-contenteditable figure.nf-img-wrapper {
             cursor: default;
             user-select: contain;
+            display: block;
+            width: 100%;
+            max-width: 100%;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper:hover {
             outline: 2px solid var(--nf-accent-2);
@@ -10502,6 +10570,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           }
           .nf-editor-contenteditable figure.nf-img-wrapper img {
             cursor: grab;
+            width: 100%;
+            height: auto;
+            display: block;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper.dragging {
             opacity: 0.5;

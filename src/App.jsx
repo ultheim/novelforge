@@ -6977,7 +6977,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
           body: JSON.stringify({
-            model: "google/gemini-2.0-flash-exp:free",
+            model: "google/gemini-3.1-flash-image-preview",
             messages: [{ role: "user", content: prompt.trim() }],
             modalities: ["image", "text"],
             max_tokens: 4096,

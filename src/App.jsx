@@ -2945,40 +2945,51 @@ function computeWebLayout(characters, relationships) {
       vx: 0, vy: 0,
     };
   });
+  // Build O(1) lookup map
+  const nodeMap = {};
+  nodes.forEach(n => nodeMap[n.id] = n);
   const edgeSet = new Set();
   rels.forEach(r => { if (r.char1 && r.char2) edgeSet.add([r.char1, r.char2].sort().join("::")); });
-  const edges = [...edgeSet].map(k => k.split("::"));
-  const SPRING_K = 0.025, REPULSION = 6000, TARGET_DIST = 170, CENTER_PULL = 0.008, DAMPING = 0.82, ITERS = 200;
+  const edges = [...edgeSet].map(k => { const [a, b] = k.split("::"); return [a, b]; });
+  // Reduce iterations for large graphs — 60 is enough for stable layout
+  const n = nodes.length;
+  const ITERS = n > 15 ? 50 : n > 8 ? 80 : 120;
+  const SPRING_K = 0.025, REPULSION = 6000, TARGET_DIST = 170, CENTER_PULL = 0.008, DAMPING = 0.82;
   for (let iter = 0; iter < ITERS; iter++) {
     const temp = 1 - iter / ITERS;
-    nodes.forEach(n => {
-      n.vx = 0; n.vy = 0;
-      n.vx += (CX - n.x) * CENTER_PULL;
-      n.vy += (CY - n.y) * CENTER_PULL;
-      nodes.forEach(o => {
-        if (n.id === o.id) return;
-        const dx = n.x - o.x, dy = n.y - o.y;
-        const d = Math.sqrt(dx * dx + dy * dy) || 1;
-        const f = REPULSION / (d * d);
-        n.vx += (dx / d) * f; n.vy += (dy / d) * f;
-      });
-    });
-    edges.forEach(([a, b]) => {
-      const na = nodes.find(n => n.id === a); const nb = nodes.find(n => n.id === b);
-      if (!na || !nb) return;
-      const dx = nb.x - na.x, dy = nb.y - na.y; const d = Math.sqrt(dx * dx + dy * dy) || 1;
+    for (let i = 0; i < n; i++) {
+      const ni = nodes[i];
+      ni.vx = (CX - ni.x) * CENTER_PULL;
+      ni.vy = (CY - ni.y) * CENTER_PULL;
+      for (let j = i + 1; j < n; j++) {
+        const nj = nodes[j];
+        const dx = ni.x - nj.x, dy = ni.y - nj.y;
+        const distSq = dx * dx + dy * dy || 1;
+        const f = REPULSION / distSq;
+        const d = Math.sqrt(distSq);
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        ni.vx += fx; ni.vy += fy;
+        nj.vx -= fx; nj.vy -= fy;
+      }
+    }
+    for (const [a, b] of edges) {
+      const na = nodeMap[a], nb = nodeMap[b];
+      if (!na || !nb) continue;
+      const dx = nb.x - na.x, dy = nb.y - na.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
       const f = (d - TARGET_DIST) * SPRING_K;
       const fx = (dx / d) * f, fy = (dy / d) * f;
       na.vx += fx; na.vy += fy; nb.vx -= fx; nb.vy -= fy;
-    });
-    nodes.forEach(n => {
-      n.x += n.vx * DAMPING * (0.5 + temp * 0.5); n.y += n.vy * DAMPING * (0.5 + temp * 0.5);
-      n.x = Math.max(70, Math.min(730, n.x)); n.y = Math.max(70, Math.min(730, n.y));
-    });
+    }
+    const mult = DAMPING * (0.5 + temp * 0.5);
+    for (const nd of nodes) {
+      nd.x += nd.vx * mult; nd.y += nd.vy * mult;
+      nd.x = Math.max(70, Math.min(730, nd.x)); nd.y = Math.max(70, Math.min(730, nd.y));
+    }
   }
   const connected = new Set(); edges.forEach(([a, b]) => { connected.add(a); connected.add(b); });
-  let isoIdx = 0; const isoCount = nodes.filter(n => !connected.has(n.id)).length;
-  nodes.forEach(n => { if (!connected.has(n.id)) { const angle = (isoIdx / Math.max(isoCount, 1)) * Math.PI * 2 - Math.PI / 2; n.x = CX + Math.cos(angle) * (RADIUS + 90); n.y = CY + Math.sin(angle) * (RADIUS + 90); isoIdx++; } });
+  let isoIdx = 0; const isoCount = nodes.filter(nd => !connected.has(nd.id)).length;
+  nodes.forEach(nd => { if (!connected.has(nd.id)) { const angle = (isoIdx / Math.max(isoCount, 1)) * Math.PI * 2 - Math.PI / 2; nd.x = CX + Math.cos(angle) * (RADIUS + 90); nd.y = CY + Math.sin(angle) * (RADIUS + 90); isoIdx++; } });
   return nodes;
 }
 
@@ -3246,6 +3257,93 @@ const generatePdfHtml = (project, mode, chapterIdx) => {
 
   html += `</body></html>`;
   return html;
+};
+
+const _buildImgFigure = (imageUrl, caption) => {
+  const safeCaption = (caption || "").replace(/"/g, '&quot;');
+  return `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${safeCaption}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption || ""}</figcaption></figure>`;
+};
+
+// Safely insert image HTML into the editor WITHOUT replacing any selected text.
+// Uses direct DOM manipulation instead of execCommand("insertHTML") which replaces selections.
+const _insertImageAtPoint = (editorEl, imgHtml, position = "end") => {
+  if (!editorEl) return;
+  editorEl.focus();
+
+  // Create a temporary container to parse the HTML
+  const temp = document.createElement('div');
+  temp.innerHTML = imgHtml;
+  const figEl = temp.firstElementChild;
+  if (!figEl) return;
+
+  // Add a line break after the image
+  const br = document.createElement('p');
+  br.innerHTML = '<br>';
+
+  if (position === "end") {
+    editorEl.appendChild(figEl);
+    editorEl.appendChild(br);
+  } else if (position === "cursor") {
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode)) {
+      // Collapse selection to end (don't delete anything)
+      sel.collapseToEnd();
+      const range = sel.getRangeAt(0);
+      // Find the nearest block-level parent to insert after
+      let insertPoint = range.startContainer;
+      // Walk up to find a direct child of the editor or a block element
+      while (insertPoint && insertPoint !== editorEl && insertPoint.parentNode !== editorEl) {
+        insertPoint = insertPoint.parentNode;
+      }
+      if (insertPoint && insertPoint !== editorEl && insertPoint.parentNode === editorEl) {
+        // Insert after this block element
+        if (insertPoint.nextSibling) {
+          editorEl.insertBefore(br, insertPoint.nextSibling);
+          editorEl.insertBefore(figEl, br);
+        } else {
+          editorEl.appendChild(figEl);
+          editorEl.appendChild(br);
+        }
+      } else {
+        // Fallback: append at end
+        editorEl.appendChild(figEl);
+        editorEl.appendChild(br);
+      }
+    } else {
+      // No valid cursor — append at end
+      editorEl.appendChild(figEl);
+      editorEl.appendChild(br);
+    }
+  } else if (position instanceof Range) {
+    // Insert at a specific saved range (collapsed to end first)
+    const sel = window.getSelection();
+    const collapsedRange = position.cloneRange();
+    collapsedRange.collapse(false); // Collapse to END — never delete text
+    sel.removeAllRanges();
+    sel.addRange(collapsedRange);
+    let insertPoint = collapsedRange.startContainer;
+    while (insertPoint && insertPoint !== editorEl && insertPoint.parentNode !== editorEl) {
+      insertPoint = insertPoint.parentNode;
+    }
+    if (insertPoint && insertPoint !== editorEl && insertPoint.parentNode === editorEl) {
+      if (insertPoint.nextSibling) {
+        editorEl.insertBefore(br, insertPoint.nextSibling);
+        editorEl.insertBefore(figEl, br);
+      } else {
+        editorEl.appendChild(figEl);
+        editorEl.appendChild(br);
+      }
+    } else {
+      editorEl.appendChild(figEl);
+      editorEl.appendChild(br);
+    }
+  }
+
+  // Attach events to the new figure
+  _attachImageEvents(figEl, editorEl);
+  // Trigger save
+  editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+  return figEl;
 };
 
 // Generate compact caption from scene text
@@ -4693,7 +4791,9 @@ export default function NovelForge() {
   const [imagePromptData, setImagePromptData] = useState(null); // { prompt, mentionedChars, primaryWorld, worldRefImages }
   const imagePromptAbortRef = useRef(null);
   const savedImageCursorRef = useRef(null); // Saves editor selection range for "insert at cursor"
-  const [imageGenStatus, setImageGenStatus] = useState(null); // { status: "generating"|"done"|"error", imageUrl, retryCount, error }
+  const [imageGenStatus, setImageGenStatus] = useState(null); // { status, imageUrl, images[], retryCount, error }
+  const [imageGen4x, setImageGen4x] = useState(false); // Toggle for 4-variant generation
+  const [imageGenAspect, setImageGenAspect] = useState(""); // Aspect ratio for single image
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftsChapterFilter, setDraftsChapterFilter] = useState(false);
   const [viewingDraftId, setViewingDraftId] = useState(null);
@@ -7039,22 +7139,21 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
   useEffect(() => () => { if (gdriveSyncTimerRef.current) clearInterval(gdriveSyncTimerRef.current); }, []);
 
-  const handleGenerateImage = useCallback(async (prompt) => {
-    if (!settings.apiKey || !prompt?.trim()) return;
-    setImageGenStatus({ status: "generating", imageUrl: null, retryCount: 0, error: null });
+  const _generateSingleImage = useCallback(async (prompt, aspectRatio = null) => {
+    const body = {
+      model: "google/gemini-3.1-flash-image-preview",
+      messages: [{ role: "user", content: prompt.trim() }],
+      modalities: ["image", "text"],
+      max_tokens: 4096,
+    };
+    if (aspectRatio) body.image_config = { aspect_ratio: aspectRatio };
     const maxRetries = 6;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-        setImageGenStatus(prev => ({ ...prev, retryCount: attempt }));
         const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
           method: "POST",
           headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
-          body: JSON.stringify({
-            model: "google/gemini-3.1-flash-image-preview",
-            messages: [{ role: "user", content: prompt.trim() }],
-            modalities: ["image", "text"],
-            max_tokens: 4096,
-          }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -7062,37 +7161,82 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         }
         const data = await res.json();
         const message = data.choices?.[0]?.message;
-        if (!message) throw new Error("No message in response");
-
-        // OpenRouter returns images in message.images[] array
-        // Each entry: { type: "image_url", image_url: { url: "data:image/png;base64,..." } }
-        let imageUrl = null;
-        if (message.images && Array.isArray(message.images) && message.images.length > 0) {
+        if (message?.images && Array.isArray(message.images)) {
           for (const img of message.images) {
-            if (img.image_url?.url) { imageUrl = img.image_url.url; break; }
-            if (typeof img === "string" && img.startsWith("data:")) { imageUrl = img; break; }
+            if (img.image_url?.url) return img.image_url.url;
           }
         }
-
-        if (imageUrl) {
-          setImageGenStatus({ status: "done", imageUrl, retryCount: attempt, error: null });
-          return;
-        }
-        // No image found — retry
-        if (attempt < maxRetries - 1) {
-          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-        }
+        if (attempt < maxRetries - 1) await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
       } catch (err) {
-        if (attempt < maxRetries - 1) {
-          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
-        } else {
-          setImageGenStatus({ status: "error", imageUrl: null, retryCount: attempt, error: _formatApiError(err) });
-          return;
-        }
+        if (attempt >= maxRetries - 1) throw err;
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
       }
     }
-    setImageGenStatus({ status: "error", imageUrl: null, retryCount: maxRetries, error: "No image returned after 6 attempts. Please adjust the prompt and try again." });
+    return null;
   }, [settings.apiKey]);
+
+  const handleGenerateImage = useCallback(async (prompt, use4x = false, aspectRatio = null) => {
+    if (!settings.apiKey || !prompt?.trim()) return;
+
+    if (!use4x) {
+      // Single image mode — use selected aspect ratio
+      setImageGenStatus({ status: "generating", imageUrl: null, images: null, retryCount: 0, error: null });
+      try {
+        const imageUrl = await _generateSingleImage(prompt, aspectRatio);
+        if (imageUrl) {
+          setImageGenStatus({ status: "done", imageUrl, images: null, retryCount: 0, error: null });
+        } else {
+          setImageGenStatus({ status: "error", imageUrl: null, images: null, retryCount: 0, error: "No image returned after 6 attempts. Adjust the prompt and try again." });
+        }
+      } catch (err) {
+        setImageGenStatus({ status: "error", imageUrl: null, images: null, retryCount: 0, error: _formatApiError(err) });
+      }
+      return;
+    }
+
+    // 4x mode — generate 4 images with different aspect ratios in parallel
+    const RATIOS = [
+      { ratio: "16:9", label: "16:9 Wide" },
+      { ratio: "3:4", label: "3:4 Portrait" },
+      { ratio: "4:3", label: "4:3 Landscape" },
+      { ratio: "1:1", label: "1:1 Square" },
+    ];
+    setImageGenStatus({
+      status: "generating",
+      imageUrl: null,
+      images: RATIOS.map(r => ({ ratio: r.ratio, label: r.label, imageUrl: null, status: "pending", error: null })),
+      retryCount: 0,
+      error: null,
+    });
+
+    // Fire all 4 in parallel
+    await Promise.allSettled(RATIOS.map(async (r, idx) => {
+      setImageGenStatus(prev => {
+        if (!prev?.images) return prev;
+        const imgs = [...prev.images];
+        imgs[idx] = { ...imgs[idx], status: "generating" };
+        return { ...prev, images: imgs };
+      });
+      try {
+        const imageUrl = await _generateSingleImage(prompt, r.ratio);
+        setImageGenStatus(prev => {
+          if (!prev?.images) return prev;
+          const imgs = [...prev.images];
+          imgs[idx] = { ...imgs[idx], imageUrl, status: imageUrl ? "done" : "error", error: imageUrl ? null : "No image returned" };
+          const allDone = imgs.every(i => i.status === "done" || i.status === "error");
+          return { ...prev, images: imgs, status: allDone ? "done" : "generating" };
+        });
+      } catch (err) {
+        setImageGenStatus(prev => {
+          if (!prev?.images) return prev;
+          const imgs = [...prev.images];
+          imgs[idx] = { ...imgs[idx], status: "error", error: _formatApiError(err) };
+          const allDone = imgs.every(i => i.status === "done" || i.status === "error");
+          return { ...prev, images: imgs, status: allDone ? "done" : "generating" };
+        });
+      }
+    }));
+  }, [settings.apiKey, _generateSingleImage]);
 
   const handleSaveImageDraft = useCallback((imageUrl, prompt, chapterIdx) => {
     const newImage = {
@@ -7111,20 +7255,9 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     const el = editorRef.current;
     if (!el) return;
     const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-    el.focus();
-    // Always append at the END of editor content
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false); // collapse to end
-    sel.removeAllRanges();
-    sel.addRange(range);
-    document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
+    _insertImageAtPoint(el, _buildImgFigure(imageUrl, caption), "end");
     syncEditorContent();
     lastSyncedContentRef.current = el.innerHTML;
-    const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
-    if (newFig) _attachImageEvents(newFig, el);
     showToast("Image appended to chapter", "success");
     setImagePromptData(null);
     setImageGenStatus(null);
@@ -7139,18 +7272,13 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       const el = editorRef.current;
       if (!el) return false;
       const { imageUrl, caption } = pendingImageInsert;
-      const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-      el.focus();
-      document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
+      _insertImageAtPoint(el, _buildImgFigure(imageUrl, caption), "end");
       syncEditorContent();
       lastSyncedContentRef.current = el.innerHTML;
-      const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
-      if (newFig) _attachImageEvents(newFig, el);
       setPendingImageInsert(null);
       showToast("Image inserted", "success");
       return true;
     };
-    // Editor may not be mounted yet — retry briefly
     if (!tryInsert()) {
       const t = setTimeout(tryInsert, 150);
       return () => clearTimeout(t);
@@ -7823,7 +7951,7 @@ YOUR OUTPUT FORMAT (follow this EXACTLY):
 
 (6) TIME OF DAY: State the specific time and its LIGHTING effects — sun angle, shadow direction, artificial light sources, color temperature of light, ambient light quality. Describe light, not weather sensations.
 
-(7) CAMERA SETTINGS: Specify lens, aperture, distance, framing, aspect ratio, and whether characters are cropped or full-body.
+(7) CAMERA SETTINGS: Specify lens, aperture, distance, framing, and whether characters are cropped or full-body. Do not specify aspect ratios.
 
 End with this EXACT paragraph:
 "Each character(s)’s expression must match the activity that he’s doing (very expressive though). Most importantly, this is a candid shot so the character must not be looking towards us unless it’s a POV angle, and framing must include slight misalignment, a hint of motion blur, or a cropped edge as if caught unintentionally. The scene is 50 degree celcius, 100% humidity, but no excessive fogging, just sweat. They have been training for hours too — so much more sweat, drenched even. It’s okay if their faces or bodies aren’t visible, depending on the camera angle or obstruction. Play with depth using foreground (blurred object) and background (abundance of items & decor) framing and bokeh. Refer to your project instructions, must be realistic to the skin pore. The atmosphere must feel thick and heavy, the kind that slows movement and breath. The moment must appear discovered, not staged — like a camera left running in the corner. Use the camera’s bright flash on the subject."
@@ -8815,13 +8943,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                         const el = editorRef.current;
                         if (!el) return;
                         const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-						const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-						el.focus();
-						document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
+                        _insertImageAtPoint(el, _buildImgFigure(ev.target.result, caption), "cursor");
                         syncEditorContent();
                         lastSyncedContentRef.current = el.innerHTML;
-                        const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
-                        if (newFig) _attachImageEvents(newFig, el);
                       };
                       reader.readAsDataURL(file);
                       return;
@@ -8865,11 +8989,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   const reader = new FileReader();
                   reader.onload = (ev) => {
                     const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                    const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${ev.target.result}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, "&quot;")}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-                    document.execCommand('insertHTML', false, `<p>${imgHtml}</p>`);
+                    _insertImageAtPoint(el, _buildImgFigure(ev.target.result, caption), "end");
                     syncEditorContent();
-                    const newFig = el.querySelector('figure.nf-img-wrapper:last-of-type');
-                    if (newFig) _attachImageEvents(newFig, el);
+                    lastSyncedContentRef.current = el.innerHTML;
                   };
                   reader.readAsDataURL(file);
                 });
@@ -8942,10 +9064,31 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <button onClick={() => {
                     const currentPrompt = imagePromptData._showDesensitized && imagePromptData.desensitizedPrompt ? imagePromptData.desensitizedPrompt : imagePromptData.prompt;
-                    handleGenerateImage(currentPrompt);
+                    handleGenerateImage(currentPrompt, imageGen4x, imageGenAspect || null);
                   }} disabled={imageGenStatus?.status === "generating"} className="nf-btn nf-btn-primary" style={{ fontSize: 11, padding: "6px 14px" }}>
-                    {imageGenStatus?.status === "generating" ? <><Spinner /> Generating{imageGenStatus.retryCount > 0 ? ` (retry ${imageGenStatus.retryCount})` : ""}...</> : <><Icons.Sparkle /> Generate Image</>}
+                    {imageGenStatus?.status === "generating" ? <><Spinner /> Generating...</> : <><Icons.Sparkle /> {imageGen4x ? "Generate 4 Variants" : "Generate Image"}</>}
                   </button>
+                  {!imageGen4x && (
+                    <select value={imageGenAspect} onChange={e => setImageGenAspect(e.target.value)}
+                      className="nf-select" style={{ fontSize: 10, padding: "4px 6px", width: "auto", minWidth: 90 }}>
+                      <option value="">Default ratio</option>
+                      <option value="1:1">1:1 Square</option>
+                      <option value="16:9">16:9 Wide</option>
+                      <option value="9:16">9:16 Tall</option>
+                      <option value="3:2">3:2 Landscape</option>
+                      <option value="2:3">2:3 Portrait</option>
+                      <option value="4:3">4:3 Landscape</option>
+                      <option value="3:4">3:4 Portrait</option>
+                      <option value="4:5">4:5 Portrait</option>
+                      <option value="5:4">5:4 Landscape</option>
+                      <option value="21:9">21:9 Ultrawide</option>
+                    </select>
+                  )}
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--nf-text-muted)", cursor: "pointer", userSelect: "none" }}>
+                    <input type="checkbox" checked={imageGen4x} onChange={e => setImageGen4x(e.target.checked)}
+                      style={{ width: 14, height: 14, accentColor: "var(--nf-accent)" }} />
+                    4x mode
+                  </label>
                   <button onClick={() => {
                     const textToCopy = imagePromptData._showDesensitized && imagePromptData.desensitizedPrompt ? imagePromptData.desensitizedPrompt : imagePromptData.prompt;
                     navigator.clipboard.writeText(textToCopy);
@@ -8961,8 +9104,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 </div>
               )}
 
-              {/* Generated image result */}
-              {imageGenStatus?.status === "done" && imageGenStatus.imageUrl && (
+              {/* Generated image result — SINGLE MODE */}
+              {imageGenStatus?.status === "done" && imageGenStatus.imageUrl && !imageGenStatus.images && (
                 <div style={{ marginTop: 10 }}>
                   <img src={imageGenStatus.imageUrl} alt="Generated scene" style={{ width: "100%", maxHeight: 400, objectFit: "contain", borderRadius: 3, border: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)" }} />
                   <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
@@ -8970,42 +9113,77 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       const el = editorRef.current;
                       if (!el) return;
                       const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                      const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageGenStatus.imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
-                      el.focus();
-                      // Restore saved cursor position
-                      if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) {
-                        const sel = window.getSelection();
-                        sel.removeAllRanges();
-                        sel.addRange(savedImageCursorRef.current);
-                      }
-                      document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
-                      syncEditorContent();
-                      lastSyncedContentRef.current = el.innerHTML;
-                      _initEditorImageDelegation(el);
-                      el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
+                      const imgHtml = _buildImgFigure(imageGenStatus.imageUrl, caption);
+                      const position = savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer) ? savedImageCursorRef.current : "cursor";
+                      _insertImageAtPoint(el, imgHtml, position);
+                      syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
                       showToast("Image inserted at cursor", "success");
-                      setImagePromptData(null);
-                      setImageGenStatus(null);
-                      savedImageCursorRef.current = null;
+                      setImagePromptData(null); setImageGenStatus(null); savedImageCursorRef.current = null;
                     }} className="nf-btn nf-btn-primary" style={{ fontSize: 11, padding: "6px 14px" }}>
                       <Icons.ArrowDown /> Insert at Cursor
                     </button>
-                    <button onClick={() => { handleAppendImage(imageGenStatus.imageUrl); }} className="nf-btn-micro" style={{ fontSize: 11 }}>
-                      Append to End
-                    </button>
+                    <button onClick={() => { handleAppendImage(imageGenStatus.imageUrl); }} className="nf-btn-micro" style={{ fontSize: 11 }}>Append to End</button>
                     <button onClick={() => {
                       handleSaveImageDraft(imageGenStatus.imageUrl, imagePromptData.prompt, activeChapterIdx);
                       setImageGenStatus(null);
-                      showToast("Saved — you can generate another image", "success");
                     }} className="nf-btn-micro" style={{ borderColor: "var(--nf-accent-2)", color: "var(--nf-accent-2)" }}>
                       <Icons.Save /> Save as Draft
                     </button>
-                    <button onClick={() => {
-                      setImageGenStatus(null);
-                    }} className="nf-btn-micro">
-                      ↻ Generate Another
-                    </button>
+                    <button onClick={() => setImageGenStatus(null)} className="nf-btn-micro">↻ Generate Another</button>
                   </div>
+                </div>
+              )}
+
+              {/* Generated image result — 4x MODE */}
+              {imageGenStatus?.images && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {imageGenStatus.images.map((img, idx) => (
+                      <div key={idx} style={{ border: "1px solid var(--nf-border)", borderRadius: 3, overflow: "hidden", background: "var(--nf-bg-deep)" }}>
+                        <div style={{ padding: "4px 8px", background: "var(--nf-bg-surface)", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{img.label}</span>
+                          {img.status === "generating" && <Spinner />}
+                          {img.status === "error" && <span style={{ fontSize: 9, color: "var(--nf-accent)" }}>Failed</span>}
+                        </div>
+                        {img.imageUrl ? (
+                          <>
+                            <img src={img.imageUrl} alt={img.label} style={{ width: "100%", display: "block" }} />
+                            <div style={{ padding: "4px 6px", display: "flex", gap: 3 }}>
+                              <button onClick={() => {
+                                const el = editorRef.current;
+                                if (!el) return;
+                                const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
+                                const position = savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer) ? savedImageCursorRef.current : "end";
+                                _insertImageAtPoint(el, _buildImgFigure(img.imageUrl, caption + ` (${img.label})`), position);
+                                syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
+                                showToast(`${img.label} inserted`, "success");
+                              }} className="nf-btn-micro" style={{ fontSize: 8, flex: 1, justifyContent: "center" }}>
+                                <Icons.ArrowDown /> Insert
+                              </button>
+                              <button onClick={() => {
+                                handleSaveImageDraft(img.imageUrl, `${imagePromptData?.prompt || ""} [${img.label}]`, activeChapterIdx);
+                              }} className="nf-btn-micro" style={{ fontSize: 8, flex: 1, justifyContent: "center" }}>
+                                <Icons.Save /> Draft
+                              </button>
+                            </div>
+                          </>
+                        ) : img.status === "generating" ? (
+                          <div style={{ aspectRatio: idx === 0 ? "16/9" : idx === 1 ? "3/4" : idx === 2 ? "4/3" : "1/1", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <Spinner />
+                          </div>
+                        ) : (
+                          <div style={{ padding: 16, textAlign: "center", fontSize: 10, color: "var(--nf-text-muted)" }}>
+                            {img.error || "Pending"}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {imageGenStatus.status === "done" && (
+                    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                      <button onClick={() => setImageGenStatus(null)} className="nf-btn-micro">↻ Generate Another</button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -9135,7 +9313,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait of this character with white white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `This person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
+                      const prompt = `Create a realistic passport portrait of this character white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },

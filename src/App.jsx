@@ -3261,107 +3261,129 @@ const _sceneCaption = (text, chapterIdx, chapterTitle) => {
 
 // Attach drag and delete handlers to an image wrapper element
 const _attachImageEvents = (fig, editorEl) => {
-  if (!fig) return;
+  if (!fig || fig._nfEventsAttached) return;
+  fig._nfEventsAttached = true;
+
+  // Prevent native drag
+  fig.setAttribute('draggable', 'false');
+  fig.ondragstart = (e) => e.preventDefault();
 
   // Delete button
   const delBtn = fig.querySelector('.nf-img-del');
   if (delBtn) {
-    delBtn.addEventListener('click', (e) => {
+    delBtn.onclick = (e) => {
       e.preventDefault(); e.stopPropagation();
       fig.remove();
-      // Trigger content change
       editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-    });
+    };
   }
+};
 
-  // Drag to reposition — grab handle or image
-  const handle = fig.querySelector('.nf-img-handle');
-  const img = fig.querySelector('img');
-  if (!handle && !img) return;
+// Editor-level event delegation for image drag — handles ALL images without per-element listeners
+const _initEditorImageDelegation = (editorEl) => {
+  if (!editorEl || editorEl._nfImgDelegation) return;
+  editorEl._nfImgDelegation = true;
 
-  // Prevent native drag behavior on the figure
-  fig.setAttribute('draggable', 'false');
-  fig.addEventListener('dragstart', (e) => e.preventDefault());
+  let dragState = null; // { fig, clone, placeholder, startY }
 
-  let isDragging = false;
-  let clone = null;
-  let placeholder = null;
-
-  const onMouseDown = (e) => {
+  editorEl.addEventListener('mousedown', (e) => {
+    // Only start drag from handle or img inside a figure
+    const handle = e.target.closest('.nf-img-handle');
+    const img = e.target.closest('figure.nf-img-wrapper > img, figure.nf-img-wrapper img');
+    if (!handle && !img) return;
+    const fig = e.target.closest('figure.nf-img-wrapper');
+    if (!fig || !editorEl.contains(fig)) return;
     if (e.button !== 0) return;
     e.preventDefault();
-    isDragging = true;
-    fig.classList.add('dragging');
+    e.stopPropagation();
 
-    // Create floating clone
-    clone = fig.cloneNode(true);
-    clone.style.cssText = 'position:fixed;pointer-events:none;z-index:10000;opacity:0.8;width:' + fig.offsetWidth + 'px;transition:none;';
+    const clone = fig.cloneNode(true);
+    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${fig.offsetWidth}px;transition:none;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
     document.body.appendChild(clone);
 
-    // Create placeholder
-    placeholder = document.createElement('div');
-    placeholder.style.cssText = 'height:2px;background:var(--nf-accent);margin:8px 0;border-radius:1px;';
-    fig.parentNode.insertBefore(placeholder, fig.nextSibling);
+    const placeholder = document.createElement('div');
+    placeholder.style.cssText = 'height:3px;background:var(--nf-accent);margin:4px 0;border-radius:2px;pointer-events:none;';
 
-    // Hide original
-    fig.style.display = 'none';
+    fig.style.opacity = '0.2';
+    fig.classList.add('dragging');
 
-    moveClone(e);
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup', onMouseUp);
-  };
+    clone.style.left = (e.clientX - fig.offsetWidth / 2) + 'px';
+    clone.style.top = (e.clientY - 30) + 'px';
 
-  const moveClone = (e) => {
-    if (clone) {
-      clone.style.left = (e.clientX - fig.offsetWidth / 2) + 'px';
-      clone.style.top = (e.clientY - 20) + 'px';
-    }
-  };
+    dragState = { fig, clone, placeholder };
 
-  const onMouseMove = (e) => {
-    if (!isDragging) return;
-    moveClone(e);
+    const onMove = (ev) => {
+      if (!dragState) return;
+      clone.style.left = (ev.clientX - fig.offsetWidth / 2) + 'px';
+      clone.style.top = (ev.clientY - 30) + 'px';
 
-    // Find drop target
-    const target = document.caretRangeFromPoint
-      ? document.caretRangeFromPoint(e.clientX, e.clientY)
-      : null;
+      // Find the block-level element closest to the mouse
+      const editorRect = editorEl.getBoundingClientRect();
+      if (ev.clientY < editorRect.top || ev.clientY > editorRect.bottom) return;
 
-    if (target && editorEl.contains(target.startContainer) && target.startContainer !== fig) {
-      if (placeholder.parentNode !== editorEl || !isAfter(placeholder, target)) {
-        placeholder.remove();
-        target.insertNode(placeholder);
+      // Walk direct children of editorEl to find drop position
+      let bestChild = null;
+      let insertBefore = true;
+      for (const child of editorEl.children) {
+        if (child === fig || child === placeholder) continue;
+        const rect = child.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        if (ev.clientY < midY) {
+          bestChild = child;
+          insertBefore = true;
+          break;
+        }
+        bestChild = child;
+        insertBefore = false;
       }
-    }
-  };
 
-  const isAfter = (el, range) => {
-    const elRect = el.getBoundingClientRect();
-    return range.startContainer.compareDocumentPosition
-      ? !!(el.compareDocumentPosition(range.startContainer) & Node.DOCUMENT_POSITION_FOLLOWING)
-      : true;
-  };
+      // Position the placeholder
+      if (placeholder.parentNode) placeholder.remove();
+      if (bestChild) {
+        if (insertBefore) {
+          editorEl.insertBefore(placeholder, bestChild);
+        } else {
+          if (bestChild.nextSibling) {
+            editorEl.insertBefore(placeholder, bestChild.nextSibling);
+          } else {
+            editorEl.appendChild(placeholder);
+          }
+        }
+      } else {
+        editorEl.appendChild(placeholder);
+      }
+    };
 
-  const onMouseUp = (e) => {
-    isDragging = false;
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup', onMouseUp);
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (!dragState) return;
 
-    if (clone) { clone.remove(); clone = null; }
-    if (placeholder && placeholder.parentNode) {
-      placeholder.parentNode.insertBefore(fig, placeholder);
-      placeholder.remove();
-    }
-    placeholder = null;
-    fig.style.display = '';
-    fig.classList.remove('dragging');
+      if (clone.parentNode) clone.remove();
+      if (placeholder.parentNode) {
+        editorEl.insertBefore(fig, placeholder);
+        placeholder.remove();
+      }
+      fig.style.opacity = '';
+      fig.classList.remove('dragging');
+      dragState = null;
+      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    };
 
-    // Trigger content save
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  // Delegated delete — catch clicks on .nf-img-del anywhere in editor
+  editorEl.addEventListener('click', (e) => {
+    const delBtn = e.target.closest('.nf-img-del');
+    if (!delBtn) return;
+    const fig = delBtn.closest('figure.nf-img-wrapper');
+    if (!fig || !editorEl.contains(fig)) return;
+    e.preventDefault(); e.stopPropagation();
+    fig.remove();
     editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-
-  if (handle) handle.addEventListener('mousedown', onMouseDown);
-  if (img) img.addEventListener('mousedown', onMouseDown);
+  });
 };
 
 const _attachBeatDragEvents = (markerEl, editorEl) => {
@@ -4670,6 +4692,7 @@ export default function NovelForge() {
   const [pdfExportMode, setPdfExportMode] = useState(null);
   const [imagePromptData, setImagePromptData] = useState(null); // { prompt, mentionedChars, primaryWorld, worldRefImages }
   const imagePromptAbortRef = useRef(null);
+  const savedImageCursorRef = useRef(null); // Saves editor selection range for "insert at cursor"
   const [imageGenStatus, setImageGenStatus] = useState(null); // { status: "generating"|"done"|"error", imageUrl, retryCount, error }
   const [showDrafts, setShowDrafts] = useState(false);
   const [draftsChapterFilter, setDraftsChapterFilter] = useState(false);
@@ -5264,6 +5287,8 @@ export default function NovelForge() {
     if (needsRepopulate) {
       lastSyncedChapterRef.current = key;
       lastSyncedContentRef.current = content;
+      // Initialize editor-level event delegation for image drag/delete (once)
+      _initEditorImageDelegation(el);
       setTimeout(() => {
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
 		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
@@ -7017,7 +7042,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   const handleGenerateImage = useCallback(async (prompt) => {
     if (!settings.apiKey || !prompt?.trim()) return;
     setImageGenStatus({ status: "generating", imageUrl: null, retryCount: 0, error: null });
-    const maxRetries = 3;
+    const maxRetries = 6;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         setImageGenStatus(prev => ({ ...prev, retryCount: attempt }));
@@ -7066,7 +7091,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         }
       }
     }
-    setImageGenStatus({ status: "error", imageUrl: null, retryCount: maxRetries, error: "No image returned after 3 attempts. Please adjust the prompt and try again." });
+    setImageGenStatus({ status: "error", imageUrl: null, retryCount: maxRetries, error: "No image returned after 6 attempts. Please adjust the prompt and try again." });
   }, [settings.apiKey]);
 
   const handleSaveImageDraft = useCallback((imageUrl, prompt, chapterIdx) => {
@@ -7730,6 +7755,13 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 				|| (window.getSelection()?.toString() || "").trim();
 			  if (!capturedText) { showToast("Select text first", "error"); return; }
 			  pendingSelectionRef.current = "";
+			  // Save cursor position for "insert at cursor" later
+			  const sel = window.getSelection();
+			  if (sel && sel.rangeCount > 0 && editorRef.current?.contains(sel.anchorNode)) {
+			    savedImageCursorRef.current = sel.getRangeAt(0).cloneRange();
+			  } else {
+			    savedImageCursorRef.current = null;
+			  }
 			  const MAX_SCENE_TEXT = 8000;
 			  const effectiveText = capturedText.length > MAX_SCENE_TEXT
 				? capturedText.slice(0, MAX_SCENE_TEXT) + "\n\n[...selected text truncated...]"
@@ -8933,9 +8965,33 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               {imageGenStatus?.status === "done" && imageGenStatus.imageUrl && (
                 <div style={{ marginTop: 10 }}>
                   <img src={imageGenStatus.imageUrl} alt="Generated scene" style={{ width: "100%", maxHeight: 400, objectFit: "contain", borderRadius: 3, border: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)" }} />
-                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                    <button onClick={() => { handleAppendImage(imageGenStatus.imageUrl); }} className="nf-btn nf-btn-primary" style={{ fontSize: 11, padding: "6px 14px" }}>
-                      <Icons.ArrowDown /> Append to Chapter
+                  <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+                    <button onClick={() => {
+                      const el = editorRef.current;
+                      if (!el) return;
+                      const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
+                      const imgHtml = `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageGenStatus.imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${caption.replace(/"/g, '&quot;')}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption}</figcaption></figure>`;
+                      el.focus();
+                      // Restore saved cursor position
+                      if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) {
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(savedImageCursorRef.current);
+                      }
+                      document.execCommand("insertHTML", false, "<br/>" + imgHtml + "<br/>");
+                      syncEditorContent();
+                      lastSyncedContentRef.current = el.innerHTML;
+                      _initEditorImageDelegation(el);
+                      el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
+                      showToast("Image inserted at cursor", "success");
+                      setImagePromptData(null);
+                      setImageGenStatus(null);
+                      savedImageCursorRef.current = null;
+                    }} className="nf-btn nf-btn-primary" style={{ fontSize: 11, padding: "6px 14px" }}>
+                      <Icons.ArrowDown /> Insert at Cursor
+                    </button>
+                    <button onClick={() => { handleAppendImage(imageGenStatus.imageUrl); }} className="nf-btn-micro" style={{ fontSize: 11 }}>
+                      Append to End
                     </button>
                     <button onClick={() => {
                       handleSaveImageDraft(imageGenStatus.imageUrl, imagePromptData.prompt, activeChapterIdx);
@@ -9079,7 +9135,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait of this character white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `She is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
+                      const prompt = `Create a realistic passport portrait of this character with white white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `This person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },

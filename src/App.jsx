@@ -2892,7 +2892,8 @@ const CleanViewModal = memo(({ project, startChapter, onClose }) => {
 	  display: "flex", flexDirection: "column", animation: "nf-fadeIn 0.2s ease-out",
 	}}>
 	  <style>{`
-		.nf-img-toolbar { display: none !important; }
+		.nf-img-handle { display: none !important; }
+		.nf-img-actions { display: none !important; }
 		.nf-beat-marker { display: none !important; }
 		.nf-clean-reader p { margin-bottom: 1em; }
 		.nf-clean-reader figure { margin: 24px 0; }
@@ -3260,7 +3261,7 @@ const generatePdfHtml = (project, mode, chapterIdx) => {
 
 const _buildImgFigure = (imageUrl, caption) => {
   const safeCaption = (caption || "").replace(/"/g, '&quot;');
-  return `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><div class="nf-img-toolbar"><button class="nf-img-up" title="Move up">▲</button><button class="nf-img-down" title="Move down">▼</button><button class="nf-img-del" title="Delete">✕</button></div><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${safeCaption}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption || ""}</figcaption></figure>`;
+  return `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${safeCaption}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption || ""}</figcaption></figure>`;
 };
 
 // Safely insert image HTML into the editor WITHOUT replacing any selected text.
@@ -3356,49 +3357,130 @@ const _sceneCaption = (text, chapterIdx, chapterTitle) => {
   return trimmed || (chapterTitle || `Ch${(chapterIdx || 0) + 1}`);
 };
 
-// _attachImageEvents is now a no-op — all interaction is delegated
-const _attachImageEvents = () => {};
+// Attach drag and delete handlers to an image wrapper element
+const _attachImageEvents = (fig, editorEl) => {
+  if (!fig || fig._nfEventsAttached) return;
+  fig._nfEventsAttached = true;
 
-// Editor-level event delegation for ALL image interactions — click only, no drag
+  // Prevent native drag
+  fig.setAttribute('draggable', 'false');
+  fig.ondragstart = (e) => e.preventDefault();
+
+  // Delete button
+  const delBtn = fig.querySelector('.nf-img-del');
+  if (delBtn) {
+    delBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      fig.remove();
+      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+  }
+};
+
+// Editor-level event delegation for image drag — handles ALL images without per-element listeners
 const _initEditorImageDelegation = (editorEl) => {
   if (!editorEl || editorEl._nfImgDelegation) return;
   editorEl._nfImgDelegation = true;
 
-  editorEl.addEventListener('click', (e) => {
+  let dragState = null; // { fig, clone, placeholder, startY }
+
+  editorEl.addEventListener('mousedown', (e) => {
+    // Only start drag from handle or img inside a figure
+    const handle = e.target.closest('.nf-img-handle');
+    const img = e.target.closest('figure.nf-img-wrapper > img, figure.nf-img-wrapper img');
+    if (!handle && !img) return;
     const fig = e.target.closest('figure.nf-img-wrapper');
     if (!fig || !editorEl.contains(fig)) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-    // Delete
-    if (e.target.closest('.nf-img-del')) {
-      e.preventDefault(); e.stopPropagation();
-      fig.remove();
-      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-    // Move Up
-    if (e.target.closest('.nf-img-up')) {
-      e.preventDefault(); e.stopPropagation();
-      const prev = fig.previousElementSibling;
-      if (prev) editorEl.insertBefore(fig, prev);
-      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-    // Move Down
-    if (e.target.closest('.nf-img-down')) {
-      e.preventDefault(); e.stopPropagation();
-      const next = fig.nextElementSibling;
-      if (next) {
-        if (next.nextElementSibling) editorEl.insertBefore(fig, next.nextElementSibling);
-        else editorEl.appendChild(fig);
+    const clone = fig.cloneNode(true);
+    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${fig.offsetWidth}px;transition:none;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
+    document.body.appendChild(clone);
+
+    const placeholder = document.createElement('div');
+    placeholder.style.cssText = 'height:3px;background:var(--nf-accent);margin:4px 0;border-radius:2px;pointer-events:none;';
+
+    fig.style.opacity = '0.2';
+    fig.classList.add('dragging');
+
+    clone.style.left = (e.clientX - fig.offsetWidth / 2) + 'px';
+    clone.style.top = (e.clientY - 30) + 'px';
+
+    dragState = { fig, clone, placeholder };
+
+    const onMove = (ev) => {
+      if (!dragState) return;
+      clone.style.left = (ev.clientX - fig.offsetWidth / 2) + 'px';
+      clone.style.top = (ev.clientY - 30) + 'px';
+
+      // Find the block-level element closest to the mouse
+      const editorRect = editorEl.getBoundingClientRect();
+      if (ev.clientY < editorRect.top || ev.clientY > editorRect.bottom) return;
+
+      // Walk direct children of editorEl to find drop position
+      let bestChild = null;
+      let insertBefore = true;
+      for (const child of editorEl.children) {
+        if (child === fig || child === placeholder) continue;
+        const rect = child.getBoundingClientRect();
+        const midY = rect.top + rect.height / 2;
+        if (ev.clientY < midY) {
+          bestChild = child;
+          insertBefore = true;
+          break;
+        }
+        bestChild = child;
+        insertBefore = false;
       }
+
+      // Position the placeholder
+      if (placeholder.parentNode) placeholder.remove();
+      if (bestChild) {
+        if (insertBefore) {
+          editorEl.insertBefore(placeholder, bestChild);
+        } else {
+          if (bestChild.nextSibling) {
+            editorEl.insertBefore(placeholder, bestChild.nextSibling);
+          } else {
+            editorEl.appendChild(placeholder);
+          }
+        }
+      } else {
+        editorEl.appendChild(placeholder);
+      }
+    };
+
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      if (!dragState) return;
+
+      if (clone.parentNode) clone.remove();
+      if (placeholder.parentNode) {
+        editorEl.insertBefore(fig, placeholder);
+        placeholder.remove();
+      }
+      fig.style.opacity = '';
+      fig.classList.remove('dragging');
+      dragState = null;
       editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   });
 
-  // Prevent native drag on figures
-  editorEl.addEventListener('dragstart', (e) => {
-    if (e.target.closest && e.target.closest('figure.nf-img-wrapper')) e.preventDefault();
+  // Delegated delete — catch clicks on .nf-img-del anywhere in editor
+  editorEl.addEventListener('click', (e) => {
+    const delBtn = e.target.closest('.nf-img-del');
+    if (!delBtn) return;
+    const fig = delBtn.closest('figure.nf-img-wrapper');
+    if (!fig || !editorEl.contains(fig)) return;
+    e.preventDefault(); e.stopPropagation();
+    fig.remove();
+    editorEl.dispatchEvent(new Event('input', { bubbles: true }));
   });
 };
 
@@ -9231,7 +9313,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait of this character with white white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
+                      const prompt = `Create a realistic passport portrait of this character white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
@@ -10904,34 +10986,41 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             outline-offset: 4px;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper img {
+            cursor: grab;
             width: 100%;
             height: auto;
             display: block;
-            cursor: default;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper.dragging {
             opacity: 0.5;
             outline: 2px dashed var(--nf-accent);
           }
-          .nf-editor-contenteditable .nf-img-toolbar {
+          .nf-editor-contenteditable .nf-img-handle {
             display: none;
-            position: absolute; top: 6px; right: 6px; z-index: 5;
-            gap: 3px; flex-direction: row;
+            position: absolute; top: 4px; right: 4px; z-index: 5;
+            background: rgba(0,0,0,0.65); color: #fff; border: none;
+            border-radius: 3px; padding: 2px 8px; font-size: 10px;
+            cursor: grab; font-family: var(--nf-font-body);
+            letter-spacing: 0.05em; line-height: 1;
           }
-          .nf-editor-contenteditable figure.nf-img-wrapper:hover .nf-img-toolbar {
+          .nf-editor-contenteditable figure.nf-img-wrapper:hover .nf-img-handle {
+            display: block;
+          }
+          .nf-editor-contenteditable .nf-img-actions {
+            display: none;
+            position: absolute; top: 4px; left: 4px; z-index: 5;
+            gap: 3px;
+          }
+          .nf-editor-contenteditable figure.nf-img-wrapper:hover .nf-img-actions {
             display: flex;
           }
-          .nf-editor-contenteditable .nf-img-toolbar button {
-            background: rgba(0,0,0,0.7); color: #fff; border: none;
-            border-radius: 3px; padding: 4px 8px; font-size: 11px;
+          .nf-editor-contenteditable .nf-img-actions button {
+            background: rgba(0,0,0,0.65); color: #fff; border: none;
+            border-radius: 3px; padding: 3px 7px; font-size: 10px;
             cursor: pointer; font-family: var(--nf-font-body);
-            line-height: 1; transition: background 0.1s;
           }
-          .nf-editor-contenteditable .nf-img-toolbar button:hover {
-            background: rgba(0,0,0,0.9);
-          }
-          .nf-editor-contenteditable .nf-img-toolbar .nf-img-del:hover {
-            background: rgba(196,58,58,0.9);
+          .nf-editor-contenteditable .nf-img-actions button:hover {
+            background: rgba(0,0,0,0.85);
           }
 		  /* ── Beat markers in editor ── */
           .nf-beat-marker {

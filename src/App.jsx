@@ -3261,7 +3261,7 @@ const generatePdfHtml = (project, mode, chapterIdx) => {
 
 const _buildImgFigure = (imageUrl, caption) => {
   const safeCaption = (caption || "").replace(/"/g, '&quot;');
-  return `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${safeCaption}" draggable="false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption || ""}</figcaption></figure>`;
+  return `<figure class="nf-img-wrapper" contenteditable="false" style="text-align:center;margin:20px 0;position:relative;display:block;width:100%"><span class="nf-img-handle">⠿ drag</span><span class="nf-img-actions"><button class="nf-img-del" title="Delete image">✕</button></span><img src="${imageUrl}" style="max-width:100%;border-radius:2px;box-shadow:0 2px 12px rgba(0,0,0,0.15)" alt="${safeCaption}" draggable="false" ondragstart="return false" /><figcaption class="nf-img-caption" style="font-size:10px;color:var(--nf-text-muted);font-style:italic;margin-top:4px;padding-top:4px;border-top:1px solid var(--nf-border);text-align:center">${caption || ""}</figcaption></figure>`;
 };
 
 // Safely insert image HTML into the editor WITHOUT replacing any selected text.
@@ -3351,6 +3351,9 @@ const _sceneCaption = (text, chapterIdx, chapterTitle) => {
 };
 
 // Attach drag and delete handlers to an image wrapper element
+// Replace _attachImageEvents — only the flag is needed now,
+// delegation handles everything else via event listeners on the editor.
+
 const _attachImageEvents = (fig, editorEl) => {
   if (!fig || fig._nfEventsAttached) return;
   fig._nfEventsAttached = true;
@@ -3371,25 +3374,56 @@ const _attachImageEvents = (fig, editorEl) => {
 };
 
 // Editor-level event delegation for image drag — handles ALL images without per-element listeners
-const _initEditorImageDelegation = (editorEl) => {
-  if (!editorEl || editorEl._nfImgDelegation) {
-    console.log('[NF-IMG] delegation SKIPPED', { hasEl: !!editorEl, alreadySet: !!editorEl?._nfImgDelegation });
-    return;
+// Replace the _initEditorImageDelegation function with this fixed version:
+
+const _initEditorImageDelegation = (editorEl, dragRef) => {
+  if (!editorEl) return;
+
+  // ═══ Don't re-setup delegation while a drag is in progress — it kills the drag ═══
+  if (editorEl._nfDragging) return;
+
+  // Remove previous listeners to prevent duplicates on re-runs
+  if (editorEl._nfCleanupDragPrevention) {
+    editorEl._nfCleanupDragPrevention();
+    delete editorEl._nfCleanupDragPrevention;
   }
-  editorEl._nfImgDelegation = true;
-  console.log('[NF-IMG] delegation INIT — attaching listeners to editor');
+  if (editorEl._nfCleanupActiveDrag) {
+    editorEl._nfCleanupActiveDrag();
+    delete editorEl._nfCleanupActiveDrag;
+  }
 
-  let dragState = null;
-  const NID = NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT;
+  // drag state is now stored in imageDragRef (component-level ref) so it persists across re-calls
 
-  const cleanupDrag = (applyMove) => {
-    const state = dragState;
-    if (!state) return;
-    dragState = null;
+  // ── Suppress native browser drag on images ──
+  const onDragStart = (e) => {
+    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img')) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+  editorEl.addEventListener('dragstart', onDragStart);
+
+  const onSelectStart = (e) => {
+    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img')) {
+      e.preventDefault();
+    }
+  };
+  editorEl.addEventListener('selectstart', onSelectStart);
+
+  editorEl._nfCleanupDragPrevention = () => {
+    editorEl.removeEventListener('dragstart', onDragStart);
+    editorEl.removeEventListener('selectstart', onSelectStart);
+  };
+
+  // ── Drag cleanup ──
+    const cleanupDrag = (applyMove) => {
+      const state = dragRef.current;
+      if (!state) return;
+      dragRef.current = null;
 
     if (state.clone?.parentNode) state.clone.remove();
 
-    if (applyMove && state.placeholder?.parentNode && state.fig && editorEl.contains(state.placeholder)) {
+    if (applyMove && state.placeholder?.parentNode && state.fig?.parentNode) {
       editorEl.insertBefore(state.fig, state.placeholder);
     }
 
@@ -3400,44 +3434,47 @@ const _initEditorImageDelegation = (editorEl) => {
       state.fig.classList.remove('dragging');
     }
 
-    if (state.onMove) document.removeEventListener('mousemove', state.onMove);
-    if (state.onUp) document.removeEventListener('mouseup', state.onUp);
-    if (state.onKey) document.removeEventListener('keydown', state.onKey);
+    document.removeEventListener('mousemove', state.onMove);
+    document.removeEventListener('mouseup', state.onUp);
+    document.removeEventListener('keydown', state.onKey);
   };
 
-  // Cancel drag if editor content changes (e.g., React re-renders)
-  editorEl.addEventListener('input', () => { if (dragState) cleanupDrag(false); });
-  // Suppress native browser drag on images
-  editorEl.addEventListener('dragstart', (e) => {
-    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper > img')) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-  });
-  // Prevent text selection from starting during image interaction
-  editorEl.addEventListener('selectstart', (e) => {
-    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper > img')) {
-      e.preventDefault();
-    }
-  });
+  // Expose for React useEffect cleanup
+  editorEl._nfCleanupActiveDrag = () => cleanupDrag(false);
 
-  editorEl.addEventListener('mousedown', (e) => {
-    // Only start drag from handle or img inside a figure
+  // Cancel drag if content changes externally
+  const onEditorInput = () => {
+    if (dragRef.current) cleanupDrag(false);
+  };
+  editorEl.addEventListener('input', onEditorInput);
+
+  // ── Mousedown on image → start drag ──
+  const onEditorMouseDown = (e) => {
+    // ═══ SET DRAG FLAG FIRST — before any React state changes trigger re-render ═══
+    editorEl._nfDragging = true;
+
     const handle = e.target.closest('.nf-img-handle');
     const imgTarget = e.target.closest('figure.nf-img-wrapper > img, figure.nf-img-wrapper img');
     const figEl = e.target.closest('figure.nf-img-wrapper');
-    if (!handle && !imgTarget) return;
-    if (!figEl || !editorEl.contains(figEl)) return;
-    if (e.button !== 0) return;
 
-    console.log('[NF-IMG] mousedown on image — starting drag');
+    if (!handle && !imgTarget) {
+      editorEl._nfDragging = false;
+      return;
+    }
 
-    // MUST be called BEFORE anything else — this is what actually
-    // blocks the browser's native image drag
+    figEl.draggable = false;
+    figEl.setAttribute('draggable', 'false');
+    figEl.querySelectorAll('img').forEach(img => {
+      img.draggable = false;
+      img.setAttribute('draggable', 'false');
+    });
+
     e.preventDefault();
     e.stopPropagation();
 
-    if (dragState) cleanupDrag(false);
+    if (dragRef.current) cleanupDrag(false);
+
+    editorEl._nfDragging = true;
 
     const figWidth = figEl.offsetWidth;
     const clone = figEl.cloneNode(true);
@@ -3454,31 +3491,25 @@ const _initEditorImageDelegation = (editorEl) => {
     clone.style.left = (e.clientX - figWidth / 2) + 'px';
     clone.style.top = (e.clientY - 30) + 'px';
 
-    const svgCoords = (cx, cy) => {
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      const pt = svg.createSVGPoint();
-      pt.x = cx; pt.y = cy;
-      return pt;
-    };
-
     const onMove = (ev) => {
-      if (!dragState) return;
+      const state = dragRef.current;
+      if (!state) return;
       ev.preventDefault();
-      clone.style.left = (ev.clientX - figWidth / 2) + 'px';
-      clone.style.top = (ev.clientY - 30) + 'px';
+
+      const cloneWidth = state.clone.offsetWidth || figWidth;
+      state.clone.style.left = (ev.clientX - cloneWidth / 2) + 'px';
+      state.clone.style.top = (ev.clientY - 30) + 'px';
 
       const editorRect = editorEl.getBoundingClientRect();
       if (ev.clientY < editorRect.top || ev.clientY > editorRect.bottom) return;
 
-      // Remove placeholder FIRST so it doesn't pollute child iteration
-      if (placeholder.parentNode) placeholder.remove();
+      if (state.placeholder.parentNode) state.placeholder.remove();
 
-      // Default: insert at beginning of editor
       let bestChild = editorEl.firstElementChild;
       let insertBefore = true;
 
       for (const child of editorEl.children) {
-        if (child === figEl) continue;
+        if (child === state.fig || child === state.placeholder) continue;
         const rect = child.getBoundingClientRect();
         if (rect.height === 0) continue;
         const midY = rect.top + rect.height / 2;
@@ -3493,48 +3524,63 @@ const _initEditorImageDelegation = (editorEl) => {
 
       if (bestChild && bestChild.parentNode === editorEl) {
         if (insertBefore) {
-          editorEl.insertBefore(placeholder, bestChild);
+          editorEl.insertBefore(state.placeholder, bestChild);
         } else {
-          editorEl.insertBefore(placeholder, bestChild.nextSibling);
+          editorEl.insertBefore(state.placeholder, bestChild.nextSibling);
         }
       } else {
-        editorEl.appendChild(placeholder);
+        editorEl.appendChild(state.placeholder);
       }
     };
 
     const onUp = () => {
-      const state = dragState;
+      const state = dragRef.current;
       if (!state) return;
-      const shouldApply = !!(
-        state.placeholder &&
-        state.placeholder.parentNode &&
-        editorEl.contains(state.fig)
-      );
-      console.log('[NF-IMG] mouseup — applyMove:', shouldApply);
-      cleanupDrag(shouldApply);
-      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+
+      // Walk DOM: if placeholder appears before fig, image was moved
+      let didMove = false;
+      if (state.placeholder?.parentNode && state.fig?.parentNode) {
+        for (const child of editorEl.children) {
+          if (child === state.placeholder) { didMove = true; break; }
+          if (child === state.fig) break;
+        }
+      }
+
+      cleanupDrag(didMove);
+      editorEl._nfDragging = false;
+
+      if (didMove) {
+        editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     };
 
     const onKey = (ev) => {
-      if (ev.key === 'Escape') cleanupDrag(false);
+      if (ev.key === 'Escape') {
+        cleanupDrag(false);
+        editorEl._nfDragging = false;
+      }
     };
 
-    dragState = { fig: figEl, clone, placeholder, figWidth, onMove, onUp, onKey };
+    dragRef.current = { fig: figEl, clone, placeholder, figWidth, onMove, onUp, onKey };
 
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
     document.addEventListener('keydown', onKey);
-  });
+  };
+  editorEl.addEventListener('mousedown', onEditorMouseDown);
 
-  editorEl.addEventListener('click', (e) => {
+  // ── Click → delete button ──
+  const onEditorClick = (e) => {
     const delBtn = e.target.closest('.nf-img-del');
     if (!delBtn) return;
     const fig = delBtn.closest('figure.nf-img-wrapper');
     if (!fig || !editorEl.contains(fig)) return;
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     fig.remove();
     editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-  });
+  };
+  editorEl.addEventListener('click', onEditorClick);
 };
 
 const _attachBeatDragEvents = (markerEl, editorEl) => {
@@ -4934,6 +4980,7 @@ export default function NovelForge() {
   const pendingSelectionRef = useRef("");
   const pendingGenerateRef = useRef(false);
   const _nfImageMap = useRef(new Map()); // ← ADD THIS LINE
+  const imageDragRef = useRef(null); // ← ADD THIS LINE
   const _lastChapterPerProject = useRef({});
   const [undoState, undoDispatch] = useReducer(undoReducer, { past: [], future: [] });
 
@@ -5168,6 +5215,11 @@ export default function NovelForge() {
       // Sync editor to state first
       const el = editorRef.current;
       if (el && activeProjectId) {
+        // Safety net: clear drag flag so editor isn't left in broken state
+        if (el._nfDragging) {
+          el._nfDragging = false;
+        }
+
         const html = el.innerHTML;
         if (html && html !== "<br>") {
           const currentProjects = [...projectsRef.current];
@@ -5491,45 +5543,58 @@ export default function NovelForge() {
   useEffect(() => () => debouncedSyncEditor.cancel(), [debouncedSyncEditor]);
 
   // B6: Track a content version to detect external changes (undo, AI append)
+  // B6: Track a content version to detect external changes (undo, AI append)
   useEffect(() => {
-    debouncedSyncEditor.cancel(); // Cancel any pending sync from previous chapter
-	const el = editorRef.current;
+    debouncedSyncEditor.cancel();
+    const el = editorRef.current;
     if (!el) return;
+    // ═══ Don't do ANYTHING while a drag is in progress ═══
+    if (el._nfDragging) return;
+
     el.dispatchEvent(new Event('input', { bubbles: true }));
-	const isViewingDraft = !!viewingDraftId;
+  
+    const isViewingDraft = !!viewingDraftId;
     const viewingDraft = isViewingDraft ? (project?.drafts || []).find(d => d.id === viewingDraftId) : null;
     const key = isViewingDraft ? `draft:${viewingDraftId}` : `${activeProjectId}-${activeChapterIdx}`;
     const content = isViewingDraft ? (viewingDraft?.content || "") : (activeChapter?.content || "");
     const editorEmpty = !el.innerHTML || el.innerHTML === "<br>";
     const hasContent = !!content;
-
-    // Re-populate if: chapter/draft changed, editor empty with content, or external content change
+  
     const needsRepopulate = lastSyncedChapterRef.current !== key
       || (editorEmpty && hasContent)
       || (lastSyncedContentRef.current !== null && lastSyncedContentRef.current !== content && el.innerHTML !== content);
-
+  
     if (needsRepopulate) {
       lastSyncedChapterRef.current = key;
       lastSyncedContentRef.current = content;
-      console.log('[NF-IMG] re-populating editor — calling _initEditorImageDelegation');
       const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code|figure)\b/i.test(content);
       if (looksLikeHtml) {
         el.innerHTML = content;
       } else {
         el.innerHTML = content ? content.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
       }
-      // THEN: Initialize editor-level event delegation (once per editor element)
-      _initEditorImageDelegation(el);
-      // THEN: Attach per-element events to the NEW DOM nodes (after innerHTML is set)
+      _initEditorImageDelegation(el, imageDragRef);
       setTimeout(() => {
         _nfRestoreImagesInElement(el, _nfImageMap.current);
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
         el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
-        _initEditorImageDelegation(el);
+        _initEditorImageDelegation(el, imageDragRef);
       }, 50);
     } else {
       lastSyncedContentRef.current = content;
     }
+  
+    return () => {
+      if (el._nfCleanupDragPrevention) {
+        el._nfCleanupDragPrevention();
+        delete el._nfCleanupDragPrevention;
+      }
+      delete el._nfDragging;
+      if (el._nfCleanupActiveDrag) {
+        el._nfCleanupActiveDrag();
+        delete el._nfCleanupActiveDrag;
+      }
+    };
   }, [activeChapter?.content, activeChapterIdx, activeProjectId, activeTab, viewingDraftId, project?.drafts]);
 
   // ─── API CALLS ───
@@ -11152,38 +11217,43 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               color: #000 !important; background: #fff !important;
             }
           }
-		  /* Image wrapper in editor — draggable scene illustrations */
+
+		  /* ── Image wrapper in editor — draggable scene illustrations ── */
           .nf-editor-contenteditable figure.nf-img-wrapper {
             cursor: default;
             user-select: contain;
             display: block;
             width: 100%;
             max-width: 100%;
+            position: relative;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper:hover {
             outline: 2px solid var(--nf-accent-2);
             outline-offset: 4px;
           }
+          .nf-editor-contenteditable figure.nf-img-wrapper.dragging {
+            opacity: 0.3 !important;
+          }
           .nf-editor-contenteditable figure.nf-img-wrapper img {
-            cursor: grab;
             width: 100%;
             height: auto;
             display: block;
-          }
-          .nf-editor-contenteditable figure.nf-img-wrapper.dragging {
-            opacity: 0.5;
-            outline: 2px dashed var(--nf-accent);
           }
           .nf-editor-contenteditable .nf-img-handle {
             display: none;
             position: absolute; top: 4px; right: 4px; z-index: 5;
             background: rgba(0,0,0,0.65); color: #fff; border: none;
             border-radius: 3px; padding: 2px 8px; font-size: 10px;
-            cursor: grab; font-family: var(--nf-font-body);
+            cursor: grab !important;
+            font-family: var(--nf-font-body);
             letter-spacing: 0.05em; line-height: 1;
           }
           .nf-editor-contenteditable figure.nf-img-wrapper:hover .nf-img-handle {
             display: block;
+          }
+          .nf-editor-contenteditable .nf-img-handle:active,
+          .nf-editor-contenteditable figure.nf-img-wrapper.dragging .nf-img-handle {
+            cursor: grabbing !important;
           }
           .nf-editor-contenteditable .nf-img-actions {
             display: none;
@@ -11200,6 +11270,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           }
           .nf-editor-contenteditable .nf-img-actions button:hover {
             background: rgba(0,0,0,0.85);
+          }
           }
 		  /* ── Beat markers in editor ── */
           .nf-beat-marker {

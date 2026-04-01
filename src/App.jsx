@@ -3268,7 +3268,6 @@ const _buildImgFigure = (imageUrl, caption) => {
 // Uses direct DOM manipulation instead of execCommand("insertHTML") which replaces selections.
 const _insertImageAtPoint = (editorEl, imgHtml, position = "end") => {
   if (!editorEl) return;
-  editorEl.focus();
 
   // Create a temporary container to parse the HTML
   const temp = document.createElement('div');
@@ -3280,69 +3279,88 @@ const _insertImageAtPoint = (editorEl, imgHtml, position = "end") => {
   const br = document.createElement('p');
   br.innerHTML = '<br>';
 
+  // Helper: find the nearest direct child of editorEl from a given node
+  const findBlockInsertPoint = (node) => {
+    if (!node || node === editorEl) return null;
+    let current = node;
+    // Walk up to find a direct child of editorEl
+    while (current && current.parentNode !== editorEl) {
+      current = current.parentNode;
+      if (!current || current === document.body) return null;
+    }
+    // Validate it's actually a direct child
+    if (current && current.parentNode === editorEl) return current;
+    return null;
+  };
+
+  // Helper: insert figure + br after a given block element
+  const insertAfterBlock = (block) => {
+    if (block.nextSibling) {
+      editorEl.insertBefore(figEl, block.nextSibling);
+      // Insert br after figEl
+      if (figEl.nextSibling) {
+        editorEl.insertBefore(br, figEl.nextSibling);
+      } else {
+        editorEl.appendChild(br);
+      }
+    } else {
+      editorEl.appendChild(figEl);
+      editorEl.appendChild(br);
+    }
+  };
+
   if (position === "end") {
     editorEl.appendChild(figEl);
     editorEl.appendChild(br);
   } else if (position === "cursor") {
+    // Clear any active selection first to prevent text replacement
     const sel = window.getSelection();
+    let inserted = false;
     if (sel && sel.rangeCount > 0 && editorEl.contains(sel.anchorNode)) {
-      // Collapse selection to end (don't delete anything)
+      // Collapse to end without deleting
       sel.collapseToEnd();
-      const range = sel.getRangeAt(0);
-      // Find the nearest block-level parent to insert after
-      let insertPoint = range.startContainer;
-      // Walk up to find a direct child of the editor or a block element
-      while (insertPoint && insertPoint !== editorEl && insertPoint.parentNode !== editorEl) {
-        insertPoint = insertPoint.parentNode;
+      const insertPoint = findBlockInsertPoint(sel.anchorNode);
+      if (insertPoint) {
+        insertAfterBlock(insertPoint);
+        inserted = true;
       }
-      if (insertPoint && insertPoint !== editorEl && insertPoint.parentNode === editorEl) {
-        // Insert after this block element
-        if (insertPoint.nextSibling) {
-          editorEl.insertBefore(br, insertPoint.nextSibling);
-          editorEl.insertBefore(figEl, br);
-        } else {
-          editorEl.appendChild(figEl);
-          editorEl.appendChild(br);
-        }
-      } else {
-        // Fallback: append at end
-        editorEl.appendChild(figEl);
-        editorEl.appendChild(br);
-      }
-    } else {
-      // No valid cursor — append at end
+    }
+    if (!inserted) {
+      // Fallback: append at end
       editorEl.appendChild(figEl);
       editorEl.appendChild(br);
     }
   } else if (position instanceof Range) {
-    // Insert at a specific saved range (collapsed to end first)
-    const sel = window.getSelection();
-    const collapsedRange = position.cloneRange();
-    collapsedRange.collapse(false); // Collapse to END — never delete text
-    sel.removeAllRanges();
-    sel.addRange(collapsedRange);
-    let insertPoint = collapsedRange.startContainer;
-    while (insertPoint && insertPoint !== editorEl && insertPoint.parentNode !== editorEl) {
-      insertPoint = insertPoint.parentNode;
-    }
-    if (insertPoint && insertPoint !== editorEl && insertPoint.parentNode === editorEl) {
-      if (insertPoint.nextSibling) {
-        editorEl.insertBefore(br, insertPoint.nextSibling);
-        editorEl.insertBefore(figEl, br);
-      } else {
-        editorEl.appendChild(figEl);
-        editorEl.appendChild(br);
+    // Insert at a specific saved range — validate it's still valid
+    let inserted = false;
+    try {
+      if (editorEl.contains(position.startContainer)) {
+        const insertPoint = findBlockInsertPoint(position.startContainer);
+        if (insertPoint) {
+          insertAfterBlock(insertPoint);
+          inserted = true;
+        }
       }
-    } else {
+    } catch (e) {
+      // Range may have become invalid (nodes removed/replaced)
+      console.warn("[NovelForge] Saved cursor range invalid, appending at end", e);
+    }
+    if (!inserted) {
       editorEl.appendChild(figEl);
       editorEl.appendChild(br);
     }
   }
 
+  // Clear selection to prevent any lingering selection issues
+  try { window.getSelection()?.removeAllRanges(); } catch {}
+
+  // Focus back on editor
+  editorEl.focus();
+
   // Attach events to the new figure
   _attachImageEvents(figEl, editorEl);
-  // Trigger save
-  editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+  // Trigger save — don't use dispatchEvent('input') as it causes double-sync;
+  // callers handle syncEditorContent() explicitly
   return figEl;
 };
 
@@ -3382,7 +3400,36 @@ const _initEditorImageDelegation = (editorEl) => {
   if (!editorEl || editorEl._nfImgDelegation) return;
   editorEl._nfImgDelegation = true;
 
-  let dragState = null; // { fig, clone, placeholder, startY }
+  let dragState = null; // { fig, clone, placeholder, figWidth, onMove, onUp, onKey }
+
+  const cleanupDrag = (applyMove = false) => {
+    if (!dragState) return;
+    const { fig, clone, placeholder } = dragState;
+
+    // Always remove clone and placeholder
+    if (clone?.parentNode) clone.remove();
+
+    if (applyMove && placeholder?.parentNode && fig && editorEl.contains(placeholder)) {
+      // Move figure to placeholder position
+      editorEl.insertBefore(fig, placeholder);
+      placeholder.remove();
+    } else {
+      if (placeholder?.parentNode) placeholder.remove();
+    }
+
+    // Restore figure opacity
+    if (fig) {
+      fig.style.opacity = '';
+      fig.classList.remove('dragging');
+    }
+
+    // Remove listeners
+    if (dragState.onMove) document.removeEventListener('mousemove', dragState.onMove);
+    if (dragState.onUp) document.removeEventListener('mouseup', dragState.onUp);
+    if (dragState.onKey) document.removeEventListener('keydown', dragState.onKey);
+
+    dragState = null;
+  };
 
   editorEl.addEventListener('mousedown', (e) => {
     // Only start drag from handle or img inside a figure
@@ -3392,27 +3439,31 @@ const _initEditorImageDelegation = (editorEl) => {
     const fig = e.target.closest('figure.nf-img-wrapper');
     if (!fig || !editorEl.contains(fig)) return;
     if (e.button !== 0) return;
+
+    // Clean up any stale drag state
+    if (dragState) cleanupDrag(false);
+
     e.preventDefault();
     e.stopPropagation();
 
+    const figWidth = fig.offsetWidth;
     const clone = fig.cloneNode(true);
-    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${fig.offsetWidth}px;transition:none;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
+    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${figWidth}px;transition:none;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
     document.body.appendChild(clone);
 
     const placeholder = document.createElement('div');
     placeholder.style.cssText = 'height:3px;background:var(--nf-accent);margin:4px 0;border-radius:2px;pointer-events:none;';
+    placeholder.className = 'nf-drag-placeholder';
 
     fig.style.opacity = '0.2';
     fig.classList.add('dragging');
 
-    clone.style.left = (e.clientX - fig.offsetWidth / 2) + 'px';
+    clone.style.left = (e.clientX - figWidth / 2) + 'px';
     clone.style.top = (e.clientY - 30) + 'px';
-
-    dragState = { fig, clone, placeholder };
 
     const onMove = (ev) => {
       if (!dragState) return;
-      clone.style.left = (ev.clientX - fig.offsetWidth / 2) + 'px';
+      clone.style.left = (ev.clientX - figWidth / 2) + 'px';
       clone.style.top = (ev.clientY - 30) + 'px';
 
       // Find the block-level element closest to the mouse
@@ -3453,23 +3504,22 @@ const _initEditorImageDelegation = (editorEl) => {
     };
 
     const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      if (!dragState) return;
-
-      if (clone.parentNode) clone.remove();
-      if (placeholder.parentNode) {
-        editorEl.insertBefore(fig, placeholder);
-        placeholder.remove();
-      }
-      fig.style.opacity = '';
-      fig.classList.remove('dragging');
-      dragState = null;
+      const shouldApply = dragState && placeholder.parentNode && editorEl.contains(fig);
+      cleanupDrag(shouldApply);
       editorEl.dispatchEvent(new Event('input', { bubbles: true }));
     };
 
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') {
+        cleanupDrag(false);
+      }
+    };
+
+    dragState = { fig, clone, placeholder, figWidth, onMove, onUp, onKey };
+
     document.addEventListener('mousemove', onMove);
     document.addEventListener('mouseup', onUp);
+    document.addEventListener('keydown', onKey);
   });
 
   // Delegated delete — catch clicks on .nf-img-del anywhere in editor
@@ -5387,18 +5437,20 @@ export default function NovelForge() {
     if (needsRepopulate) {
       lastSyncedChapterRef.current = key;
       lastSyncedContentRef.current = content;
-      // Initialize editor-level event delegation for image drag/delete (once)
-      _initEditorImageDelegation(el);
-      setTimeout(() => {
-        el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
-		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
-      }, 100);
-      const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code)\b/i.test(content);
+      // FIRST: Set the innerHTML so the DOM is populated
+      const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code|figure)\b/i.test(content);
       if (looksLikeHtml) {
         el.innerHTML = content;
       } else {
         el.innerHTML = content ? content.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
       }
+      // THEN: Initialize editor-level event delegation (once per editor element)
+      _initEditorImageDelegation(el);
+      // THEN: Attach per-element events to the NEW DOM nodes (after innerHTML is set)
+      setTimeout(() => {
+        el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
+		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
+      }, 50);
     } else {
       lastSyncedContentRef.current = content;
     }
@@ -9114,7 +9166,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       if (!el) return;
                       const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
                       const imgHtml = _buildImgFigure(imageGenStatus.imageUrl, caption);
-                      const position = savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer) ? savedImageCursorRef.current : "cursor";
+                      const position = (() => {
+                        try {
+                          if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) return savedImageCursorRef.current;
+                        } catch {} return "cursor";
+                      })();
                       _insertImageAtPoint(el, imgHtml, position);
                       syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
                       showToast("Image inserted at cursor", "success");
@@ -9153,7 +9209,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                 const el = editorRef.current;
                                 if (!el) return;
                                 const caption = _sceneCaption(selectedText, activeChapterIdx, activeChapter?.title);
-                                const position = savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer) ? savedImageCursorRef.current : "end";
+                                const position = (() => {
+                                  try {
+                                    if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) return savedImageCursorRef.current;
+                                  } catch {} return "end";
+                                })();
                                 _insertImageAtPoint(el, _buildImgFigure(img.imageUrl, caption + ` (${img.label})`), position);
                                 syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
                                 showToast(`${img.label} inserted`, "success");

@@ -3596,6 +3596,72 @@ const _attachBeatDragEvents = (markerEl, editorEl) => {
   });
 };
 
+// ═══════════════════════════════════════
+// ─── IMAGE PERFORMANCE SYSTEM ───
+// Stores base64 in a Map, replaces with tiny IDs in stored content.
+// innerHTML on every keystroke becomes instant instead of blocking.
+// ═══════════════════════════════════════
+
+const _nfStripBase64FromContent = (html, imageMap) => {
+  if (!html || !html.includes('data:image')) return html;
+  let counter = 0;
+  return html.replace(
+    /(<img\s[^>]*\bsrc=")data:image\/[^"]+("[^>]*\/?>)/g,
+    (match, before, after) => {
+      const srcMatch = match.match(/\bsrc="(data:image\/[^"]+)"/);
+      if (!srcMatch) return match;
+      const id = `nfimg${Date.now().toString(36)}${(counter++).toString(36)}`;
+      imageMap.set(id, srcMatch[1]);
+      return `${before}NFIMG:${id}${after}`;
+    }
+  );
+};
+
+const _nfRestoreImagesInElement = (el, imageMap) => {
+  if (!el || !imageMap || imageMap.size === 0) return;
+  const imgs = el.querySelectorAll('img');
+  for (const img of imgs) {
+    const src = img.getAttribute('src');
+    if (src && src.startsWith('NFIMG:')) {
+      const id = src.slice(6);
+      const b64 = imageMap.get(id);
+      if (b64) img.src = b64;
+    }
+  }
+};
+
+const _nfRestoreImagesInContent = (content, imageMap) => {
+  if (!content || !imageMap || imageMap.size === 0) return content;
+  if (!content.includes('NFIMG:')) return content;
+  return content.replace(/NFIMG:([a-z0-9]+)/g, (match, id) => {
+    return imageMap.get(id) || match;
+  });
+};
+
+const _nfDeepCopyWithRestoredImages = (projects, imageMap) => {
+  return JSON.parse(JSON.stringify(projects)).map(p => ({
+    ...p,
+    chapters: (p.chapters || []).map(ch => ({
+      ...ch,
+      content: _nfRestoreImagesInContent(ch.content || "", imageMap),
+    })),
+    characters: (p.characters || []).map(c => ({
+      ...c,
+      image: _nfRestoreImagesInContent(c.image || "", imageMap),
+    })),
+    worldBuilding: (p.worldBuilding || []).map(w => ({
+      ...w,
+      referenceImages: w.referenceImages
+        ? Object.fromEntries(
+            Object.entries(w.referenceImages).map(([k, v]) => [
+              k, _nfRestoreImagesInContent(v || "", imageMap),
+            ])
+          )
+        : w.referenceImages,
+    })),
+  }));
+};
+
 // Detect which beat the cursor/caret is currently inside
 // Detect which beat the cursor/caret is currently inside
 const detectCursorBeat = (el) => {
@@ -4866,8 +4932,9 @@ export default function NovelForge() {
   const abortRef = useRef(null);
   const streamingContentRef = useRef("");
   const pendingSelectionRef = useRef("");
-  const pendingGenerateRef = useRef(false); // Fix #12: Signal deferred generation after state batch updates
-  const _lastChapterPerProject = useRef({}); // C12: Remember last chapter per project
+  const pendingGenerateRef = useRef(false);
+  const _nfImageMap = useRef(new Map()); // ← ADD THIS LINE
+  const _lastChapterPerProject = useRef({});
   const [undoState, undoDispatch] = useReducer(undoReducer, { past: [], future: [] });
 
   const showToast = useCallback((message, type = "info") => setToast({ message, type, key: Date.now() }), []);
@@ -5112,10 +5179,12 @@ export default function NovelForge() {
         }
       }
       // Cancel debounced saves and force synchronous save
+      // Cancel debounced saves and force synchronous save (restore images for persistence)
       debouncedSaveProjects.cancel();
       debouncedSaveSettings.cancel();
       debouncedSaveTabChats.cancel();
-      Storage.saveProjects(projectsRef.current);
+      const projectsForSave = _nfDeepCopyWithRestoredImages(projectsRef.current, _nfImageMap.current);
+      Storage.saveProjects(projectsForSave);
       Storage.saveSettings({ ...settingsRef.current, theme: themeRef.current });
       if (Object.keys(tabChatHistoriesRef.current).length) {
         Storage.saveTabChats(tabChatHistoriesRef.current);
@@ -5289,9 +5358,9 @@ export default function NovelForge() {
   const debouncedSyncEditor = useMemo(() => debounce(() => {
     const el = editorRef.current;
     if (!el) return;
-    const html = el.innerHTML;
-    // FIX 3: Update the sync ref BEFORE updating state, so the re-populate effect
-    // doesn't see it as an external change and reset the cursor
+    let html = el.innerHTML;
+    // Strip base64 images → tiny IDs (the performance fix)
+    html = _nfStripBase64FromContent(html, _nfImageMap.current);
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
   }, 300), [activeChapterIdx, updateChapter]);
@@ -5409,10 +5478,11 @@ export default function NovelForge() {
     debouncedSyncEditor.cancel();
     const el = editorRef.current;
     if (!el) return;
-    const html = el.innerHTML;
+    let html = el.innerHTML;
+    // Strip base64 images → tiny IDs (the performance fix)
+    html = _nfStripBase64FromContent(html, _nfImageMap.current);
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
-    // Track which beat the cursor is in
     const beatId = detectCursorBeat(el);
     if (beatId) setActiveBeatId(beatId);
   }, [activeChapterIdx, updateChapter, debouncedSyncEditor]);
@@ -5452,11 +5522,10 @@ export default function NovelForge() {
       _initEditorImageDelegation(el);
       // THEN: Attach per-element events to the NEW DOM nodes (after innerHTML is set)
       setTimeout(() => {
+        _nfRestoreImagesInElement(el, _nfImageMap.current);
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
-		el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
-        // ── ADD THIS LINE ──
+        el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
         _initEditorImageDelegation(el);
-        // ── END ADD ──
       }, 50);
     } else {
       lastSyncedContentRef.current = content;
@@ -7046,7 +7115,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         }
       }
 
-      const projectsForDrive = JSON.parse(JSON.stringify(projects));
+      const projectsForDrive = _nfDeepCopyWithRestoredImages(projects, _nfImageMap.current);
       GDriveImages.markImages(projectsForDrive);
 
       // ── Save BOTH mappings so load can download images ──
@@ -7346,7 +7415,8 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
   const handleExportJson = useCallback(() => {
     if (!project) return;
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
+    const restored = _nfDeepCopyWithRestoredImages([project], _nfImageMap.current)[0];
+    const blob = new Blob([JSON.stringify(restored, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     Object.assign(document.createElement("a"), { href: url, download: `${project.title}.json` }).click();
     URL.revokeObjectURL(url); showToast("Exported JSON", "success");
@@ -7677,15 +7747,21 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     const draftImages = project?.images || [];
 
     // Extract images from chapter content
+        // Extract images from chapter content (handles both base64 and NFIMG: IDs)
     const chapterImages = [];
     (project?.chapters || []).forEach((ch, chIdx) => {
       if (!ch.content) return;
       const matches = [...ch.content.matchAll(/<img\s[^>]*src="([^"]+)"[^>]*alt="([^"]*)"[^>]*/g)];
       matches.forEach((m, imgIdx) => {
-        if (m[1].startsWith("GDRIVE_IMAGE:")) return; // Skip placeholder markers
+        let imgUrl = m[1];
+        if (imgUrl.startsWith("GDRIVE_IMAGE:")) return; // Skip placeholder markers
+        if (imgUrl.startsWith("NFIMG:")) {
+          imgUrl = _nfImageMap.current.get(imgUrl.slice(6)) || imgUrl; // Restore from map
+          if (imgUrl.startsWith("NFIMG:")) return; // Still unresolved, skip
+        }
         chapterImages.push({
           id: `ch-${ch.id}-${imgIdx}`,
-          imageUrl: m[1],
+          imageUrl: imgUrl,
           alt: m[2] || "",
           chapterIdx: chIdx,
           chapterTitle: ch.title || `Chapter ${chIdx + 1}`,

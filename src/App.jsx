@@ -5143,12 +5143,34 @@ export default function NovelForge() {
         if (s?.theme) setTheme(s.theme);
         if (tc) setTabChatHistories(tc);
       // Load cached image hash map so we don't re-upload same images
+      // Load cached Drive image hash map for dedup on next sync
       try {
         const cachedHash = await _idb.get("novelforge:imageHash");
         if (cachedHash) GDriveImages._hashToDriveId = cachedHash;
         const cachedPathMap = await _idb.get("novelforge:pathToDriveId");
         if (cachedPathMap) GDriveImages._pathToDriveId = cachedPathMap;
       } catch {}
+
+      // Populate _nfImageMap from loaded projects for session-based Drive sync
+      try {
+        let imgCounter = 0;
+        for (const proj of (projects || [])) {
+          for (const ch of (proj.chapters || [])) {
+            if (ch.content) {
+              ch.content = ch.content.replace(
+                /(<img\s[^>]*\bsrc=")data:image\/([^"]+)("[^>]*\/?>)/g,
+                (match, before, after) => {
+                  const srcMatch = match.match(/\bsrc="(data:image\/[^"]+)"/);
+                  if (!srcMatch) return match;
+                  const id = `nfimg${Date.now().toString(36)}${(imgCounter++).toString(36)}`;
+                  _nfImageMap.current.set(id, srcMatch[1]);
+                  return `${before}NFIMG:${id}${after}`;
+                }
+              );
+            }
+          }
+        }
+      } catch (e) { console.warn("[NovelForge] Image map population failed:", e); }
     } catch(e) { console.error("Load:", e); }
     setIsLoaded(true);
     })();
@@ -5217,11 +5239,9 @@ export default function NovelForge() {
       // Sync editor to state first
       const el = editorRef.current;
       if (el && activeProjectId) {
-        // Safety net: clear drag flag so editor isn't left in broken state
         if (el._nfDragging) {
           el._nfDragging = false;
         }
-
         const html = el.innerHTML;
         if (html && html !== "<br>") {
           const currentProjects = [...projectsRef.current];
@@ -5233,12 +5253,10 @@ export default function NovelForge() {
         }
       }
       // Cancel debounced saves and force synchronous save
-      // Cancel debounced saves and force synchronous save (restore images for persistence)
       debouncedSaveProjects.cancel();
       debouncedSaveSettings.cancel();
       debouncedSaveTabChats.cancel();
-      const projectsForSave = _nfDeepCopyWithRestoredImages(projectsRef.current, _nfImageMap.current);
-      Storage.saveProjects(projectsForSave);
+      Storage.saveProjects(projectsRef.current);
       Storage.saveSettings({ ...settingsRef.current, theme: themeRef.current });
       if (Object.keys(tabChatHistoriesRef.current).length) {
         Storage.saveTabChats(tabChatHistoriesRef.current);
@@ -5412,9 +5430,7 @@ export default function NovelForge() {
   const debouncedSyncEditor = useMemo(() => debounce(() => {
     const el = editorRef.current;
     if (!el) return;
-    let html = el.innerHTML;
-    // Strip base64 images → tiny IDs (the performance fix)
-    html = _nfStripBase64FromContent(html, _nfImageMap.current);
+    const html = el.innerHTML;
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
   }, 300), [activeChapterIdx, updateChapter]);
@@ -5536,13 +5552,7 @@ export default function NovelForge() {
     debouncedSyncEditor.cancel();
     const el = editorRef.current;
     if (!el) return;
-    let html = el.innerHTML;
-    // Strip base64 images → tiny IDs (the performance fix)
-    html = _nfStripBase64FromContent(html, _nfImageMap.current);
-    // Restore NFIMG placeholders back to base64 so chapter state always has real images
-    if (html.includes('NFIMG:')) {
-      html = _nfRestoreImagesInContent(html, _nfImageMap.current);
-    }
+    const html = el.innerHTML;
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
     const beatId = detectCursorBeat(el);
@@ -5576,15 +5586,24 @@ export default function NovelForge() {
     if (needsRepopulate) {
       lastSyncedChapterRef.current = key;
       lastSyncedContentRef.current = content;
-      const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code|figure)\b/i.test(content);
+
+      // FIX: Clean up legacy NFIMG: placeholders from old image-map system
+      // These can't be resolved since the map is empty after reload
+      let cleanContent = content;
+      if (content && content.includes('NFIMG:')) {
+        cleanContent = content
+          .replace(/<figure[^>]*>[^<]*<img[^>]*src="NFIMG:[^"]*"[^>]*>[^<]*<\/figure>/gi, '')
+          .replace(/<img[^>]*src="NFIMG:[^"]*"[^>]*\/?>/gi, '');
+      }
+
+      const looksLikeHtml = /<\/?(?:p|div|br|h[1-6]|ul|ol|li|strong|em|span|hr|blockquote|pre|code|figure)\b/i.test(cleanContent);
       if (looksLikeHtml) {
-        el.innerHTML = content;
+        el.innerHTML = cleanContent;
       } else {
-        el.innerHTML = content ? content.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
+        el.innerHTML = cleanContent ? cleanContent.split("\n\n").map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("") : "";
       }
       _initEditorImageDelegation(el, imageDragRef);
       setTimeout(() => {
-        _nfRestoreImagesInElement(el, _nfImageMap.current);
         el.querySelectorAll('figure.nf-img-wrapper').forEach(fig => _attachImageEvents(fig, el));
         el.querySelectorAll('.nf-beat-marker').forEach(m => _attachBeatDragEvents(m, el));
         _initEditorImageDelegation(el, imageDragRef);
@@ -6732,33 +6751,31 @@ If no relationship changes, respond "No relationship updates needed."` },
       setSettings(prev => ({ ...prev, googleClientId: gdriveClientId }));
       showToast("Connected to Google Drive", "success");
 
-      // ── NEW: Auto-load existing backup if one exists ──
+      // Auto-load existing backup if one exists
       try {
         const data = await GDrive.loadFromDrive();
         if (data && data.projects?.length > 0) {
-          // Check if Drive backup is newer or has more data than local
-          const localProjectCount = projects.length;
+          const localProjectCount = (projects || []).length; // ← FIX: was (aligned || [])
           const driveProjectCount = data.projects.length;
           const driveSavedAt = data._savedAt ? new Date(data._savedAt) : null;
 
-          // Auto-load if:
-          // 1. Local has no projects, OR
-          // 2. Drive has more projects than local, OR
-          // 3. Drive has a recent save timestamp
           const shouldAutoLoad = localProjectCount === 0
             || driveProjectCount > localProjectCount
-            || (driveSavedAt && driveSavedAt > new Date(Date.now() - 86400000)); // within 24h
+            || (driveSavedAt && driveSavedAt > new Date(Date.now() - 86400000));
 
           if (shouldAutoLoad) {
             showToast("Loading backup from Google Drive...", "info");
 
             // Download associated images
-            if (data._imageMap) {
-              GDriveImages._hashToDriveId = data._imageMap;
-              await GDriveImages.syncDownload(data._imageMap);
-              await _idb.set("novelforge:imageHash", GDriveImages._hashToDriveId);
-			  await _idb.set("novelforge:pathToBase64", GDriveImages._pathToBase64);
+            // Download associated images
+            GDriveImages._hashToDriveId = data._hashToDriveId || data._imageMap || {};
+            GDriveImages._pathToDriveId = data._pathToDriveId || {};
+            const pathMap = GDriveImages._pathToDriveId;
+            if (Object.keys(pathMap).length > 0) {
+              await GDriveImages.syncDownload(pathMap);
             }
+            await _idb.set("novelforge:imageHash", GDriveImages._hashToDriveId);
+            await _idb.set("novelforge:pathToDriveId", GDriveImages._pathToDriveId);
 
             // Resolve image references back to base64
             const restoredProjects = (data.projects || []).map(p =>
@@ -6779,17 +6796,12 @@ If no relationship changes, respond "No relationship updates needed."` },
             showToast(`Drive backup found (${driveProjectCount} projects) — use "Load from Drive" to restore`, "info");
           }
         }
-      } catch (loadErr) {
-        // Non-fatal — connection succeeded, auto-load failed
-        console.warn("[NovelForge] Auto-load failed:", loadErr.message);
-        showToast("Connected — couldn't check for backup (use 'Load from Drive' manually)", "info");
-      }
-    } catch (e) {
-      showToast(`Drive connect failed: ${e.message}`, "error");
-    }
+      } catch (loadErr) { /* ... */ }
+    } catch (e) { showToast(`Drive connect failed: ${e.message}`, "error"); }
   }, [gdriveClientId, showToast, projects.length, setProjects, setActiveProjectId, setSettings, setTabChatHistories, setGdriveConnected, setGdriveLastSync]);
 
   const handleFlushAll = useCallback(async () => {
+    // 1. Save unsaved editor content to state before flushing
     // 1. Save unsaved editor content to state before flushing
     const el = editorRef.current;
     if (el && activeProjectId) {
@@ -6866,6 +6878,7 @@ If no relationship changes, respond "No relationship updates needed."` },
   const handleGdriveDisconnect = useCallback(() => {
     GDrive.disconnect();
     GDriveImages.clear();
+	GDriveImages._pathToDriveId = {};
     setGdriveConnected(false);
     setGdriveLastSync(null);
     if (gdriveSyncTimerRef.current) clearInterval(gdriveSyncTimerRef.current);
@@ -7189,10 +7202,11 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         }
       }
 
-      const projectsForDrive = _nfDeepCopyWithRestoredImages(projects, _nfImageMap.current);
+      // FIX: Always restore images before creating the Drive copy
+      const localProjects = JSON.parse(JSON.stringify(projects));
+      const projectsForDrive = GDriveImages.resolveImages(JSON.parse(JSON.stringify(projects)));
       GDriveImages.markImages(projectsForDrive);
 
-      // ── Save BOTH mappings so load can download images ──
       const drivePayload = {
         projects: projectsForDrive,
         settings,
@@ -7204,7 +7218,6 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
       await GDrive.saveToDrive(drivePayload);
 
-      // Persist both maps to IndexedDB for cross-session dedup
       await _idb.set("novelforge:imageHash", GDriveImages._hashToDriveId);
       await _idb.set("novelforge:pathToDriveId", GDriveImages._pathToDriveId);
 
@@ -7263,35 +7276,51 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
             }
 
             // Resolve GDRIVE_IMAGE markers → base64
-            const restoredProjects = (data.projects || []).map(p =>
+            // Resolve GDRIVE_IMAGE markers → base64
+            const driveProjects = (data.projects || []).map(p =>
               GDriveImages.resolveImages(JSON.parse(JSON.stringify(p)))
             );
 
-            // Count how many images were actually resolved
+            // FIX: Smart content merge — use Drive content if local is empty or has placeholders
+            // This handles fresh device installs and old image-map migrations
+            const localProjects = [...projects];
+            const finalProjects = driveProjects.map(dProj => {
+              const lProj = localProjects.find(p => p.id === dProj.id);
+              if (!lProj) return dProj;
+              const chapters = (dProj.chapters || []).map((dCh, i) => {
+                const lCh = (lProj.chapters || [])[i];
+                if (!lCh) return dCh;
+                const lPlain = _htmlToPlain(lCh.content || '');
+                const dPlain = _htmlToPlain(dCh.content || '');
+                // Use Drive version if local is empty, has legacy placeholders, or Drive has more content
+                if (!lPlain || lPlain.length < 20 || (lCh.content || '').includes('NFIMG:') || dPlain.length > lPlain.length * 1.5) return dCh;
+                return lCh;
+              });
+              return { ...lProj, chapters, characters: dProj.characters || lProj.characters, relationships: dProj.relationships || lProj.relationships, worldBuilding: dProj.worldBuilding || lProj.worldBuilding, plotOutline: dProj.plotOutline || lProj.plotOutline, drafts: dProj.drafts || lProj.drafts, images: dProj.images || lProj.images, continuityNotes: dProj.continuityNotes || lProj.continuityNotes };
+            });
+
+            // Count resolved images
             let resolvedCount = 0;
-            for (const proj of restoredProjects) {
+            for (const proj of finalProjects) {
               for (const ch of (proj.chapters || [])) {
-                if (ch.content) {
-                  const markers = (ch.content.match(/GDRIVE_IMAGE:/g) || []).length;
-                  resolvedCount += (ch.content.match(/src="data:image/g) || []).length;
-                }
+                if (ch.content) resolvedCount += (ch.content.match(/src="data:image/g) || []).length;
               }
               for (const c of (proj.characters || [])) {
                 if (c.image?.startsWith("data:")) resolvedCount++;
               }
             }
 
-            setProjects(restoredProjects);
-            setActiveProjectId(restoredProjects[0]?.id || null);
+            setProjects(finalProjects);
+            setActiveProjectId(finalProjects[0]?.id || null);
             if (data.settings) setSettings(prev => ({ ...prev, ...data.settings }));
             if (data.tabChats) setTabChatHistories(data.tabChats);
 
-            await Storage.saveProjects(restoredProjects);
+            await Storage.saveProjects(finalProjects);
             await _idb.set("novelforge:imageHash", GDriveImages._hashToDriveId);
             await _idb.set("novelforge:pathToDriveId", GDriveImages._pathToDriveId);
 
             setGdriveLastSync(new Date());
-            showToast(`Loaded ${restoredProjects.length} projects (${resolvedCount} images restored)`, "success");
+            showToast(`Loaded ${finalProjects.length} projects (${resolvedCount} images restored)`, "success");
           } catch (e) { showToast(`Load failed: ${e.message}`, "error"); }
         },
         onCancel: () => setConfirmDialog(null),
@@ -7310,9 +7339,11 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           for (const proj of projects) allImages.push(...(await GDriveImages.collectAllImages(proj)));
           if (allImages.length > 0) await GDriveImages.syncUpload(allImages);
 
-          const projectsForDrive = projects.map(p => GDriveImages.markImages(JSON.parse(JSON.stringify(p))));
+          // FIX: Restore images locally, strip for Drive
+          const localProjects = JSON.parse(JSON.stringify(projects));
+          const projectsForDrive = GDriveImages.resolveImages(JSON.parse(JSON.stringify(projects)));
+          GDriveImages.markImages(projectsForDrive);
 
-          // ✅ Use the SAME keys as the manual sync handler
           await GDrive.saveToDrive({
             projects: projectsForDrive,
             settings,

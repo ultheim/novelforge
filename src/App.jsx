@@ -4981,6 +4981,7 @@ export default function NovelForge() {
   const pendingSelectionRef = useRef("");
   const pendingGenerateRef = useRef(false);
   const _nfImageMap = useRef(new Map()); // ← ADD THIS LINE
+  const restoreImagesForTimeline = useCallback((html) => html && html.includes('NFIMG:') ? _nfRestoreImagesInContent(html, _nfImageMap.current) : html, []);
   const imageDragRef = useRef(null); // ← ADD THIS LINE
   const _lastChapterPerProject = useRef({});
   const [undoState, undoDispatch] = useReducer(undoReducer, { past: [], future: [] });
@@ -11422,7 +11423,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         {diffReview && <DiffReviewModal original={diffReview.original} proposed={diffReview.proposed} onAccept={diffReview.onAccept} onReject={diffReview.onReject} onInsertAtCursor={diffReview.onInsertAtCursor} />}
         {charSuggestions && <CharacterSuggestionsModal suggestions={charSuggestions} onAccept={handleAcceptSuggestion} onReject={handleRejectSuggestion} onAcceptAll={handleAcceptAllSuggestions} onRejectAll={handleRejectAllSuggestions} onAcceptRel={handleAcceptRelSuggestion} onRejectRel={handleRejectRelSuggestion} onClose={() => setCharSuggestions(null)} />}
         {whiteRoom && <WhiteRoomModal char1={whiteRoom.char1Id} char2={whiteRoom.char2Id} tension={whiteRoom.tension} result={whiteRoom.result} isGenerating={whiteRoom.isGenerating} onGenerate={handleWhiteRoomGenerate} onClose={() => setWhiteRoom(null)} settings={settings} characters={project?.characters} />}
-        {showTimeline && <TimelineView plotOutline={project?.plotOutline} chapters={project?.chapters} characters={project?.characters} onClose={() => setShowTimeline(false)} restoreImages={useCallback((html) => html && html.includes('NFIMG:') ? _nfRestoreImagesInContent(html, _nfImageMap.current) : html, [])} />}
+        {showTimeline && <TimelineView plotOutline={project?.plotOutline} chapters={project?.chapters} characters={project?.characters} onClose={() => setShowTimeline(false)} restoreImages={restoreImagesForTimeline} />}
         {cleanView && <CleanViewModal project={project} startChapter={activeChapterIdx} onClose={() => setCleanView(false)} />}
         {showRelWeb && (
           <RelationshipWebModal

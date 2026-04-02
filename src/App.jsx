@@ -11321,7 +11321,6 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-editor-contenteditable .nf-img-actions button:hover {
             background: rgba(0,0,0,0.85);
           }
-          }
 		  /* ── Beat markers in editor ── */
           .nf-beat-marker {
             display: block !important;
@@ -11357,7 +11356,6 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-beat-marker.dragging::before {
             cursor: grabbing;
           }
-          /* Description tooltip: hidden by default, shown on hover via JS */
           .nf-beat-marker::after {
             content: none !important;
           }
@@ -11369,7 +11367,6 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             color: #fff;
             background: var(--nf-accent);
           }
-          /* Hover highlight */
           .nf-beat-marker:hover {
             border-top-color: var(--nf-accent-2) !important;
           }
@@ -11377,11 +11374,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             background: var(--nf-accent-2);
             color: #fff;
           }
-		  .nf-beat-marker.dragging {
-		    opacity: 0.3 !important;
-		    border-top-color: var(--nf-accent) !important;
-		    border-top-style: dashed !important;
-		  }
+          .nf-beat-marker.dragging {
+            opacity: 0.3 !important;
+            border-top-color: var(--nf-accent) !important;
+            border-top-style: dashed !important;
+          }
         `}</style>
         
 

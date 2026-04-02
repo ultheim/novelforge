@@ -5133,6 +5133,27 @@ export default function NovelForge() {
           const aligned = fixPlotAlignment(migrated); 
 		  setProjects(aligned);
           setActiveProjectId(aligned[0].id);
+		 
+          // Populate _nfImageMap from loaded projects for session-based Drive sync
+          try {
+            let imgCounter = 0;
+            for (const proj of aligned) {
+              for (const ch of (proj.chapters || [])) {
+                if (ch.content) {
+                  ch.content = ch.content.replace(
+                    /(<img\s[^>]*\bsrc=")data:image\/([^"]+)("[^>]*\/?>)/g,
+                    (match, before, after) => {
+                      const srcMatch = match.match(/\bsrc="(data:image\/[^"]+)"/);
+                      if (!srcMatch) return match;
+                      const id = `nfimg${Date.now().toString(36)}${(imgCounter++).toString(36)}`;
+                      _nfImageMap.current.set(id, srcMatch[1]);
+                      return `${before}NFIMG:${id}${after}`;
+                    }
+                  );
+                }
+              }
+            }
+          } catch (e) { console.warn("[NovelForge] Image map population failed:", e); }
         }
         if (s && typeof s === "object") {
           const knownKeys = ["apiKey", "model", "maxTokens", "temperature", "systemPrompt", "frequencyPenalty", "presencePenalty", "modelContextWindow"];
@@ -5151,26 +5172,7 @@ export default function NovelForge() {
         if (cachedPathMap) GDriveImages._pathToDriveId = cachedPathMap;
       } catch {}
 
-      // Populate _nfImageMap from loaded projects for session-based Drive sync
-      try {
-        let imgCounter = 0;
-        for (const proj of (projects || [])) {
-          for (const ch of (proj.chapters || [])) {
-            if (ch.content) {
-              ch.content = ch.content.replace(
-                /(<img\s[^>]*\bsrc=")data:image\/([^"]+)("[^>]*\/?>)/g,
-                (match, before, after) => {
-                  const srcMatch = match.match(/\bsrc="(data:image\/[^"]+)"/);
-                  if (!srcMatch) return match;
-                  const id = `nfimg${Date.now().toString(36)}${(imgCounter++).toString(36)}`;
-                  _nfImageMap.current.set(id, srcMatch[1]);
-                  return `${before}NFIMG:${id}${after}`;
-                }
-              );
-            }
-          }
-        }
-      } catch (e) { console.warn("[NovelForge] Image map population failed:", e); }
+      
     } catch(e) { console.error("Load:", e); }
     setIsLoaded(true);
     })();

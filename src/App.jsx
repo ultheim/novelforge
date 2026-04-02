@@ -290,7 +290,7 @@ const GDriveImages = {
   
   async syncUpload(allImages, onProgress) {
     const folderId = await this.findOrCreateImageFolder();
-    let uploaded = 0, skipped = 0;
+    let uploaded = 0, skipped = 0, repaired = 0;
 
     // ── Phase 1: Pre-compute hashes on ORIGINAL data (deterministic) and compress ──
     const prepared = [];
@@ -2809,8 +2809,12 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
                           </div>
                         </div>
 						{(() => {
-						  const html = (chapters || [])[chIdx]?.content || "";
+						  let html = (chapters || [])[chIdx]?.content || "";
 						  if (!html) return null;
+						  // Restore NFIMG placeholders to real base64 before extracting image URLs
+						  if (html.includes('NFIMG:')) {
+						  	html = _nfRestoreImagesInContent(html, _nfImageMap.current);
+						  }
 						  const imgs = [...html.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]);
 						  if (!imgs.length) return null;
 						  return (
@@ -5424,7 +5428,11 @@ export default function NovelForge() {
       lastContentChapterRef.current = activeChapterIdx;
     }
     debouncedSyncEditor.cancel();
-    const liveContent = editorRef.current ? editorRef.current.innerHTML : activeChapter?.content;
+    let liveContent = editorRef.current ? editorRef.current.innerHTML : activeChapter?.content;
+    // Restore images in undo snapshot so undo gives back real images, not placeholders
+    if (liveContent && liveContent.includes('NFIMG:')) {
+      liveContent = _nfRestoreImagesInContent(liveContent, _nfImageMap.current);
+    }
     // Compare BEFORE updating lastContentRef so we catch all changes
     if (liveContent != null && liveContent !== lastContentRef.current) {
       undoDispatch({ type: "push", snapshot: { chapterIdx: activeChapterIdx, content: liveContent } });
@@ -5533,6 +5541,10 @@ export default function NovelForge() {
     let html = el.innerHTML;
     // Strip base64 images → tiny IDs (the performance fix)
     html = _nfStripBase64FromContent(html, _nfImageMap.current);
+    // Restore NFIMG placeholders back to base64 so chapter state always has real images
+    if (html.includes('NFIMG:')) {
+      html = _nfRestoreImagesInContent(html, _nfImageMap.current);
+    }
     lastSyncedContentRef.current = html;
     updateChapter(activeChapterIdx, { content: html });
     const beatId = detectCursorBeat(el);

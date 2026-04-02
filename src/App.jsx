@@ -2627,7 +2627,7 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
 });
 
 // ─── PLOT TIMELINE VISUALIZATION ───
-const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
+const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restoreImages }) => {
   const [lightbox, setLightbox] = useState(null); // { images: [], index: 0 }
 
   // Lightbox keyboard navigation
@@ -2811,10 +2811,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose }) => {
 						{(() => {
 						  let html = (chapters || [])[chIdx]?.content || "";
 						  if (!html) return null;
-						  // Restore NFIMG placeholders to real base64 before extracting image URLs
-						  if (html.includes('NFIMG:')) {
-						  	html = _nfRestoreImagesInContent(html, _nfImageMap.current);
-						  }
+						  if (restoreImages) html = restoreImages(html);
 						  const imgs = [...html.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]);
 						  if (!imgs.length) return null;
 						  return (
@@ -11425,7 +11422,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         {diffReview && <DiffReviewModal original={diffReview.original} proposed={diffReview.proposed} onAccept={diffReview.onAccept} onReject={diffReview.onReject} onInsertAtCursor={diffReview.onInsertAtCursor} />}
         {charSuggestions && <CharacterSuggestionsModal suggestions={charSuggestions} onAccept={handleAcceptSuggestion} onReject={handleRejectSuggestion} onAcceptAll={handleAcceptAllSuggestions} onRejectAll={handleRejectAllSuggestions} onAcceptRel={handleAcceptRelSuggestion} onRejectRel={handleRejectRelSuggestion} onClose={() => setCharSuggestions(null)} />}
         {whiteRoom && <WhiteRoomModal char1={whiteRoom.char1Id} char2={whiteRoom.char2Id} tension={whiteRoom.tension} result={whiteRoom.result} isGenerating={whiteRoom.isGenerating} onGenerate={handleWhiteRoomGenerate} onClose={() => setWhiteRoom(null)} settings={settings} characters={project?.characters} />}
-        {showTimeline && <TimelineView plotOutline={project?.plotOutline} chapters={project?.chapters} characters={project?.characters} onClose={() => setShowTimeline(false)} />}
+        {showTimeline && <TimelineView plotOutline={project?.plotOutline} chapters={project?.chapters} characters={project?.characters} onClose={() => setShowTimeline(false)} restoreImages={useCallback((html) => html && html.includes('NFIMG:') ? _nfRestoreImagesInContent(html, _nfImageMap.current) : html, [])} />}
         {cleanView && <CleanViewModal project={project} startChapter={activeChapterIdx} onClose={() => setCleanView(false)} />}
         {showRelWeb && (
           <RelationshipWebModal

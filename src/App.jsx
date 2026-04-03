@@ -3366,10 +3366,124 @@ const _sceneCaption = (text, chapterIdx, chapterTitle) => {
 const _attachImageEvents = (fig, editorEl) => {
   if (!fig || fig._nfEventsAttached) return;
   fig._nfEventsAttached = true;
-
-  // Prevent native drag
   fig.setAttribute('draggable', 'false');
   fig.ondragstart = (e) => e.preventDefault();
+
+  // Prevent native drag on all images inside
+  fig.querySelectorAll('img').forEach(img => {
+    img.draggable = false;
+    img.setAttribute('draggable', 'false');
+    img.ondragstart = (e) => e.preventDefault();
+  });
+
+  const handle = fig.querySelector('.nf-img-handle');
+
+  // ── DRAG START (on handle click) ──
+  const startDrag = (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+
+    const figWidth = fig.offsetWidth;
+
+    // Ghost element
+    const clone = fig.cloneNode(true);
+    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${figWidth}px;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
+    document.body.appendChild(clone);
+
+    // Placeholder
+    const placeholder = document.createElement('div');
+    placeholder.className = 'nf-drag-placeholder';
+    placeholder.style.cssText = 'height:3px;background:var(--nf-accent);margin:4px 0;border-radius:2px;pointer-events:none;';
+
+    // Dim original
+    fig.style.opacity = '0.15';
+    fig.classList.add('dragging');
+
+    clone.style.left = (e.clientX - figWidth / 2) + 'px';
+    clone.style.top = (e.clientY - 30) + 'px';
+
+    const dragState = { fig, clone, placeholder, startX: e.clientX, startY: e.clientY, moved: false };
+
+    const onMove = (ev) => {
+      ev.preventDefault();
+      dragState.moved = true;
+      clone.style.left = (ev.clientX - figWidth / 2) + 'px';
+      clone.style.top = (ev.clientY - 30) + 'px';
+
+      // Position placeholder
+      const editorRect = editorEl.getBoundingClientRect();
+      if (ev.clientY < editorRect.top || ev.clientY > editorRect.bottom) return;
+      if (placeholder.parentNode) placeholder.remove();
+
+      let bestChild = null;
+      let insertBefore = true;
+      for (const child of editorEl.children) {
+        if (child === fig || child === placeholder) continue;
+        const rect = child.getBoundingClientRect();
+        if (rect.height === 0) continue;
+        if (ev.clientY < rect.top + rect.height / 2) {
+          bestChild = child;
+          insertBefore = true;
+          break;
+        }
+        bestChild = child;
+        insertBefore = false;
+      }
+      if (bestChild && bestChild.parentNode === editorEl) {
+        if (insertBefore) editorEl.insertBefore(placeholder, bestChild);
+        else editorEl.insertBefore(placeholder, bestChild.nextSibling);
+      } else {
+        editorEl.appendChild(placeholder);
+      }
+    };
+
+    const onUp = () => {
+      // Determine if position changed
+      let didMove = false;
+      if (placeholder.parentNode && fig.parentNode) {
+        for (const child of editorEl.children) {
+          if (child === placeholder) { didMove = true; break; }
+          if (child === fig) break;
+        }
+      }
+      // Cleanup
+      if (clone.parentNode) clone.remove();
+      if (didMove) editorEl.insertBefore(fig, placeholder);
+      if (placeholder.parentNode) placeholder.remove();
+      fig.style.opacity = '';
+      fig.classList.remove('dragging');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('keydown', onKey);
+      editorEl._nfDragging = false;
+      if (didMove) editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') {
+        if (clone.parentNode) clone.remove();
+        if (placeholder.parentNode) placeholder.remove();
+        fig.style.opacity = '';
+        fig.classList.remove('dragging');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('keydown', onKey);
+        editorEl._nfDragging = false;
+      }
+    };
+
+    editorEl._nfDragging = true;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    document.addEventListener('keydown', onKey);
+  };
+
+  // Bind to handle
+  if (handle) handle.addEventListener('mousedown', startDrag);
+
+  // Also allow dragging by clicking the image body
+  const imgEl = fig.querySelector('img');
+  if (imgEl) imgEl.addEventListener('mousedown', startDrag);
 
   // Delete button
   const delBtn = fig.querySelector('.nf-img-del');
@@ -3381,17 +3495,13 @@ const _attachImageEvents = (fig, editorEl) => {
     };
   }
 };
-
 // Editor-level event delegation for image drag — handles ALL images without per-element listeners
 // Replace the _initEditorImageDelegation function with this fixed version:
 
 const _initEditorImageDelegation = (editorEl, dragRef) => {
-  if (!editorEl) return;
+  if (!editorEl || editorEl._nfDragging) return;
 
-  // ═══ Don't re-setup delegation while a drag is in progress — it kills the drag ═══
-  if (editorEl._nfDragging) return;
-
-  // Remove previous listeners to prevent duplicates on re-runs
+  // Clean up previous listeners
   if (editorEl._nfCleanupDragPrevention) {
     editorEl._nfCleanupDragPrevention();
     delete editorEl._nfCleanupDragPrevention;
@@ -3401,197 +3511,43 @@ const _initEditorImageDelegation = (editorEl, dragRef) => {
     delete editorEl._nfCleanupActiveDrag;
   }
 
-  // drag state is now stored in imageDragRef (component-level ref) so it persists across re-calls
-
-  // ── Suppress native browser drag on images ──
+  // Suppress native browser drag and selection on images
   const onDragStart = (e) => {
-    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img') || e.target.tagName === 'IMG') {
-      e.preventDefault();
-      e.stopPropagation();
-      return false;
+    if (e.target.closest('.nf-img-wrapper') || e.target.tagName === 'IMG') {
+      e.preventDefault(); e.stopPropagation(); return false;
     }
+  };
+  const onSelectStart = (e) => {
+    if (e.target.closest('.nf-img-wrapper')) e.preventDefault();
   };
   editorEl.addEventListener('dragstart', onDragStart);
-
-  const onSelectStart = (e) => {
-    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img')) {
-      e.preventDefault();
-    }
-  };
   editorEl.addEventListener('selectstart', onSelectStart);
-
   editorEl._nfCleanupDragPrevention = () => {
     editorEl.removeEventListener('dragstart', onDragStart);
     editorEl.removeEventListener('selectstart', onSelectStart);
   };
 
-  // ── Drag cleanup ──
-    const cleanupDrag = (applyMove) => {
-      const state = dragRef.current;
-      if (!state) return;
-      dragRef.current = null;
-
+  // Global drag cleanup
+  const cleanupDrag = (applyMove) => {
+    const state = dragRef.current;
+    if (!state) return;
+    dragRef.current = null;
     if (state.clone?.parentNode) state.clone.remove();
-
     if (applyMove && state.placeholder?.parentNode && state.fig?.parentNode) {
       editorEl.insertBefore(state.fig, state.placeholder);
     }
-
     if (state.placeholder?.parentNode) state.placeholder.remove();
-
-    if (state.fig) {
-      state.fig.style.opacity = '';
-      state.fig.classList.remove('dragging');
-    }
-
+    if (state.fig) { state.fig.style.opacity = ''; state.fig.classList.remove('dragging'); }
     document.removeEventListener('mousemove', state.onMove);
     document.removeEventListener('mouseup', state.onUp);
     document.removeEventListener('keydown', state.onKey);
   };
 
-  // Expose for React useEffect cleanup
   editorEl._nfCleanupActiveDrag = () => cleanupDrag(false);
 
-  // Cancel drag if content changes externally
-  const onEditorInput = () => {
-    if (dragRef.current) cleanupDrag(false);
-  };
+  // Cancel drag on external content changes
+  const onEditorInput = () => { if (dragRef.current) cleanupDrag(false); };
   editorEl.addEventListener('input', onEditorInput);
-
-  // ── Mousedown on image → start drag ──
-  const onEditorMouseDown = (e) => {
-    // Prevent interference if a drag is already in progress
-    if (dragRef.current) { e.preventDefault(); return; }
-    editorEl._nfDragging = true;
-
-    const handle = e.target.closest('.nf-img-handle');
-    const imgTarget = e.target.closest('figure.nf-img-wrapper > img, figure.nf-img-wrapper img');
-    const figEl = e.target.closest('figure.nf-img-wrapper');
-
-    if (!handle && !imgTarget) {
-      editorEl._nfDragging = false;
-      return;
-    }
-
-    figEl.draggable = false;
-    figEl.setAttribute('draggable', 'false');
-    figEl.querySelectorAll('img').forEach(img => {
-      img.draggable = false;
-      img.setAttribute('draggable', 'false');
-    });
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (dragRef.current) cleanupDrag(false);
-
-    editorEl._nfDragging = true;
-
-    const figWidth = figEl.offsetWidth;
-    const clone = figEl.cloneNode(true);
-    clone.style.cssText = `position:fixed;pointer-events:none;z-index:10000;opacity:0.7;width:${figWidth}px;box-shadow:0 8px 30px rgba(0,0,0,0.3);border-radius:4px;`;
-    document.body.appendChild(clone);
-
-    const placeholder = document.createElement('div');
-    placeholder.className = 'nf-drag-placeholder';
-    placeholder.style.cssText = 'height:3px;background:var(--nf-accent);margin:4px 0;border-radius:2px;pointer-events:none;';
-
-    figEl.style.opacity = '0.2';
-    figEl.classList.add('dragging');
-
-    clone.style.left = (e.clientX - figWidth / 2) + 'px';
-    clone.style.top = (e.clientY - 30) + 'px';
-
-    const onMove = (ev) => {
-      const state = dragRef.current;
-      if (!state) return;
-      ev.preventDefault();
-
-      const cloneWidth = state.clone.offsetWidth || figWidth;
-      state.clone.style.left = (ev.clientX - cloneWidth / 2) + 'px';
-      state.clone.style.top = (ev.clientY - 30) + 'px';
-
-      const editorRect = editorEl.getBoundingClientRect();
-      if (ev.clientY < editorRect.top || ev.clientY > editorRect.bottom) return;
-
-      if (state.placeholder.parentNode) state.placeholder.remove();
-
-      let bestChild = editorEl.firstElementChild;
-      let insertBefore = true;
-
-      for (const child of editorEl.children) {
-        if (child === state.fig || child === state.placeholder) continue;
-        const rect = child.getBoundingClientRect();
-        if (rect.height === 0) continue;
-        const midY = rect.top + rect.height / 2;
-        if (ev.clientY < midY) {
-          bestChild = child;
-          insertBefore = true;
-          break;
-        }
-        bestChild = child;
-        insertBefore = false;
-      }
-
-      if (bestChild && bestChild.parentNode === editorEl) {
-        if (insertBefore) {
-          editorEl.insertBefore(state.placeholder, bestChild);
-        } else {
-          editorEl.insertBefore(state.placeholder, bestChild.nextSibling);
-        }
-      } else {
-        editorEl.appendChild(state.placeholder);
-      }
-    };
-
-    const onUp = () => {
-      const state = dragRef.current;
-      if (!state) return;
-
-      // Walk DOM: if placeholder appears before fig, image was moved
-      let didMove = false;
-      if (state.placeholder?.parentNode && state.fig?.parentNode) {
-        for (const child of editorEl.children) {
-          if (child === state.placeholder) { didMove = true; break; }
-          if (child === state.fig) break;
-        }
-      }
-
-      cleanupDrag(didMove);
-      editorEl._nfDragging = false;
-
-      if (didMove) {
-        editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    };
-
-    const onKey = (ev) => {
-      if (ev.key === 'Escape') {
-        cleanupDrag(false);
-        editorEl._nfDragging = false;
-      }
-    };
-
-    dragRef.current = { fig: figEl, clone, placeholder, figWidth, onMove, onUp, onKey };
-
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('keydown', onKey);
-  };
-  editorEl.addEventListener('mousedown', onEditorMouseDown);
-
-  // ── Click → delete button ──
-  const onEditorClick = (e) => {
-    const delBtn = e.target.closest('.nf-img-del');
-    if (!delBtn) return;
-    const fig = delBtn.closest('figure.nf-img-wrapper');
-    if (!fig || !editorEl.contains(fig)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    fig.remove();
-    editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-  };
-  editorEl.addEventListener('click', onEditorClick);
 };
 
 const _attachBeatDragEvents = (markerEl, editorEl) => {
@@ -4843,161 +4799,136 @@ const RelWebMinimap = memo(({ characters, relationships, onClick }) => {
   );
 });
 
-// ─── GLYPH RAIL — Nothing Phone-inspired ambient indicators ───
-const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, detectedCharIds, relationships, sessionProgress }) => {
-  const CW = 22;
-  const CH = 125;
-  const CX = CW / 2;
-  const circumference = 2 * Math.PI * 7;
+// ─── GLYPH GRID — 16×16 LED matrix, Nothing Phone-inspired ───
+const GlyphGrid = memo(({ size = 16, cellSize = 3, gap = 1, glow = true, pattern, state = {}, className, style }) => {
+  const totalSize = size * cellSize + (size - 1) * gap;
 
-  // Character tension colors
-  const TC = { none: "#6b9e78", low: "#8b9e6b", medium: "#c4953a", high: "#c4653a", explosive: "#c43a3a" };
+  // Default pattern: cross + corners
+  const defaultPattern = (s, r, c) => {
+    const cx = Math.floor(s / 2);
+    if (c === cx && r === cx) return 1;
+    if (r === cx && Math.abs(c - cx) <= 2) return 1;
+    if (c === cx && Math.abs(r - cx) <= 2) return 1;
+    if (Math.abs(r - cx) === 2 && Math.abs(c - cx) === 2) return 0.5;
+    return 0;
+  };
 
-  // Character presence: resolve tension for each detected character relative to POV
-  const povChar = (characters || []).find(c => c.role === "protagonist");
-  const charBars = useMemo(() => {
-    if (!detectedCharIds?.size || !characters?.length) return [];
-    const maxBars = 6;
-    const detected = characters.filter(c => detectedCharIds.has(c.id)).slice(0, maxBars);
-    return detected.map(c => {
-      const rel = (relationships || []).find(r =>
-        povChar && c.id !== povChar.id &&
-        ((r.char1 === povChar.id && r.char2 === c.id) || (r.char2 === povChar.id && r.char1 === c.id))
-      );
-      return { id: c.id, color: rel?.tension ? (TC[rel.tension] || "#6b7394") : "#6b7394" };
-    });
-  }, [detectedCharIds, characters, relationships, povChar]);
+  // Build lit cells map: { "r,c": { color, opacity } }
+  const lit = useMemo(() => {
+    const cells = {};
+    const s = size;
+    const fn = pattern || defaultPattern;
 
-  const saveColor = saveStatus === "saving" ? "#c4953a" : saveStatus === "saved" ? "#6b9e78" : saveStatus === "error" ? "#c43a3a" : null;
+    if (typeof fn === "function") {
+      for (let r = 0; r < s; r++) {
+        for (let c = 0; c < s; c++) {
+          const val = fn(s, r, c, state);
+          if (val && val > 0) cells[`${r},${c}`] = typeof val === "object" ? val : { opacity: val };
+        }
+      }
+    }
+    return cells;
+  }, [pattern, size, state]);
 
   return (
-    <div style={{
-      width: CW, flexShrink: 0, display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      background: "var(--nf-bg-deep)", padding: "12px 0", gap: 0,
-    }}>
-      <style>{`
-        @keyframes nf-glyph-breathe {
-          0%, 100% { opacity: 0.15; r: 2.5; }
-          50% { opacity: 0.85; r: 3.5; }
-        }
-        @keyframes nf-glyph-pulse-fast {
-          0%, 100% { opacity: 0.25; }
-          50% { opacity: 1; }
-        }
-        @keyframes nf-glyph-char-glow {
-          0%, 100% { opacity: 0.55; }
-          50% { opacity: 1; }
-        }
-      `}</style>
-
-      {/* Hidden SVG with shared filter definitions */}
-      <svg width="0" height="0" style={{ position: "absolute" }}>
-        <defs>
-          <filter id="nf-glyph-glow" x="-200%" y="-200%" width="500%" height="500%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="blur" />
-            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-          </filter>
-          <filter id="nf-glyph-soft-glow" x="-150%" y="-150%" width="400%" height="400%">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur" />
-            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
-          </filter>
-        </defs>
-      </svg>
-
-      <svg width={CW} height={CH} viewBox={`0 0 ${CW} ${CH}`} style={{ overflow: "visible" }}>
-        {/* 1. Save status glyph — thin horizontal line, y=8 */}
-        {saveColor && (
-          <rect
-            x={3} y={7} width={16} height={1.5} rx={0.75}
-            fill={saveColor}
-            filter={saveStatus === "saving" ? "url(#nf-glyph-glow)" : undefined}
-            opacity={saveStatus === "saving" ? 0.55 : 0.75}
-            style={saveStatus === "saving" ? {
-              animation: "nf-glyph-pulse-fast 0.7s ease-in-out infinite",
-            } : { transition: "all 0.4s ease" }}
-          />
+    <div className={className} style={{ ...style, lineHeight: 0 }}>
+      <svg width={totalSize} height={totalSize} viewBox={`0 0 ${totalSize} ${totalSize}`}>
+        {glow && (
+          <defs>
+            <filter id={`gg-${size}`} x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="1.2" result="b" />
+              <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+          </defs>
         )}
-
-        {/* 2. AI generating glyph — breathing dot, y=22 */}
-        <circle
-          cx={CX} cy={22} r={isGenerating ? 3 : 1.5}
-          fill={isGenerating ? "#c4653a" : "var(--nf-border)"}
-          filter={isGenerating ? "url(#nf-glyph-glow)" : undefined}
-          style={isGenerating ? {
-            animation: "nf-glyph-breathe 2s ease-in-out infinite",
-            transition: "fill 0.3s ease",
-          } : {
-            transition: "all 0.5s ease",
-          }}
-        />
-
-        {/* 3. Character presence glyphs — vertical bars, y=32-52 */}
-        {charBars.map((bar, i) => {
-          const yPos = 34 + i * 6;
+        {Array.from({ length: size * size }, (_, i) => {
+          const r = Math.floor(i / size);
+          const c = i % size;
+          const key = `${r},${c}`;
+          const litCell = lit[key];
           return (
-            <g key={bar.id}>
-              <rect
-                x={5} y={yPos} width={12} height={2.5} rx={1.25}
-                fill={bar.color}
-                filter="url(#nf-glyph-soft-glow)"
-                opacity={0.75}
-                style={{ animation: "nf-glyph-char-glow 3s ease-in-out infinite", animationDelay: `${i * 0.4}s` }}
-              />
-            </g>
+            <rect
+              key={key}
+              x={c * (cellSize + gap)}
+              y={r * (cellSize + gap)}
+              width={cellSize}
+              height={cellSize}
+              rx={Math.min(cellSize * 0.25, 1)}
+              fill={litCell?.color || "var(--nf-border)"}
+              opacity={litCell ? (litCell.opacity ?? 0.8) : 0.04}
+              filter={glow && litCell ? `url(#gg-${size})` : undefined}
+              style={litCell ? { transition: "opacity 0.4s ease, fill 0.4s ease" } : { transition: "opacity 0.8s ease" }}
+            />
           );
         })}
-
-        {/* 4. Word progress glyph — arc ring, centered at y=75 */}
-        <circle
-          cx={CX} cy={75} r={7}
-          fill="none"
-          stroke="var(--nf-border)"
-          strokeWidth={0.8}
-          opacity={0.15}
-        />
-        <circle
-          cx={CX} cy={75} r={7}
-          fill="none"
-          stroke={wordProgress >= 100 ? "#6b9e78" : wordProgress > 70 ? "#c4953a" : "#6b7394"}
-          strokeWidth={1.5}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={circumference - (circumference * Math.min(wordProgress, 100) / 100)}
-          transform={`rotate(-90 ${CX} 75)`}
-          filter={wordProgress >= 100 ? "url(#nf-glyph-soft-glow)" : undefined}
-          style={{ transition: "stroke-dashoffset 1.2s ease-out, stroke 0.5s ease" }}
-        />
-        {/* Completion dot at arc end when 100% */}
-        {wordProgress >= 100 && (
-          <circle
-            cx={CX} cy={68} r={1.5}
-            fill="#6b9e78"
-            filter="url(#nf-glyph-soft-glow)"
-            opacity={0.9}
-            style={{ animation: "nf-glyph-char-glow 2s ease-in-out infinite" }}
-          />
-        )}
-
-        {/* 5. Session progress glyph — thin vertical bar, y=90-118 */}
-        <rect
-          x={CX - 0.5} y={94} width={1} height={24} rx={0.5}
-          fill="var(--nf-border)" opacity={0.1}
-        />
-        <rect
-          x={CX - 0.5}
-          y={94 + 24 - (24 * Math.min(sessionProgress, 100) / 100)}
-          width={1}
-          height={24 * Math.min(sessionProgress, 100) / 100}
-          rx={0.5}
-          fill="#6b7394"
-          opacity={0.5}
-          style={{ transition: "all 0.8s ease-out" }}
-        />
       </svg>
     </div>
   );
 });
+
+// ─── GLYPH PATTERN FUNCTIONS ───
+// Each returns a value 0-1 (opacity) or { color, opacity } for a lit cell, 0 for off
+// Args: (gridSize, row, col, state)
+
+// 8×8 sidebar logo — diamond pulse
+const glyphLogoPattern = (s, r, c, st) => {
+  const cx = Math.floor(s / 2), cy = Math.floor(s / 2);
+  const dist = Math.abs(r - cy) + Math.abs(c - cx);
+  if (dist <= 2) return { color: st.saveColor || "var(--nf-accent)", opacity: 0.3 + (0.5 * (2 - dist) / 2) };
+  if (dist === 3) return { color: "var(--nf-border)", opacity: 0.1 };
+  return 0;
+};
+
+// 16×16 editor ambient — zone-based
+const glyphEditorPattern = (s, r, c, st) => {
+  const cx = Math.floor(s / 2);
+  // SAVE status: top-left corner (3×3 block)
+  if (r <= 2 && c <= 2 && st.saveColor) {
+    return { color: st.saveColor, opacity: r === 0 && c === 0 ? 0.9 : r + c <= 2 ? 0.55 : 0.2 };
+  }
+  // AI generating: top-right corner (3×3 breathing block)
+  if (r <= 2 && c >= s - 3 && st.isGenerating) {
+    return { color: "var(--nf-accent)", opacity: 0.25 + Math.sin(Date.now() / 600) * 0.2 };
+  }
+  // WORD PROGRESS: horizontal band at row 5-6, fill left-to-right
+  if ((r === 5 || r === 6) && st.wordCells && c < st.wordCells) {
+    const pct = st.wordCells / s;
+    return { color: pct >= 1 ? "#6b9e78" : pct > 0.7 ? "#c4953a" : "#6b7394", opacity: 0.7 };
+  }
+  // BEAT position: small dot at row 4
+  if (r === 4 && st.beatPos != null && c === Math.min(Math.floor(st.beatPos * s), s - 1)) {
+    return { color: "var(--nf-accent-2)", opacity: 0.85 };
+  }
+  // CHARACTER PRESENCE: vertical strip at col 0, rows 8-15
+  if (c === 0 && r >= 8 && r < 8 + (st.charColors?.length || 0)) {
+    return { color: st.charColors[r - 8], opacity: 0.75 };
+  }
+  // SESSION PROGRESS: thin vertical bar at col s-1, rows 10-15
+  if (c === s - 1 && r >= 10 && r < 10 + Math.min(6, Math.ceil((st.sessionProgress || 0) / 100 * 6))) {
+    return { color: "#6b7394", opacity: 0.5 };
+  }
+  return 0;
+};
+
+// 16×16 AI panel — sidebar mirror
+const glyphAiPattern = (s, r, c, st) => {
+  // Generating: cross in center
+  if (st.isGenerating) {
+    const cx = Math.floor(s / 2);
+    if (r === cx && Math.abs(c - cx) <= 3) return { color: "var(--nf-accent)", opacity: 0.6 };
+    if (c === cx && Math.abs(r - cx) <= 3) return { color: "var(--nf-accent)", opacity: 0.6 };
+    if (Math.abs(r - cx) === 3 && Math.abs(c - cx) === 3) return { color: "var(--nf-accent)", opacity: 0.25 };
+  }
+  // Messages count: dots across bottom row
+  if (r === s - 1 && st.msgCount != null && c < Math.min(st.msgCount, s)) {
+    return { color: "var(--nf-accent-2)", opacity: 0.6 };
+  }
+  // Selected text: indicator at top
+  if (r === 0 && c === 0 && st.hasSelection) {
+    return { color: "var(--nf-accent-2)", opacity: 0.8 };
+  }
+  return 0;
+};
 
 // ─── BEAT TOOLTIP ───
 const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
@@ -5475,6 +5406,40 @@ export default function NovelForge() {
   }, [project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sessionWords = sessionWordsStart !== null ? Math.max(0, totalProjectWords - sessionWordsStart) : 0;
+
+  const editorGlyphState = useMemo(() => {
+    const plain = activeChapter?.content ? _htmlToPlain(activeChapter.content) : "";
+    const detectedIds = plain ? _detectMentionedCharacters(plain, project?.characters) : new Set();
+    const plotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
+    if (plotEntry?.characters) {
+      for (const cid of plotEntry.characters) {
+        if ((project?.characters || []).some(c => c.id === cid)) detectedIds.add(cid);
+      }
+    }
+    const povChar = (project?.characters || []).find(c => c.role === "protagonist");
+    const TC = { none: "#6b9e78", low: "#8b9e6b", medium: "#c4953a", high: "#c4653a", explosive: "#c43a3a" };
+    const charColors = (project?.characters || [])
+      .filter(c => detectedIds.has(c.id))
+      .slice(0, 8)
+      .map(c => {
+        const rel = (project?.relationships || []).find(r =>
+          povChar && c.id !== povChar.id &&
+          ((r.char1 === povChar.id && r.char2 === c.id) || (r.char2 === povChar.id && r.char1 === c.id))
+        );
+        return rel?.tension ? (TC[rel.tension] || "#6b7394") : "#6b7394";
+      });
+    const beats = Array.isArray(plotEntry?.beats) ? plotEntry.beats : [];
+    return {
+      saveColor: saveStatus === "saving" ? "#c4953a" : saveStatus === "saved" ? "#6b9e78" : saveStatus === "error" ? "#c43a3a" : null,
+      isGenerating,
+      wordCells: Math.min(16, Math.floor((wordCount(activeChapter?.content) / 250) + 1)),
+      beatPos: beats.length > 0 ? (activeBeatId ? beats.findIndex(b => b.id === activeBeatId) / Math.max(beats.length - 1, 1) : 0) : null,
+      charColors,
+      sessionProgress: project?.wordGoal > 0
+        ? (totalProjectWords / project.wordGoal) * 100
+        : Math.min(100, sessionWords * 2),
+    };
+  }, [saveStatus, isGenerating, activeChapter?.content, activeBeatId, project?.characters, project?.relationships, project?.wordGoal, totalProjectWords, sessionWords, activeChapterIdx, project?.plotOutline]);
 
   // H1/H2/H3: Improved memory context payload — mode-aware, includes overhead, detailed breakdown
   const memoryContextPayload = useMemo(() => {
@@ -8221,7 +8186,15 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     <div className={`nf-sidebar ${showProjectList ? "nf-sidebar-open" : "nf-sidebar-closed"}`}>
       <div className="nf-sidebar-header">
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
-          <div className="nf-logo-mark">✦</div>
+          <GlyphGrid
+            size={8}
+            cellSize={3}
+            gap={1}
+            pattern={glyphLogoPattern}
+            state={{ saveColor: saveStatus === "saving" ? "#c4953a" : saveStatus === "saved" ? "#6b9e78" : "var(--nf-accent)" }}
+            className="nf-logo-mark"
+            style={{ display: "flex", alignItems: "center", justifyContent: "center" }}
+          />
           <span className="nf-logo-text">NovelForge</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
             <button className="nf-btn-icon" onClick={toggleTheme} title={`${theme === "dark" ? "Light" : "Dark"} mode`}>
@@ -8278,8 +8251,19 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   const renderAiPanel = (asMobileOverlay = false) => (
     <div className={asMobileOverlay ? "nf-ai-mobile-overlay" : "nf-ai-panel"}>
       <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--nf-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ color: "var(--nf-accent-2)" }}><Icons.Wand /></span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <GlyphGrid
+            size={8}
+            cellSize={2}
+            gap={1}
+            pattern={glyphAiPattern}
+            state={{
+              isGenerating,
+              msgCount: chatMessages.length,
+              hasSelection: !!selectedText,
+            }}
+            style={{ opacity: 0.7 }}
+          />
           <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>AI</span>
           {chatMessages.length > 0 && <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>({chatMessages.length})</span>}
         </div>
@@ -9339,29 +9323,13 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         <RichTextToolbar editorRef={editorRef} onContentChange={syncEditorContent} />
         <div className="nf-editor-split">
           {!focusMode && (
-            <GlyphRail
-              saveStatus={saveStatus}
-              isGenerating={isGenerating}
-              wordProgress={activeChapterIdx === 0
-                ? (wordCount(activeChapter?.content) / 1000) * 10
-                : (totalProjectWords / (project?.wordGoal || Math.max(totalProjectWords, 1))) * 100}
-              characters={project?.characters}
-              detectedCharIds={(() => {
-                const plain = activeChapter?.content ? _htmlToPlain(activeChapter.content) : "";
-                if (!plain) return new Set();
-                const ids = _detectMentionedCharacters(plain, project?.characters);
-                const plotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
-                if (plotEntry?.characters) {
-                  for (const cid of plotEntry.characters) {
-                    if ((project?.characters || []).some(c => c.id === cid)) ids.add(cid);
-                  }
-                }
-                return ids;
-              })()}
-              relationships={project?.relationships}
-              sessionProgress={project?.wordGoal > 0
-                ? (totalProjectWords / project.wordGoal) * 100
-                : Math.min(100, sessionWords * 2)}
+            <GlyphGrid
+              size={16}
+              cellSize={3}
+              gap={1}
+              pattern={glyphEditorPattern}
+              state={editorGlyphState}
+              style={{ margin: "0 2px" }}
             />
           )}
           {!focusMode && (
@@ -11173,6 +11141,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           @keyframes nf-pop { 0% { transform: scale(0.95); opacity: 0; } 50% { transform: scale(1.02); } 100% { transform: scale(1); opacity: 1; } }
           @keyframes nf-stamp { 0% { transform: scale(1.3) rotate(-3deg); opacity: 0; } 60% { transform: scale(0.98) rotate(0.5deg); } 100% { transform: scale(1) rotate(0deg); opacity: 1; } }
           @keyframes nf-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+		  @keyframes nf-glyph-breathe { 0%, 100% { opacity: 0.15; } 50% { opacity: 0.85; } }
+          @keyframes nf-glyph-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+          @keyframes nf-glyph-glow { 0%, 100% { filter: brightness(0.8); } 50% { filter: brightness(1.3); } }
           .nf-clack { animation: nf-clack 0.3s ease-out; }
           .nf-shake { animation: nf-shake 0.3s ease-out; }
           .nf-cursor-blink { animation: nf-blink 0.8s step-end infinite; color: var(--nf-accent); margin-left: 1px; }
@@ -11195,7 +11166,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           .nf-sidebar-closed { width: 0; min-width: 0; border-right: none; }
           .nf-sidebar-header { padding: 18px 16px 14px; border-bottom: 1px solid var(--nf-border); }
           .nf-sidebar-list { flex: 1; overflow-y: auto; padding: 6px; }
-          .nf-logo-mark { width: 32px; height: 32px; border-radius: 2px; background: var(--nf-accent); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; font-weight: 500; letter-spacing: -0.02em; }
+          .nf-logo-mark { width: 32px; height: 32px; border-radius: 2px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); display: flex; align-items: center; justify-content: center; overflow: hidden; }
           .nf-logo-text { font-family: var(--nf-font-display); font-size: 24px; font-weight: 400; color: var(--nf-text); letter-spacing: 0.02em; }
           .nf-project-item { padding: 10px 12px; border-radius: 2px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; transition: all 0.15s; }
           .nf-project-item:hover { background: var(--nf-bg-hover); transform: translateX(3px); }

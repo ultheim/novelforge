@@ -3405,9 +3405,10 @@ const _initEditorImageDelegation = (editorEl, dragRef) => {
 
   // ── Suppress native browser drag on images ──
   const onDragStart = (e) => {
-    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img')) {
+    if (e.target.closest('.nf-img-wrapper') || e.target.closest('figure.nf-img-wrapper img') || e.target.tagName === 'IMG') {
       e.preventDefault();
       e.stopPropagation();
+      return false;
     }
   };
   editorEl.addEventListener('dragstart', onDragStart);
@@ -3459,7 +3460,8 @@ const _initEditorImageDelegation = (editorEl, dragRef) => {
 
   // ── Mousedown on image → start drag ──
   const onEditorMouseDown = (e) => {
-    // ═══ SET DRAG FLAG FIRST — before any React state changes trigger re-render ═══
+    // Prevent interference if a drag is already in progress
+    if (dragRef.current) { e.preventDefault(); return; }
     editorEl._nfDragging = true;
 
     const handle = e.target.closest('.nf-img-handle');
@@ -3631,7 +3633,10 @@ const _attachBeatDragEvents = (markerEl, editorEl) => {
       markerEl.classList.remove('dragging');
 
       // Find caret position at drop point
-      const range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      let range;
+      try {
+        range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      } catch (e) { range = null; }
       if (!range || !editorEl.contains(range.startContainer)) return;
 
       // Don't drop inside another marker
@@ -5246,23 +5251,16 @@ export default function NovelForge() {
 
   useEffect(() => {
     const handler = (e) => {
-      // Sync editor to state first
-      const el = editorRef.current;
-      if (el && activeProjectId) {
-        if (el._nfDragging) {
-          el._nfDragging = false;
-        }
-        const html = el.innerHTML;
-        if (html && html !== "<br>") {
-          const currentProjects = [...projectsRef.current];
-          const pIdx = currentProjects.findIndex(p => p.id === activeProjectId);
-          if (pIdx !== -1 && currentProjects[pIdx].chapters?.[activeChapterIdx]) {
-            currentProjects[pIdx].chapters[activeChapterIdx].content = html;
-            projectsRef.current = currentProjects;
+      try {
+        const el = editorRef.current;
+        if (el && activeProjectId && !el._nfDragging) {
+          const html = el.innerHTML;
+          if (html && html !== "<br>" && html !== lastSyncedContentRef.current) {
+            syncEditorContent(true);
           }
         }
-      }
-      // Cancel debounced saves and force synchronous save
+      } catch (err) { /* ignore */ }
+
       debouncedSaveProjects.cancel();
       debouncedSaveSettings.cancel();
       debouncedSaveTabChats.cancel();
@@ -5271,15 +5269,10 @@ export default function NovelForge() {
       if (Object.keys(tabChatHistoriesRef.current).length) {
         Storage.saveTabChats(tabChatHistoriesRef.current);
       }
-      // Show browser warning if editor has unsaved content
-      if (el && el.innerHTML && el.innerHTML !== "<br>" && el.innerHTML !== lastSyncedContentRef.current) {
-        e.preventDefault();
-        e.returnValue = "You have unsaved editor changes. They've been auto-saved to browser storage, but link a JSON file for safety.";
-      }
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [activeProjectId, activeChapterIdx, debouncedSaveProjects, debouncedSaveSettings, debouncedSaveTabChats]);
+  }, [activeProjectId, debouncedSaveProjects, debouncedSaveSettings, debouncedSaveTabChats, syncEditorContent]);
 
   // ─── SCROLL CHAT ───
   // B15: Use instant scroll during streaming to keep up with content, smooth for new messages
@@ -5427,13 +5420,14 @@ export default function NovelForge() {
       if (newIdx >= toIdx) newIdx++;
       setActiveChapterIdx(newIdx);
     }
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
   }, [project, activeChapterIdx, updateProject]);
 
   // ─── UNDO ───
   // B4: Track which chapter lastContentRef belongs to, reset on chapter switch
   const lastContentRef = useRef(null);
   const lastContentChapterRef = useRef(null);
+  const _nfEditorState = useRef(null);
   
     // ─── EDITOR CONTENT SYNC ───
   // B10: Debounce sync on input to avoid per-keystroke state updates
@@ -5475,7 +5469,7 @@ export default function NovelForge() {
     }
     undoDispatch({ type: "undo", current: { chapterIdx: activeChapterIdx, content: activeChapter?.content || "" } });
     updateChapter(snap.chapterIdx, { content: snap.content });
-    lastSyncedChapterRef.current = null; // B6: Force editor re-populate
+    forceRepopulateEditor(); // B6: Force editor re-populate
     lastContentRef.current = snap.content;
 	showToast("Undone", "success");
   }, [undoState.past, activeChapterIdx, activeChapter, updateChapter, showToast]);
@@ -5489,7 +5483,7 @@ export default function NovelForge() {
     }
     undoDispatch({ type: "redo", current: { chapterIdx: activeChapterIdx, content: activeChapter?.content || "" } });
     updateChapter(snap.chapterIdx, { content: snap.content });
-    lastSyncedChapterRef.current = null; // B6: Force editor re-populate
+    forceRepopulateEditor(); // B6: Force editor re-populate
     lastContentRef.current = snap.content;
 	showToast("Redone", "success");
   }, [undoState.future, activeChapterIdx, activeChapter, updateChapter, showToast]);
@@ -5558,16 +5552,31 @@ export default function NovelForge() {
 
 
   // Immediate sync for explicit actions (blur, before AI call, etc.)
-  const syncEditorContent = useCallback(() => {
+  const syncEditorContent = useCallback((immediate = false) => {
     debouncedSyncEditor.cancel();
     const el = editorRef.current;
     if (!el) return;
     const html = el.innerHTML;
-    lastSyncedContentRef.current = html;
-    updateChapter(activeChapterIdx, { content: html });
+    const currentContent = activeChapter?.content || "";
+    if (html !== lastSyncedContentRef.current || html !== currentContent) {
+      lastSyncedContentRef.current = html;
+      if (immediate) {
+        setProjects(prev => prev.map(p => {
+          if (p.id !== activeProjectId) return p;
+          const chapters = [...p.chapters];
+          if (chapters[activeChapterIdx]) {
+            chapters[activeChapterIdx] = { ...chapters[activeChapterIdx], content: html };
+          }
+          projectsRef.current = prev.map(pp => pp.id === p.id ? { ...pp, chapters } : pp);
+          return { ...p, chapters };
+        }));
+      } else {
+        updateChapter(activeChapterIdx, { content: html });
+      }
+    }
     const beatId = detectCursorBeat(el);
     if (beatId) setActiveBeatId(beatId);
-  }, [activeChapterIdx, updateChapter, debouncedSyncEditor]);
+  }, [activeChapterIdx, activeChapter, activeProjectId, updateChapter, debouncedSyncEditor]);
 
   // Cleanup debounced sync on unmount
   useEffect(() => () => debouncedSyncEditor.cancel(), [debouncedSyncEditor]);
@@ -5578,27 +5587,23 @@ export default function NovelForge() {
     debouncedSyncEditor.cancel();
     const el = editorRef.current;
     if (!el) return;
-    // ═══ Don't do ANYTHING while a drag is in progress ═══
     if (el._nfDragging) return;
 
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  
     const isViewingDraft = !!viewingDraftId;
     const viewingDraft = isViewingDraft ? (project?.drafts || []).find(d => d.id === viewingDraftId) : null;
-    const key = isViewingDraft ? `draft:${viewingDraftId}` : `${activeProjectId}-${activeChapterIdx}`;
+    const chapterId = isViewingDraft ? viewingDraftId : (activeChapter?.id || "");
+    const currentKey = `${activeProjectId}:${activeChapterIdx}:${chapterId}`;
+    const prevKey = _nfEditorState.current ? `${_nfEditorState.current.projectId}:${_nfEditorState.current.chapterIdx}:${_nfEditorState.current.chapterId}` : "";
     const content = isViewingDraft ? (viewingDraft?.content || "") : (activeChapter?.content || "");
     const editorEmpty = !el.innerHTML || el.innerHTML === "<br>";
     const hasContent = !!content;
-  
-    const needsRepopulate = lastSyncedChapterRef.current !== key
-      || (editorEmpty && hasContent);
-  
+    const needsRepopulate = !_nfEditorState.current || currentKey !== prevKey || (editorEmpty && hasContent);
+
     if (needsRepopulate) {
-      lastSyncedChapterRef.current = key;
+      _nfEditorState.current = { projectId: activeProjectId, chapterIdx: activeChapterIdx, chapterId, populated: true };
+      lastSyncedChapterRef.current = currentKey;
       lastSyncedContentRef.current = content;
 
-      // FIX: Clean up legacy NFIMG: placeholders from old image-map system
-      // These can't be resolved since the map is empty after reload
       let cleanContent = content;
       if (content && content.includes('NFIMG:')) {
         cleanContent = content
@@ -5621,7 +5626,7 @@ export default function NovelForge() {
     } else {
       lastSyncedContentRef.current = content;
     }
-  
+
     return () => {
       if (el._nfCleanupDragPrevention) {
         el._nfCleanupDragPrevention();
@@ -5633,7 +5638,7 @@ export default function NovelForge() {
         delete el._nfCleanupActiveDrag;
       }
     };
-  }, [activeChapter?.content, activeChapterIdx, activeProjectId, activeTab, viewingDraftId, project?.drafts]);
+  }, [_nfEditorState.current, activeProjectId, activeChapterIdx, activeTab, viewingDraftId, project?.drafts]);
 
   // ─── API CALLS ───
   const callOpenRouterStream = useCallback(async (messages, opts = {}) => {
@@ -5874,6 +5879,12 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
     return stripThinkingTokens(full);
   }, []);
 
+  const forceRepopulateEditor = useCallback(() => {
+    _nfEditorState.current = null;
+    debouncedSyncEditor.cancel();
+    lastSyncedContentRef.current = null;
+  }, [debouncedSyncEditor]);
+  
   const handleGenerate = useCallback(async () => {
     if (isGenerating) return;
     // FIX: Validate rewrite mode requires selection
@@ -6057,8 +6068,27 @@ const insertBeatMarker = useCallback((beatId, beatTitle, beatDescription) => {
   if (!el) return;
   const desc = (beatDescription || "").slice(0, 200).replace(/"/g, '&quot;').replace(/</g, '&lt;');
   const title = (beatTitle || "Beat").replace(/"/g, '&quot;');
-  const marker = `<div class="nf-beat-marker" contenteditable="false" data-beat-id="${beatId}" data-beat-title="${title}" data-beat-desc="${desc}"></div>`;
-  el.innerHTML += marker;
+
+  const marker = document.createElement('div');
+  marker.className = 'nf-beat-marker';
+  marker.contentEditable = 'false';
+  marker.setAttribute('data-beat-id', beatId);
+  marker.setAttribute('data-beat-title', title);
+  marker.setAttribute('data-beat-desc', desc);
+
+  const spacer = document.createElement('p');
+  spacer.innerHTML = '<br>';
+
+  const existingMarkers = el.querySelectorAll('.nf-beat-marker');
+  if (existingMarkers.length > 0) {
+    existingMarkers[existingMarkers.length - 1].after(marker);
+    marker.after(spacer);
+  } else {
+    el.appendChild(marker);
+    el.appendChild(spacer);
+  }
+
+  _attachBeatDragEvents(marker, el);
   lastSyncedContentRef.current = el.innerHTML;
   updateChapter(activeChapterIdx, { content: el.innerHTML });
 }, [activeChapterIdx, updateChapter]);
@@ -6067,25 +6097,37 @@ const appendToChapter = useCallback((text) => {
   if (!activeChapter) return;
   pushUndo();
   const el = editorRef.current;
-  if (el) {
-    // If there's an active beat, insert after the active beat marker
-    if (activeBeatId) {
-      const activeMarker = el.querySelector(`.nf-beat-marker[data-beat-id="${activeBeatId}"]`);
-      if (activeMarker) {
-        const contentNode = document.createElement('div');
-        contentNode.innerHTML = "<br/><br/>" + _markdownToEditorHtml(text);
-        activeMarker.after(contentNode);
-      } else {
-        el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
+  if (!el) return;
+
+  const newContent = document.createElement('div');
+  newContent.innerHTML = "<br/><br/>" + _markdownToEditorHtml(text);
+  const frag = document.createDocumentFragment();
+  while (newContent.firstChild) frag.appendChild(newContent.firstChild);
+
+  if (activeBeatId) {
+    const activeMarker = el.querySelector(`.nf-beat-marker[data-beat-id="${activeBeatId}"]`);
+    if (activeMarker) {
+      let insertAfter = activeMarker;
+      let next = activeMarker.nextElementSibling;
+      while (next && next.classList.contains('nf-beat-marker')) {
+        insertAfter = next;
+        next = next.nextElementSibling;
       }
+      insertAfter.after(frag);
     } else {
-      el.innerHTML += "<br/><br/>" + _markdownToEditorHtml(text);
+      el.appendChild(frag);
     }
-    syncEditorContent();
-    lastSyncedContentRef.current = el.innerHTML;
   } else {
-    updateChapter(activeChapterIdx, { content: (activeChapter.content || "") + "\n\n" + text });
+    const allMarkers = el.querySelectorAll('.nf-beat-marker');
+    if (allMarkers.length > 0) {
+      allMarkers[allMarkers.length - 1].after(frag);
+    } else {
+      el.appendChild(frag);
+    }
   }
+
+  syncEditorContent();
+  lastSyncedContentRef.current = el.innerHTML;
   showToast("Appended", "success");
 }, [activeChapter, activeChapterIdx, updateChapter, pushUndo, showToast, syncEditorContent, _markdownToEditorHtml, activeBeatId]);
 
@@ -6875,7 +6917,7 @@ If no relationship changes, respond "No relationship updates needed."` },
     // 6. Reset refs
     _lastChapterPerProject.current = {};
     _fileHandle = null;
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
     lastSyncedContentRef.current = null;
     lastContentRef.current = null;
     lastContentChapterRef.current = null;
@@ -7069,7 +7111,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       worldView: "",
     };
     updateProject({ chapters, drafts });
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
     setShowDrafts(true);
     showToast(`"${ch.title}" saved as draft — write a new version`, "success");
   }, [project, activeChapterIdx, updateProject, showToast]);
@@ -7111,7 +7153,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     };
     updateProject({ chapters, drafts: newDrafts });
     setActiveChapterIdx(targetIdx);
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
     showToast(`"${draft.title}" restored`, "success");
   }, [project, activeChapterIdx, updateProject, showToast]);
 
@@ -7126,7 +7168,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     if (!draft) return;
     if (editorRef.current) syncEditorContent();
     setViewingDraftId(draftId);
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
     lastSyncedContentRef.current = null;
   }, [project?.drafts, syncEditorContent]);
 
@@ -7146,7 +7188,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   const handleCloseDraft = useCallback(() => {
     handleSaveDraft();
     setViewingDraftId(null);
-    lastSyncedChapterRef.current = null;
+    forceRepopulateEditor();
     lastSyncedContentRef.current = null;
   }, [handleSaveDraft]);
   
@@ -7482,17 +7524,21 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   }, [settings.apiKey, _generateSingleImage]);
 
   const handleSaveImageDraft = useCallback((imageUrl, prompt, chapterIdx) => {
+    const chTitle = project?.chapters?.[chapterIdx]?.title || "";
     const newImage = {
       id: uid(),
       imageUrl,
-      prompt: prompt?.slice(0, 500) || "",
+      prompt: (prompt || "").slice(0, 500),
       chapterIdx,
-      chapterTitle: project?.chapters?.[chapterIdx]?.title || "",
+      chapterTitle: chTitle,
       createdAt: new Date().toISOString(),
     };
-    updateProject({ images: [...(project?.images || []), newImage] });
+    setProjects(prev => prev.map(p => {
+      if (p.id !== activeProjectId) return p;
+      return { ...p, images: [...(p.images || []), newImage] };
+    }));
     showToast("Image saved to Images tab", "success");
-  }, [project, updateProject, showToast]);
+  }, [activeProjectId, showToast]);
 
   const handleAppendImage = useCallback((imageUrl) => {
     const el = editorRef.current;
@@ -7501,10 +7547,11 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     _insertImageAtPoint(el, _buildImgFigure(imageUrl, caption), "end");
     syncEditorContent();
     lastSyncedContentRef.current = el.innerHTML;
+    forceRepopulateEditor();
     showToast("Image appended to chapter", "success");
     setImagePromptData(null);
     setImageGenStatus(null);
-  }, [selectedText, activeChapterIdx, activeChapter?.title, syncEditorContent, showToast]);
+  }, [selectedText, activeChapterIdx, activeChapter?.title, syncEditorContent, showToast, forceRepopulateEditor]);
 
   const [pendingImageInsert, setPendingImageInsert] = useState(null); // { imageUrl, caption }
 
@@ -8040,7 +8087,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
               const restoredIdx = _lastChapterPerProject.current[p.id] || 0;
               const safeIdx = Math.min(restoredIdx, (p.chapters?.length || 1) - 1);
               setActiveProjectId(p.id); setActiveChapterIdx(safeIdx); setChatMessages([]);
-              setSessionWordsStart(null); lastSyncedChapterRef.current = null;
+              setSessionWordsStart(null); forceRepopulateEditor();
               setSelectedText(""); setSelectionRange(null);
               undoDispatch({ type: "reset" });
               setProjectSearch("");
@@ -8519,7 +8566,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               // ✅ All statements inside onClick handler, including these two:
               updateProject({ chapters: chs, ...plotUpdate });
               setActiveChapterIdx(chs.length - 1);
-              lastSyncedChapterRef.current = null;
+              forceRepopulateEditor();
             }} className="nf-btn-icon-sm" aria-label="Add chapter">
               <Icons.Plus /> Add
             </button>
@@ -8529,7 +8576,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               <div key={ch.id || i}>
                 <div onClick={() => {
                   if (viewingDraftId) { handleCloseDraft(); }
-                  if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); lastSyncedChapterRef.current = null; setSelectedText(""); setSelectionRange(null); }
+                  if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); forceRepopulateEditor(); setSelectedText(""); setSelectionRange(null); }
                 }}
                   draggable
                   onDragStart={e => { e.dataTransfer.setData("text/plain", i.toString()); e.dataTransfer.effectAllowed = "move"; e.currentTarget.style.opacity = "0.4"; }}
@@ -8621,7 +8668,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     const chapters = [...(project?.chapters || []), newCh];
                     updateProject({ chapters, drafts: (project?.drafts || []).filter(d => d.id !== draft.id) });
                     setActiveChapterIdx(chapters.length - 1);
-                    lastSyncedChapterRef.current = null;
+                    forceRepopulateEditor();
                     showToast(`"${draft.title}" restored as new chapter`, "success");
                   }} className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
                     ↩ Add as Ch{(project?.chapters?.length || 0) + 1}
@@ -9095,7 +9142,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   const chs = project.chapters.filter((_, i) => i !== activeChapterIdx);
                   updateProject({ chapters: chs.length ? chs : [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }] });
                   setActiveChapterIdx(Math.min(activeChapterIdx, Math.max(0, chs.length - 1)));
-                  lastSyncedChapterRef.current = null; setConfirmDialog(null); showToast("Deleted", "success");
+                  forceRepopulateEditor(); setConfirmDialog(null); showToast("Deleted", "success");
                 },
               })} className="nf-btn-icon-sm nf-btn-icon-danger" aria-label="Delete chapter"><Icons.Trash /></button>
             ) : (
@@ -9881,11 +9928,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                         <button onClick={() => {
                                           const updated = { ...(item.referenceImages || {}) };
                                           delete updated[wallKey];
-                                          updateProject({
-                                            worldBuilding: (project.worldBuilding || []).map(w =>
-                                              w.id === item.id ? { ...w, referenceImages: updated } : w
-                                            ),
-                                          });
+                                          setProjects(prev => prev.map(p => {
+											if (p.id !== activeProjectId) return p;
+											return { ...p, worldBuilding: (p.worldBuilding || []).map(w =>
+											  w.id === item.id ? { ...w, referenceImages: updatedRefs } : w
+											)};
+										  }));
                                         }} className="nf-btn-icon" style={{
                                           position: "absolute", top: 2, right: 2,
                                           background: "rgba(0,0,0,0.6)", borderRadius: 2, padding: 2,
@@ -9964,11 +10012,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                               if (imageUrl) {
                                                 const updatedRefs = { ...(item.referenceImages || {}) };
                                                 updatedRefs[wallKey] = imageUrl;
-                                                updateProject({
-                                                  worldBuilding: (project.worldBuilding || []).map(w =>
-                                                    w.id === item.id ? { ...w, referenceImages: updatedRefs } : w
-                                                  ),
-                                                });
+                                                setProjects(prev => prev.map(p => {
+												  if (p.id !== activeProjectId) return p;
+												  return { ...p, worldBuilding: (p.worldBuilding || []).map(w =>
+												    w.id === item.id ? { ...w, referenceImages: updatedRefs } : w
+											      )};
+										        }));
                                                 showToast(`${WALL_LABELS[idx]} rendered`, "success");
                                               } else {
                                                 showToast("No image returned — try again", "error");
@@ -10023,11 +10072,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                             reader.onload = ev => {
                                               const updatedRefs = { ...(item.referenceImages || {}) };
                                               updatedRefs[wallKey] = ev.target.result;
-                                              updateProject({
-                                                worldBuilding: (project.worldBuilding || []).map(w =>
-                                                  w.id === item.id ? { ...w, referenceImages: updatedRefs } : w
-                                                ),
-                                              });
+                                              setProjects(prev => prev.map(p => {
+											    if (p.id !== activeProjectId) return p;
+											    return { ...p, worldBuilding: (p.worldBuilding || []).map(w =>
+											      w.id === item.id ? { ...w, referenceImages: updatedRefs } : w
+											  )};
                                               showToast("Image uploaded", "success");
                                             };
                                             reader.readAsDataURL(file);
@@ -10097,7 +10146,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             <div key={p.id} className="nf-card">
               <div style={{ display: "flex", gap: 12, alignItems: "start" }}>
                 <div className="nf-plot-number" style={{ cursor: hasMatchingChapter ? "pointer" : "default", opacity: hasMatchingChapter ? 1 : 0.5 }}
-                  onClick={() => { if (hasMatchingChapter) { setActiveTab("write"); setActiveChapterIdx(chIdx); lastSyncedChapterRef.current = null; } }}
+                  onClick={() => { if (hasMatchingChapter) { setActiveTab("write"); setActiveChapterIdx(chIdx); forceRepopulateEditor(); } }}
                   title={hasMatchingChapter ? `Go to Chapter ${p.chapter || i + 1}` : `Chapter ${p.chapter || i + 1} doesn't exist yet`}>
                   {p.chapter || i + 1}
                 </div>

@@ -4843,6 +4843,162 @@ const RelWebMinimap = memo(({ characters, relationships, onClick }) => {
   );
 });
 
+// ─── GLYPH RAIL — Nothing Phone-inspired ambient indicators ───
+const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, detectedCharIds, relationships, sessionProgress }) => {
+  const CW = 22;
+  const CH = 125;
+  const CX = CW / 2;
+  const circumference = 2 * Math.PI * 7;
+
+  // Character tension colors
+  const TC = { none: "#6b9e78", low: "#8b9e6b", medium: "#c4953a", high: "#c4653a", explosive: "#c43a3a" };
+
+  // Character presence: resolve tension for each detected character relative to POV
+  const povChar = (characters || []).find(c => c.role === "protagonist");
+  const charBars = useMemo(() => {
+    if (!detectedCharIds?.size || !characters?.length) return [];
+    const maxBars = 6;
+    const detected = characters.filter(c => detectedCharIds.has(c.id)).slice(0, maxBars);
+    return detected.map(c => {
+      const rel = (relationships || []).find(r =>
+        povChar && c.id !== povChar.id &&
+        ((r.char1 === povChar.id && r.char2 === c.id) || (r.char2 === povChar.id && r.char1 === c.id))
+      );
+      return { id: c.id, color: rel?.tension ? (TC[rel.tension] || "#6b7394") : "#6b7394" };
+    });
+  }, [detectedCharIds, characters, relationships, povChar]);
+
+  const saveColor = saveStatus === "saving" ? "#c4953a" : saveStatus === "saved" ? "#6b9e78" : saveStatus === "error" ? "#c43a3a" : null;
+
+  return (
+    <div style={{
+      width: CW, flexShrink: 0, display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      background: "var(--nf-bg-deep)", padding: "12px 0", gap: 0,
+    }}>
+      <style>{`
+        @keyframes nf-glyph-breathe {
+          0%, 100% { opacity: 0.15; r: 2.5; }
+          50% { opacity: 0.85; r: 3.5; }
+        }
+        @keyframes nf-glyph-pulse-fast {
+          0%, 100% { opacity: 0.25; }
+          50% { opacity: 1; }
+        }
+        @keyframes nf-glyph-char-glow {
+          0%, 100% { opacity: 0.55; }
+          50% { opacity: 1; }
+        }
+      `}</style>
+
+      {/* Hidden SVG with shared filter definitions */}
+      <svg width="0" height="0" style={{ position: "absolute" }}>
+        <defs>
+          <filter id="nf-glyph-glow" x="-200%" y="-200%" width="500%" height="500%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="2.5" result="blur" />
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+          <filter id="nf-glyph-soft-glow" x="-150%" y="-150%" width="400%" height="400%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="1.5" result="blur" />
+            <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </defs>
+      </svg>
+
+      <svg width={CW} height={CH} viewBox={`0 0 ${CW} ${CH}`} style={{ overflow: "visible" }}>
+        {/* 1. Save status glyph — thin horizontal line, y=8 */}
+        {saveColor && (
+          <rect
+            x={3} y={7} width={16} height={1.5} rx={0.75}
+            fill={saveColor}
+            filter={saveStatus === "saving" ? "url(#nf-glyph-glow)" : undefined}
+            opacity={saveStatus === "saving" ? 0.55 : 0.75}
+            style={saveStatus === "saving" ? {
+              animation: "nf-glyph-pulse-fast 0.7s ease-in-out infinite",
+            } : { transition: "all 0.4s ease" }}
+          />
+        )}
+
+        {/* 2. AI generating glyph — breathing dot, y=22 */}
+        <circle
+          cx={CX} cy={22} r={isGenerating ? 3 : 1.5}
+          fill={isGenerating ? "#c4653a" : "var(--nf-border)"}
+          filter={isGenerating ? "url(#nf-glyph-glow)" : undefined}
+          style={isGenerating ? {
+            animation: "nf-glyph-breathe 2s ease-in-out infinite",
+            transition: "fill 0.3s ease",
+          } : {
+            transition: "all 0.5s ease",
+          }}
+        />
+
+        {/* 3. Character presence glyphs — vertical bars, y=32-52 */}
+        {charBars.map((bar, i) => {
+          const yPos = 34 + i * 6;
+          return (
+            <g key={bar.id}>
+              <rect
+                x={5} y={yPos} width={12} height={2.5} rx={1.25}
+                fill={bar.color}
+                filter="url(#nf-glyph-soft-glow)"
+                opacity={0.75}
+                style={{ animation: "nf-glyph-char-glow 3s ease-in-out infinite", animationDelay: `${i * 0.4}s` }}
+              />
+            </g>
+          );
+        })}
+
+        {/* 4. Word progress glyph — arc ring, centered at y=75 */}
+        <circle
+          cx={CX} cy={75} r={7}
+          fill="none"
+          stroke="var(--nf-border)"
+          strokeWidth={0.8}
+          opacity={0.15}
+        />
+        <circle
+          cx={CX} cy={75} r={7}
+          fill="none"
+          stroke={wordProgress >= 100 ? "#6b9e78" : wordProgress > 70 ? "#c4953a" : "#6b7394"}
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference - (circumference * Math.min(wordProgress, 100) / 100)}
+          transform={`rotate(-90 ${CX} 75)`}
+          filter={wordProgress >= 100 ? "url(#nf-glyph-soft-glow)" : undefined}
+          style={{ transition: "stroke-dashoffset 1.2s ease-out, stroke 0.5s ease" }}
+        />
+        {/* Completion dot at arc end when 100% */}
+        {wordProgress >= 100 && (
+          <circle
+            cx={CX} cy={68} r={1.5}
+            fill="#6b9e78"
+            filter="url(#nf-glyph-soft-glow)"
+            opacity={0.9}
+            style={{ animation: "nf-glyph-char-glow 2s ease-in-out infinite" }}
+          />
+        )}
+
+        {/* 5. Session progress glyph — thin vertical bar, y=90-118 */}
+        <rect
+          x={CX - 0.5} y={94} width={1} height={24} rx={0.5}
+          fill="var(--nf-border)" opacity={0.1}
+        />
+        <rect
+          x={CX - 0.5}
+          y={94 + 24 - (24 * Math.min(sessionProgress, 100) / 100)}
+          width={1}
+          height={24 * Math.min(sessionProgress, 100) / 100}
+          rx={0.5}
+          fill="#6b7394"
+          opacity={0.5}
+          style={{ transition: "all 0.8s ease-out" }}
+        />
+      </svg>
+    </div>
+  );
+});
+
 // ─── BEAT TOOLTIP ───
 const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
   const [hoveredBeat, setHoveredBeat] = useState(null);
@@ -9182,6 +9338,32 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         )}
         <RichTextToolbar editorRef={editorRef} onContentChange={syncEditorContent} />
         <div className="nf-editor-split">
+          {!focusMode && (
+            <GlyphRail
+              saveStatus={saveStatus}
+              isGenerating={isGenerating}
+              wordProgress={activeChapterIdx === 0
+                ? (wordCount(activeChapter?.content) / 1000) * 10
+                : (totalProjectWords / (project?.wordGoal || Math.max(totalProjectWords, 1))) * 100}
+              characters={project?.characters}
+              detectedCharIds={(() => {
+                const plain = activeChapter?.content ? _htmlToPlain(activeChapter.content) : "";
+                if (!plain) return new Set();
+                const ids = _detectMentionedCharacters(plain, project?.characters);
+                const plotEntry = ContextEngine._plotEntryForChapter(project, activeChapterIdx);
+                if (plotEntry?.characters) {
+                  for (const cid of plotEntry.characters) {
+                    if ((project?.characters || []).some(c => c.id === cid)) ids.add(cid);
+                  }
+                }
+                return ids;
+              })()}
+              relationships={project?.relationships}
+              sessionProgress={project?.wordGoal > 0
+                ? (totalProjectWords / project.wordGoal) * 100
+                : Math.min(100, sessionWords * 2)}
+            />
+          )}
           {!focusMode && (
             <BeatProgressRail
               plotEntry={ContextEngine._plotEntryForChapter(project, activeChapterIdx)}

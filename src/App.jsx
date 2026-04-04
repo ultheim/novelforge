@@ -1980,6 +1980,27 @@ const ContextEngine = {
           const chars = project.characters || [];
           parts.push(`\nRelationships: ${project.relationships.map(r => `${_resolveCharName(r.char1, chars)} ↔ ${_resolveCharName(r.char2, chars)}: ${r.dynamic} [${r.status}]`).join("; ")}`);
         }
+        // ─── Organization Context for Characters ───
+        const orgEntries = (project.worldBuilding || []).filter(w => w.category === "Organization");
+        if (orgEntries.length > 0) {
+          parts.push(`\n<organizations>`);
+          orgEntries.forEach(org => {
+            parts.push(`${org.name}${org.orgPurpose ? ` — ${org.orgPurpose}` : ""}`);
+            if (Array.isArray(org.orgHierarchy) && org.orgHierarchy.length > 0) {
+              org.orgHierarchy.forEach(pos => {
+                const heldBy = pos.charId ? (project.characters || []).find(c => c.id === pos.charId) : null;
+                const reportsTo = pos.parentId ? org.orgHierarchy.find(p => p.id === pos.parentId) : null;
+                const reportsToChar = reportsTo?.charId ? (project.characters || []).find(c => c.id === reportsTo.charId) : null;
+                let line = `  • ${pos.name || "Unnamed position"}${pos.role ? ` (${pos.role})` : ""}`;
+                if (heldBy) line += ` — held by ${heldBy.name} (${heldBy.role})`;
+                else line += ` — VACANT (fill this position)`;
+                if (reportsTo) line += ` → reports to ${reportsToChar?.name || reportsTo.name || "Unknown"}`;
+                parts.push(line);
+              });
+            }
+          });
+          parts.push(`</organizations>`);
+        }
         break;
       }
       case "world": {
@@ -2034,8 +2055,28 @@ const ContextEngine = {
           parts.push(`</existing_world_entries>`);
         }
         // G2: Include characters for world consistency
+        // Rich character profiles for world-building consistency
         if (project.characters?.length) {
-          parts.push(`\nCharacters: ${project.characters.map(c => `${c.name} (${c.role}${c.occupation ? `, ${c.occupation}` : ""})`).join(", ")}`);
+          parts.push(`\n<character_profiles>`);
+          project.characters.forEach(c => {
+            let line = `  • ${c.name} (${c.role})`;
+            if (c.occupation) line += ` — ${c.occupation}`;
+            if (c.personality) line += `\n    Personality: ${_truncateAtBoundary(c.personality, 1000)}`;
+            if (c.allegiances) line += `\n    Allegiances: ${c.allegiances}`;
+            if (c.skills) line += `\n    Skills: ${c.skills}`;
+            if (c.arc) line += `\n    Arc: ${_truncateAtBoundary(c.arc, 1000)}`;
+            // Show which orgs they already belong to
+            const orgPositions = [];
+            (project.worldBuilding || []).forEach(w => {
+              if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+              w.orgHierarchy.forEach(pos => {
+                if (pos.charId === c.id) orgPositions.push(`${pos.name} in ${w.name}`);
+              });
+            });
+            if (orgPositions.length > 0) line += `\n    Org positions: ${orgPositions.join("; ")}`;
+            parts.push(line);
+          });
+          parts.push(`</character_profiles>`);
         }
         break;
       }
@@ -5133,15 +5174,50 @@ RULES:
       const data = await res.json();
       const content = stripThinkingTokens(data.choices?.[0]?.message?.content || "");
       
-      // G8: Detect any valid JSON in code blocks (single object, array, or multiple blocks)
+      // Detect any valid JSON in the response — multiple patterns
       let hasAutoFill = false;
       try {
+        // Pattern 1: ```json ... ```
         const jsonBlocks = [...content.matchAll(/```json\s*([\s\S]*?)```/g)];
         for (const match of jsonBlocks) {
           try {
             const p = JSON.parse(match[1]);
             if (typeof p === "object" && p !== null) { hasAutoFill = true; break; }
           } catch {}
+        }
+        // Pattern 2: ``` ... ``` without language tag
+        if (!hasAutoFill) {
+          const codeBlocks = [...content.matchAll(/```([\s\S]*?)```/g)];
+          for (const match of codeBlocks) {
+            const trimmed = match[1].trim();
+            if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length > 10) {
+              try {
+                const p = JSON.parse(trimmed);
+                if (typeof p === "object" && p !== null) { hasAutoFill = true; break; }
+              } catch {}
+            }
+          }
+        }
+        // Pattern 3: Standalone JSON object anywhere in response
+        if (!hasAutoFill) {
+          const firstBrace = content.indexOf("{");
+          if (firstBrace !== -1) {
+            let depth = 0, endIdx = -1;
+            for (let i = firstBrace; i < content.length; i++) {
+              if (content[i] === "{") depth++;
+              if (content[i] === "}") depth--;
+              if (depth === 0) { endIdx = i + 1; break; }
+            }
+            if (endIdx > firstBrace) {
+              try {
+                const candidate = content.slice(firstBrace, endIdx);
+                const p = JSON.parse(candidate);
+                if (p && typeof p === "object" && (p.type || p.data || Array.isArray(p))) {
+                  hasAutoFill = true;
+                }
+              } catch {}
+            }
+          }
         }
       } catch {}
       
@@ -5158,8 +5234,37 @@ RULES:
 
   const handleAutoFill = useCallback((content) => {
     try {
-      // Extract ALL json code blocks from the response
+      // Extract ALL JSON from the response — multiple patterns
       const jsonBlocks = [...content.matchAll(/```json\s*([\s\S]*?)```/g)];
+      // Fallback: plain ``` blocks containing JSON
+      if (!jsonBlocks.length) {
+        const plainBlocks = [...content.matchAll(/```([\s\S]*?)```/g)];
+        for (const m of plainBlocks) {
+          const t = m[1].trim();
+          if (t.startsWith("{") || t.startsWith("[")) jsonBlocks.push(m);
+        }
+      }
+      // Fallback: standalone JSON object
+      if (!jsonBlocks.length) {
+        const firstBrace = content.indexOf("{");
+        if (firstBrace !== -1) {
+          let depth = 0, endIdx = -1;
+          for (let i = firstBrace; i < content.length; i++) {
+            if (content[i] === "{") depth++;
+            if (content[i] === "}") depth--;
+            if (depth === 0) { endIdx = i + 1; break; }
+          }
+          if (endIdx > firstBrace) {
+            const candidate = content.slice(firstBrace, endIdx);
+            try {
+              const testParse = JSON.parse(candidate);
+              if (testParse && typeof testParse === "object") {
+                jsonBlocks.push([null, candidate]);
+              }
+            } catch {}
+          }
+        }
+      }
       if (!jsonBlocks.length || !onAutoFill) return;
 
       // Collect all items into a flat array
@@ -8981,7 +9086,13 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     }
 
     updateProject({ relationships: newRels });
-    showToast(`${addedCount} relationship${addedCount !== 1 ? "s" : ""} added`, "success");
+
+    if (addedCount > 0) {
+      showToast(`${addedCount} relationship${addedCount !== 1 ? "s" : ""} added`, "success");
+    } else {
+      const skippedCount = items.length;
+      showToast(`No valid relationships found in AI response (${skippedCount} items couldn't be matched to characters) — check the AI used exact character names`, "error");
+    }
   }, [project, updateProject, showToast]);
 
   // ─── TAB: IMAGES ───
@@ -10857,7 +10968,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait of this character white background, from upper chest above, shirtless: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
+                      const prompt = `Create a realistic passport portrait (Frame: Strict head-and-shoulders passport-style portrait. Camera is at eye level, centered on the subject. Subject's head occupies approximately 60-70% of the image height (from crown to chin). Shoulders visible below the chin, showing upper chest. Crop at mid-torso. No full body. No waist-up. Subject faces directly forward, looking into the camera lens. Neutral expression. Eyes open, looking straight ahead.
+
+Background: Pure solid white (#FFFFFF). No gradients. No shadows on the background. No texture. No color tint. No bokeh. No objects. Just flat, even, pure white from edge to edge.
+
+Lighting: Even, diffused studio lighting from the front. No harsh shadows under the chin or nose. No dramatic side lighting. No rim lighting. Soft, uniform illumination. No blown-out highlights. No deep shadows.
+) of this character (no shirt, clinical): ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },

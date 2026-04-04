@@ -10857,7 +10857,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait of this character white background: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
+                      const prompt = `Create a realistic passport portrait of this character white background, from upper chest above, shirtless: ${editingChar.appearance || ""}. ${editingChar.lookAlike ? `The person is ${editingChar.lookAlike}'s doppelganger.` : ""}`;
                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                         method: "POST",
                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },

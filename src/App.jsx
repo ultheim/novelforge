@@ -910,6 +910,318 @@ const _resolveCharId = (nameOrId, characters) => {
   return byName ? byName.id : nameOrId; // Return original if no match
 };
 
+// ─── CROSS-REFERENCE ENGINE: derives all interconnected data from project ───
+const _deriveCrossRefs = (project, charId, opts = {}) => {
+  if (!project) return {};
+  const chars = project.characters || [];
+  const worlds = project.worldBuilding || [];
+  const rels = project.relationships || [];
+  const plots = project.plotOutline || [];
+  const result = {};
+
+  // ─── LOCATION-LEVEL cross-refs (when opts.worldId is set) ───
+  if (opts.worldId) {
+    const w = worlds.find(ww => ww.id === opts.worldId);
+    if (w) {
+      const fc = Array.isArray(w.frequentCharacters) ? w.frequentCharacters : [];
+      result.locChars = fc.map(cid => chars.find(c => c.id === cid)).filter(Boolean);
+      result.locPlotChapters = plots.filter(pl => Array.isArray(pl.locations) && pl.locations.includes(opts.worldId));
+      result.locRelationships = rels.filter(r => fc.includes(r.char1) && fc.includes(r.char2));
+      result.locConnectedEntries = (Array.isArray(w.connectedTo) ? w.connectedTo : []).map(cid => worlds.find(ww => ww.id === cid)).filter(Boolean);
+      // Orgs that control/operate from this location
+      result.locOrgs = worlds.filter(ww => ww.category === "Organization" && Array.isArray(ww.connectedTo) && ww.connectedTo.includes(opts.worldId));
+      // Chars with secrets related to this location
+      result.locSecretChars = chars.filter(c => fc.includes(c.id) && (c.secrets || c.hiddenSecrets));
+      // Tension map at this location
+      result.locTensions = result.locRelationships.filter(r => r.tension && r.tension !== "none").map(r => {
+        const c1 = chars.find(c => c.id === r.char1); const c2 = chars.find(c => c.id === r.char2);
+        return { c1: c1?.name, c2: c2?.name, tension: r.tension, category: r.category, dynamic: r.dynamic };
+      });
+      // Cultural norms that affect characters here
+      result.locNorms = w.culturalNorms || "";
+      result.locHistory = w.history || "";
+      result.locResources = w.resources || "";
+      // Sub-locations
+      result.locSubLocations = w.subLocations || "";
+      // Parent location
+      result.locParent = w.parentLocation ? worlds.find(ww => ww.id === w.parentLocation) : null;
+      // Child locations
+      result.locChildren = worlds.filter(ww => ww.parentLocation === opts.worldId && ww.name);
+    }
+  }
+
+  // ─── RELATIONSHIP-LEVEL cross-refs (when opts.relId is set) ───
+  if (opts.relId) {
+    const r = rels.find(rr => rr.id === opts.relId);
+    if (r) {
+      const c1 = chars.find(c => c.id === r.char1);
+      const c2 = chars.find(c => c.id === r.char2);
+      result.relChar1 = c1; result.relChar2 = c2;
+      // Shared locations
+      result.relSharedLocs = worlds.filter(w => (w.category === "Location" || !w.category) && Array.isArray(w.frequentCharacters) && w.frequentCharacters.includes(r.char1) && w.frequentCharacters.includes(r.char2) && w.name);
+      // Shared orgs
+      result.relSharedOrgs = worlds.filter(w => {
+        if (w.category !== "Organization") return false;
+        const c1In = (Array.isArray(w.orgHierarchy) && w.orgHierarchy.some(p => p.charId === r.char1)) || (Array.isArray(w.orgMembers) && w.orgMembers.includes(r.char1));
+        const c2In = (Array.isArray(w.orgHierarchy) && w.orgHierarchy.some(p => p.charId === r.char2)) || (Array.isArray(w.orgMembers) && w.orgMembers.includes(r.char2));
+        return c1In && c2In && w.name;
+      });
+      // Shared plot chapters
+      result.relSharedChapters = plots.filter(pl => Array.isArray(pl.characters) && pl.characters.includes(r.char1) && pl.characters.includes(r.char2));
+      // Org hierarchy relationship (does one report to the other?)
+      result.relOrgHierarchy = [];
+      worlds.forEach(w => {
+        if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+        const p1 = w.orgHierarchy.find(p => p.charId === r.char1);
+        const p2 = w.orgHierarchy.find(p => p.charId === r.char2);
+        if (p1 && p2) {
+          if (p1.parentId && w.orgHierarchy.find(p => p.id === p1.parentId)?.charId === r.char2) result.relOrgHierarchy.push({ org: w.name, superior: c2?.name, subordinate: c1?.name });
+          if (p2.parentId && w.orgHierarchy.find(p => p.id === p2.parentId)?.charId === r.char1) result.relOrgHierarchy.push({ org: w.name, superior: c1?.name, subordinate: c2?.name });
+        }
+      });
+      // Mutual friends/enemies (other characters connected to both)
+      result.relMutualConnections = [];
+      chars.forEach(c => {
+        if (c.id === r.char1 || c.id === r.char2) return;
+        const hasRelWith1 = rels.some(rr => (rr.char1 === r.char1 && rr.char2 === c.id) || (rr.char2 === r.char1 && rr.char1 === c.id));
+        const hasRelWith2 = rels.some(rr => (rr.char1 === r.char2 && rr.char2 === c.id) || (rr.char2 === r.char2 && rr.char1 === c.id));
+        if (hasRelWith1 && hasRelWith2) result.relMutualConnections.push(c.name);
+      });
+      // Personality compatibility hints
+      result.relPersonalityClash = c1?.personality && c2?.personality ? { p1: c1.personality.split(/[.,;]/)[0]?.trim(), p2: c2.personality.split(/[.,;]/)[0]?.trim() } : null;
+      // Fear exploitation potential
+      result.relFearOverlap = [];
+      if (c1?.fears && c2?.personality) result.relFearOverlap.push({ fearer: c1.name, fear: c1.fears.split(/[.,;]/)[0]?.trim() });
+      if (c2?.fears && c1?.personality) result.relFearOverlap.push({ fearer: c2.name, fear: c2.fears.split(/[.,;]/)[0]?.trim() });
+    }
+  }
+
+  // ─── PLOT-LEVEL cross-refs (when opts.plotId is set) ───
+  if (opts.plotId) {
+    const pl = plots.find(pp => pp.id === opts.plotId);
+    if (pl) {
+      const selChars = Array.isArray(pl.characters) ? pl.characters : [];
+      const selLocs = Array.isArray(pl.locations) ? pl.locations : [];
+      // Location details
+      result.plotLocDetails = selLocs.map(lid => worlds.find(w => w.id === lid)).filter(Boolean).map(loc => ({
+        name: loc.name, atmosphere: loc.atmosphere, dangers: loc.dangers, rules: loc.rules, sensory: loc.sensoryDetails,
+        subLocations: loc.subLocations, population: loc.population,
+        charsHere: (loc.frequentCharacters || []).map(cid => chars.find(c => c.id === cid)?.name).filter(Boolean),
+        charsNotInScene: (loc.frequentCharacters || []).filter(cid => !selChars.includes(cid)).map(cid => chars.find(c => c.id === cid)?.name).filter(Boolean),
+      }));
+      // Relationship dynamics between selected characters
+      result.plotRelDynamics = rels.filter(r => selChars.includes(r.char1) && selChars.includes(r.char2)).map(r => ({
+        c1: chars.find(c => c.id === r.char1)?.name, c2: chars.find(c => c.id === r.char2)?.name,
+        status: r.status, tension: r.tension, category: r.category, dynamic: r.dynamic,
+        terms: r.terms, powerDynamic: r.powerDynamic, trustLevel: r.trustLevel,
+        isPublic: r.isPublic, sharedSecrets: r.sharedSecrets, taboos: r.taboos,
+      }));
+      // Dead characters in scene
+      result.plotDeadChars = selChars.map(cid => chars.find(c => c.id === cid)).filter(c => c?.status === "dead");
+      // Absent characters in scene
+      result.plotAbsentChars = selChars.map(cid => chars.find(c => c.id === cid)).filter(c => c?.status === "absent");
+      // Org dynamics in scene (characters from same org, hierarchy)
+      result.plotOrgContext = [];
+      worlds.forEach(w => {
+        if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+        const inScene = w.orgHierarchy.filter(p => p.charId && selChars.includes(p.charId));
+        if (inScene.length >= 2) {
+          result.plotOrgContext.push({ org: w.name, members: inScene.map(p => ({ name: chars.find(c => c.id === p.charId)?.name, title: p.name })) });
+        }
+      });
+      // POV character details
+      if (pl.povCharacterId) {
+        const povChar = chars.find(c => c.id === pl.povCharacterId);
+        result.plotPovChar = povChar;
+        result.plotPovCrossRef = _deriveCrossRefs(project, pl.povCharacterId);
+      }
+      // Previous chapter summary continuity
+      const prevChapter = (pl.chapter || 1) - 1;
+      const prevPlot = plots.find(pp => (pp.chapter || 0) === prevChapter);
+      result.plotPrevChapter = prevPlot ? { title: prevPlot.title, summary: prevPlot.summary } : null;
+      // Next chapter preview
+      const nextChapter = (pl.chapter || 1) + 1;
+      const nextPlot = plots.find(pp => (pp.chapter || 0) === nextChapter);
+      result.plotNextChapter = nextPlot ? { title: nextPlot.title } : null;
+    }
+  }
+
+  // ─── CHARACTER-LEVEL cross-refs ───
+  if (charId) {
+    result.charLocations = worlds.filter(w => (w.category === "Location" || !w.category) && Array.isArray(w.frequentCharacters) && w.frequentCharacters.includes(charId) && w.name);
+    result.charOrgPositions = [];
+    worlds.forEach(w => {
+      if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+      w.orgHierarchy.forEach(pos => {
+        if (pos.charId === charId) {
+          const superior = pos.parentId ? w.orgHierarchy.find(p => p.id === pos.parentId) : null;
+          const superiorChar = superior?.charId ? chars.find(c => c.id === superior.charId) : null;
+          const subordinates = w.orgHierarchy.filter(p => p.parentId === pos.id && p.charId).map(p => {
+            const sub = chars.find(c => c.id === p.charId);
+            return sub ? { name: sub.name, title: p.name } : null;
+          }).filter(Boolean);
+          const peers = w.orgHierarchy.filter(p => p.parentId === pos.parentId && p.charId && p.charId !== charId).map(p => {
+            const peer = chars.find(c => c.id === p.charId);
+            return peer ? { name: peer.name, title: p.name } : null;
+          }).filter(Boolean);
+          result.charOrgPositions.push({ orgName: w.name, orgId: w.id, position: pos.name, role: pos.role, reportsTo: superiorChar?.name, reportsToTitle: superior?.name, subordinates, peers, orgPurpose: w.orgPurpose });
+        }
+      });
+    });
+    result.charOrgMemberships = worlds.filter(w => w.category === "Organization" && Array.isArray(w.orgMembers) && w.orgMembers.includes(charId) && w.name).map(w => w.name);
+    result.charRelationships = rels.filter(r => r.char1 === charId || r.char2 === charId).map(r => {
+      const otherId = r.char1 === charId ? r.char2 : r.char1;
+      const other = chars.find(c => c.id === otherId);
+      return { ...r, otherName: other?.name || "?", otherImage: other?.image, otherRole: other?.role, otherStatus: other?.status, otherPersonality: other?.personality?.split(/[.,;]/)[0]?.trim() };
+    });
+    result.charPlotAppearances = plots.filter(pl => Array.isArray(pl.characters) && pl.characters.includes(charId)).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
+    result.derivedOccupation = result.charOrgPositions.map(o => `${o.position} (${o.orgName})`).join(", ");
+    const allOrgNames = [...new Set([...result.charOrgPositions.map(o => o.orgName), ...result.charOrgMemberships])];
+    result.derivedAllegiances = allOrgNames.join(", ");
+    result.addressTerms = result.charRelationships.filter(r => r.terms).map(r => ({ name: r.otherName, terms: r.terms }));
+    result.sharedSecrets = result.charRelationships.filter(r => r.sharedSecrets).map(r => ({ name: r.otherName, secret: r.sharedSecrets }));
+    result.conflictSources = result.charRelationships.filter(r => r.conflictSource).map(r => ({ name: r.otherName, conflict: r.conflictSource }));
+    result.powerDynamics = result.charRelationships.filter(r => r.powerDynamic && r.powerDynamic !== "equal").map(r => ({ name: r.otherName, dynamic: r.powerDynamic === "char1-dominant" ? (r.char1 === charId ? "dominant" : "submissive") : r.powerDynamic === "char2-dominant" ? (r.char2 === charId ? "dominant" : "submissive") : r.powerDynamic }));
+    result.firstPlotChapter = result.charPlotAppearances.length > 0 ? result.charPlotAppearances[0].chapter : null;
+    result.locationDangers = result.charLocations.filter(l => l.dangers).map(l => ({ name: l.name, dangers: l.dangers }));
+    result.locationRules = result.charLocations.filter(l => l.rules).map(l => ({ name: l.name, rules: l.rules }));
+    result.locationAtmospheres = result.charLocations.filter(l => l.atmosphere).map(l => ({ name: l.name, atmosphere: l.atmosphere }));
+    result.locationSensory = result.charLocations.filter(l => l.sensoryDetails).map(l => ({ name: l.name, sensory: l.sensoryDetails }));
+    result.coLocatedChars = [];
+    result.charLocations.forEach(loc => {
+      (loc.frequentCharacters || []).forEach(cid => {
+        if (cid !== charId && !result.coLocatedChars.find(c => c.id === cid)) {
+          const ch = chars.find(c => c.id === cid);
+          if (ch) result.coLocatedChars.push({ id: cid, name: ch.name, role: ch.role, location: loc.name });
+        }
+      });
+    });
+    // Character → enemies (hostile relationships)
+    result.enemies = result.charRelationships.filter(r => r.status === "enemies" || r.category === "rivalry" || r.tensionType === "hostile");
+    // Character → allies (high trust relationships)
+    result.allies = result.charRelationships.filter(r => (r.trustLevel === "high" || r.trustLevel === "absolute") && r.status !== "enemies");
+    // Character → romantic interests
+    result.romanticInterests = result.charRelationships.filter(r => r.category === "romantic" && r.status !== "strangers");
+    // Character → secret relationships
+    result.secretRelationships = result.charRelationships.filter(r => r.isPublic === false);
+    // Character → taboos from relationships
+    result.relTaboos = result.charRelationships.filter(r => r.taboos).map(r => ({ name: r.otherName, taboos: r.taboos }));
+    // Character → chemistry descriptions
+    result.relChemistry = result.charRelationships.filter(r => r.chemistry).map(r => ({ name: r.otherName, chemistry: r.chemistry }));
+    // Character → evolution timelines
+    result.relTimelines = result.charRelationships.filter(r => r.evolutionTimeline).map(r => ({ name: r.otherName, timeline: r.evolutionTimeline }));
+    // Character → key scenes from relationships
+    result.relKeyScenes = result.charRelationships.filter(r => r.keyScenes).map(r => ({ name: r.otherName, scenes: r.keyScenes }));
+    // Character → POV chapters (where they're the viewpoint character)
+    result.povChapters = plots.filter(pl => pl.povCharacterId === charId);
+    // Character → connected world entries (via location connections)
+    result.connectedWorldEntries = [];
+    result.charLocations.forEach(loc => {
+      (Array.isArray(loc.connectedTo) ? loc.connectedTo : []).forEach(cid => {
+        const connected = worlds.find(w => w.id === cid);
+        if (connected && !result.connectedWorldEntries.find(e => e.id === cid)) result.connectedWorldEntries.push(connected);
+      });
+    });
+    // Character → peers in same org
+    result.orgPeers = result.charOrgPositions.flatMap(o => o.peers || []);
+    // Character → org purposes they serve
+    result.orgPurposes = result.charOrgPositions.filter(o => o.orgPurpose).map(o => ({ org: o.orgName, purpose: o.orgPurpose }));
+  }
+
+  return result;
+};
+
+// Build a compact cross-ref context string for AI consumption
+const _buildCrossRefContext = (project, charId) => {
+  const cr = _deriveCrossRefs(project, charId);
+  const lines = [];
+  if (cr.derivedOccupation) lines.push(`Org position: ${cr.derivedOccupation}`);
+  if (cr.derivedAllegiances) lines.push(`Allegiances (from orgs): ${cr.derivedAllegiances}`);
+  if (cr.charLocations?.length) lines.push(`Frequents: ${cr.charLocations.map(l => `${l.name}${l.atmosphere ? ` (${l.atmosphere})` : ""}`).join(", ")}`);
+  if (cr.addressTerms?.length) lines.push(`Address terms: ${cr.addressTerms.map(t => `${t.name}: "${t.terms}"`).join("; ")}`);
+  if (cr.sharedSecrets?.length) lines.push(`Shared secrets: ${cr.sharedSecrets.map(s => `with ${s.name}: ${s.secret}`).join("; ")}`);
+  if (cr.conflictSources?.length) lines.push(`Active conflicts: ${cr.conflictSources.map(c => `with ${c.name}: ${c.conflict}`).join("; ")}`);
+  if (cr.charOrgPositions?.length) {
+    cr.charOrgPositions.forEach(o => {
+      let line = `Org role: ${o.position} in ${o.orgName}`;
+      if (o.reportsTo) line += ` (reports to ${o.reportsTo}, ${o.reportsToTitle})`;
+      if (o.subordinates?.length) line += ` (manages: ${o.subordinates.map(s => `${s.name} as ${s.title}`).join(", ")})`;
+      if (o.peers?.length) line += ` (peers: ${o.peers.map(p => p.name).join(", ")})`;
+      if (o.orgPurpose) line += ` — mission: ${o.orgPurpose.slice(0, 100)}`;
+      lines.push(line);
+    });
+  }
+  if (cr.coLocatedChars?.length) lines.push(`Co-located with: ${cr.coLocatedChars.map(c => `${c.name} (${c.role}) at ${c.location}`).join("; ")}`);
+  if (cr.locationDangers?.length) lines.push(`Location dangers: ${cr.locationDangers.map(d => `${d.name}: ${d.dangers}`).join("; ")}`);
+  if (cr.locationRules?.length) lines.push(`Location rules: ${cr.locationRules.map(r => `${r.name}: ${r.rules}`).join("; ")}`);
+  if (cr.locationAtmospheres?.length) lines.push(`Location vibes: ${cr.locationAtmospheres.map(a => `${a.name}: ${a.atmosphere}`).join("; ")}`);
+  if (cr.enemies?.length) lines.push(`Enemies/rivals: ${cr.enemies.map(e => e.otherName).join(", ")}`);
+  if (cr.allies?.length) lines.push(`Trusted allies: ${cr.allies.map(a => `${a.otherName} (trust: ${a.trustLevel})`).join(", ")}`);
+  if (cr.romanticInterests?.length) lines.push(`Romantic: ${cr.romanticInterests.map(r => `${r.otherName} (${r.status}, ${r.tension} tension)`).join(", ")}`);
+  if (cr.secretRelationships?.length) lines.push(`Secret relationships: ${cr.secretRelationships.map(r => `${r.otherName} (${r.category})`).join(", ")}`);
+  if (cr.relTaboos?.length) lines.push(`Relationship taboos: ${cr.relTaboos.map(t => `with ${t.name}: ${t.taboos}`).join("; ")}`);
+  if (cr.relChemistry?.length) lines.push(`Chemistry: ${cr.relChemistry.map(c => `with ${c.name}: ${c.chemistry}`).join("; ")}`);
+  if (cr.powerDynamics?.length) lines.push(`Power dynamics: ${cr.powerDynamics.map(p => `${p.dynamic} over/under ${p.name}`).join("; ")}`);
+  if (cr.povChapters?.length) lines.push(`POV in chapters: ${cr.povChapters.map(p => `Ch${p.chapter || "?"}`).join(", ")}`);
+  if (cr.charPlotAppearances?.length) lines.push(`Appears in chapters: ${cr.charPlotAppearances.map(p => `Ch${p.chapter || "?"}`).join(", ")}`);
+  if (cr.connectedWorldEntries?.length) lines.push(`Connected world lore: ${cr.connectedWorldEntries.map(w => `${w.name} [${w.category || "?"}]`).join(", ")}`);
+  if (cr.orgPeers?.length) lines.push(`Org peers (same level): ${cr.orgPeers.map(p => p.name).join(", ")}`);
+  if (cr.relKeyScenes?.length) lines.push(`Key relationship scenes: ${cr.relKeyScenes.map(s => `with ${s.name}: ${s.scenes}`).join("; ")}`);
+  return lines.join("\n");
+};
+
+// Build cross-ref context for a relationship pair
+const _buildRelCrossRefContext = (project, relId) => {
+  const cr = _deriveCrossRefs(project, null, { relId });
+  const lines = [];
+  if (cr.relSharedLocs?.length) lines.push(`Shared locations: ${cr.relSharedLocs.map(l => l.name).join(", ")}`);
+  if (cr.relSharedOrgs?.length) lines.push(`Same organizations: ${cr.relSharedOrgs.map(o => o.name).join(", ")}`);
+  if (cr.relSharedChapters?.length) lines.push(`Together in chapters: ${cr.relSharedChapters.map(p => `Ch${p.chapter || "?"}`).join(", ")}`);
+  if (cr.relOrgHierarchy?.length) lines.push(`Org hierarchy: ${cr.relOrgHierarchy.map(h => `${h.subordinate} reports to ${h.superior} in ${h.org}`).join("; ")}`);
+  if (cr.relMutualConnections?.length) lines.push(`Mutual connections: ${cr.relMutualConnections.join(", ")}`);
+  if (cr.relPersonalityClash) lines.push(`Personality dynamic: "${cr.relPersonalityClash.p1}" vs "${cr.relPersonalityClash.p2}"`);
+  if (cr.relFearOverlap?.length) lines.push(`Fears: ${cr.relFearOverlap.map(f => `${f.fearer} fears: ${f.fear}`).join("; ")}`);
+  if (cr.relChar1?.status === "dead" || cr.relChar2?.status === "dead") {
+    const dead = [cr.relChar1, cr.relChar2].filter(c => c?.status === "dead").map(c => c.name);
+    lines.push(`⚠ ${dead.join(" & ")} dead — historical relationship`);
+  }
+  return lines.join("\n");
+};
+
+// Build cross-ref context for a plot entry
+const _buildPlotCrossRefContext = (project, plotId) => {
+  const cr = _deriveCrossRefs(project, null, { plotId });
+  const lines = [];
+  if (cr.plotLocDetails?.length) {
+    cr.plotLocDetails.forEach(loc => {
+      lines.push(`📍 ${loc.name}${loc.atmosphere ? ` — ${loc.atmosphere}` : ""}`);
+      if (loc.dangers) lines.push(`  ⚠ Dangers: ${loc.dangers}`);
+      if (loc.rules) lines.push(`  📜 Rules: ${loc.rules}`);
+      if (loc.sensory) lines.push(`  Sensory: ${loc.sensory}`);
+      if (loc.subLocations) lines.push(`  Areas: ${loc.subLocations}`);
+      if (loc.charsNotInScene.length) lines.push(`  Also here (not in scene): ${loc.charsNotInScene.join(", ")}`);
+    });
+  }
+  if (cr.plotRelDynamics?.length) {
+    lines.push(`Relationship tensions in scene:`);
+    cr.plotRelDynamics.forEach(r => {
+      let line = `  ${r.c1} ↔ ${r.c2}: ${r.tension || "?"} tension (${r.category || "?"})`;
+      if (r.terms) line += ` — address: ${r.terms}`;
+      if (r.powerDynamic && r.powerDynamic !== "equal") line += ` — power: ${r.powerDynamic}`;
+      if (r.sharedSecrets) line += ` — shared secret: ${r.sharedSecrets.slice(0, 60)}`;
+      if (r.taboos) line += ` — taboo: ${r.taboos}`;
+      lines.push(line);
+    });
+  }
+  if (cr.plotDeadChars?.length) lines.push(`⚠ Dead characters in scene: ${cr.plotDeadChars.map(c => `${c.name}${c.statusChangedChapter ? ` (Ch${c.statusChangedChapter})` : ""}`).join(", ")} — flashback/memory?`);
+  if (cr.plotAbsentChars?.length) lines.push(`⚠ Absent characters: ${cr.plotAbsentChars.map(c => c.name).join(", ")}`);
+  if (cr.plotOrgContext?.length) lines.push(`Org dynamics: ${cr.plotOrgContext.map(o => `${o.org}: ${o.members.map(m => `${m.name} (${m.title})`).join(", ")}`).join("; ")}`);
+  if (cr.plotPrevChapter) lines.push(`Previous: Ch${(cr.plotPrevChapter.title || "?")}: ${cr.plotPrevChapter.summary || "no summary"}`);
+  if (cr.plotNextChapter) lines.push(`Next: ${cr.plotNextChapter.title || "?"}`);
+  if (cr.plotPovChar) lines.push(`POV character: ${cr.plotPovChar.name} (${cr.plotPovChar.role}) — ${cr.plotPovChar.personality?.split(/[.,;]/)[0]?.trim() || "no personality set"}`);
+  return lines.join("\n");
+};
+
 const ContextEngine = {
   // D7: Clear POV priority cascade — chapter override > plot outline > project default
   _effectivePov(project, chapterIdx) {
@@ -1179,7 +1491,7 @@ const ContextEngine = {
           if (mismatch) fields.push(["[Note]", "Gender/pronoun combination is intentional — do not 'correct'"]);
         }
         if (c.occupation) fields.push(["Occupation", c.occupation]);
-        // Inject org hierarchy positions
+        // Inject org hierarchy positions — also derive occupation if not manually set
         if (_charOrgCtx[c.id]) {
           _charOrgCtx[c.id].forEach(org => {
             let orgLine = `${org.position} in ${org.org}`;
@@ -1187,6 +1499,16 @@ const ContextEngine = {
             if (org.manages.length > 0) orgLine += ` — manages ${org.manages.join(", ")}`;
             fields.push(["Org rank", orgLine]);
           });
+          if (!c.occupation && _charOrgCtx[c.id].length > 0) {
+            fields.push(["Occupation", _charOrgCtx[c.id].map(o => `${o.position} (${o.org})`).join(", ")]);
+          }
+        }
+        // Inject location context — where this character is typically found
+        const charLocs = (project.worldBuilding || []).filter(w =>
+          (w.category === "Location" || !w.category) && Array.isArray(w.frequentCharacters) && w.frequentCharacters.includes(c.id) && w.name
+        );
+        if (charLocs.length > 0) {
+          fields.push(["Frequents", charLocs.map(l => l.name).join(", ")]);
         }
         if (c.height) fields.push(["Height", c.height]);
         if (c.build) fields.push(["Build", c.build]);
@@ -1456,6 +1778,12 @@ const ContextEngine = {
           if (r.conflictSource) line += ` | Conflict: ${_truncateAtBoundary(r.conflictSource, 200)}`;
           if (r.sharedSecrets) line += ` | Shared secrets: ${_truncateAtBoundary(r.sharedSecrets, 200)}`;
           if (r.taboos) line += ` | Taboos: ${r.taboos}`;
+          // Auto-derived: shared locations and orgs between these two characters
+          const _sharedLocs = (project.worldBuilding || []).filter(w =>
+            (w.category === "Location" || !w.category) && Array.isArray(w.frequentCharacters) &&
+            w.frequentCharacters.includes(r.char1) && w.frequentCharacters.includes(r.char2) && w.name
+          ).map(w => w.name);
+          if (_sharedLocs.length) line += ` | Shared locations: ${_sharedLocs.join(", ")}`;
           // B10: Progression arc
           if (r.progression) line += ` | Arc: ${r.progression}`;
           // Key scenes relevant to current chapter
@@ -1955,6 +2283,9 @@ const ContextEngine = {
             });
             filledFields.forEach(f => parts.push(f));
             if (emptyFields.length) parts.push(`  [Empty fields needing content: ${emptyFields.join(", ")}]`);
+            // ─── CROSS-REFERENCE DATA for this character ───
+            const crossRefCtx = _buildCrossRefContext(project, editingEntity);
+            if (crossRefCtx) parts.push(`\n<cross_references>\n${crossRefCtx}\n</cross_references>`);
             parts.push(`</currently_editing_character>`);
           }
           // Other characters with personality for consistency checking
@@ -2059,21 +2390,19 @@ const ContextEngine = {
         if (project.characters?.length) {
           parts.push(`\n<character_profiles>`);
           project.characters.forEach(c => {
+            const cr = _deriveCrossRefs(project, c.id);
             let line = `  • ${c.name} (${c.role})`;
-            if (c.occupation) line += ` — ${c.occupation}`;
+            if (cr.derivedOccupation) line += ` — ${cr.derivedOccupation}`;
+            else if (c.occupation) line += ` — ${c.occupation}`;
             if (c.personality) line += `\n    Personality: ${_truncateAtBoundary(c.personality, 1000)}`;
-            if (c.allegiances) line += `\n    Allegiances: ${c.allegiances}`;
+            if (cr.derivedAllegiances) line += `\n    Allegiances: ${cr.derivedAllegiances}`;
+            else if (c.allegiances) line += `\n    Allegiances: ${c.allegiances}`;
             if (c.skills) line += `\n    Skills: ${c.skills}`;
             if (c.arc) line += `\n    Arc: ${_truncateAtBoundary(c.arc, 1000)}`;
-            // Show which orgs they already belong to
-            const orgPositions = [];
-            (project.worldBuilding || []).forEach(w => {
-              if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
-              w.orgHierarchy.forEach(pos => {
-                if (pos.charId === c.id) orgPositions.push(`${pos.name} in ${w.name}`);
-              });
-            });
-            if (orgPositions.length > 0) line += `\n    Org positions: ${orgPositions.join("; ")}`;
+            if (c.status && c.status !== "alive") line += `\n    Status: ${c.status}`;
+            if (cr.charOrgPositions?.length) line += `\n    Org positions: ${cr.charOrgPositions.map(o => `${o.position} in ${o.orgName}${o.reportsTo ? ` (reports to ${o.reportsTo})` : ""}${o.subordinates.length ? ` (manages: ${o.subordinates.map(s => s.name).join(", ")})` : ""}`).join("; ")}`;
+            if (cr.charLocations?.length) line += `\n    Locations: ${cr.charLocations.map(l => l.name).join(", ")}`;
+            if (cr.charRelationships?.length) line += `\n    Key relationships: ${cr.charRelationships.slice(0, 5).map(r => `${r.otherName} (${r.category || "romantic"}, ${r.status})`).join("; ")}`;
             parts.push(line);
           });
           parts.push(`</character_profiles>`);
@@ -2118,17 +2447,49 @@ const ContextEngine = {
               }).filter(Boolean);
               if (charDescs.length) line += ` | Characters: ${charDescs.join(", ")}`;
             }
+            // Auto-derived cross-references for this plot entry
+            const plotCR = _buildPlotCrossRefContext(project, pl.id);
+            if (plotCR) line += `\n  [Scene context: ${plotCR.replace(/\n/g, "; ")}]`;
             parts.push(line);
           });
           parts.push(`</existing_plot>`);
         }
         if (project.characters?.length) {
-          parts.push(`\nCharacters: ${project.characters.map(c => `${c.name} (${c.role})`).join(", ")}`);
+          parts.push(`\nCharacters: ${project.characters.map(c => {
+            const cr = _deriveCrossRefs(project, c.id);
+            let desc = `${c.name} (${c.role}`;
+            if (cr.derivedOccupation) desc += `, ${cr.derivedOccupation}`;
+            else if (c.occupation) desc += `, ${c.occupation}`;
+            desc += `)`;
+            if (c.status && c.status !== "alive") desc += ` [${c.status}]`;
+            if (cr.charLocations?.length) desc += ` [at: ${cr.charLocations.map(l => l.name).join(", ")}]`;
+            return desc;
+          }).join("; ")}`);
         }
-        // Include locations for plot planning
+        // Include locations with atmosphere/dangers for plot planning
         const plotLocations = (project.worldBuilding || []).filter(w => w.name && (w.category === "Location" || !w.category));
         if (plotLocations.length > 0) {
-          parts.push(`\nAvailable locations: ${plotLocations.map(l => l.name).join(", ")}`);
+          parts.push(`\nAvailable locations:`);
+          plotLocations.forEach(l => {
+            let line = `  📍 ${l.name}`;
+            if (l.atmosphere) line += ` — ${l.atmosphere}`;
+            if (l.dangers) line += ` | Dangers: ${l.dangers}`;
+            const freqNames = (l.frequentCharacters || []).map(cid => { const ch = (project.characters || []).find(c => c.id === cid); return ch?.name; }).filter(Boolean);
+            if (freqNames.length) line += ` | Characters: ${freqNames.join(", ")}`;
+            parts.push(line);
+          });
+        }
+        // Include key relationship tensions for plot planning
+        if (project.relationships?.length) {
+          const highTension = project.relationships.filter(r => r.tension === "high" || r.tension === "explosive");
+          if (highTension.length > 0) {
+            parts.push(`\nHigh-tension relationships:`);
+            highTension.forEach(r => {
+              const c1 = _resolveCharName(r.char1, project.characters);
+              const c2 = _resolveCharName(r.char2, project.characters);
+              parts.push(`  ⚡ ${c1} ↔ ${c2}: ${r.tension} (${r.category || "romantic"})${r.conflictSource ? ` — conflict: ${r.conflictSource}` : ""}`);
+            });
+          }
         }
         // Include organizations for plot planning
         const plotOrgs = (project.worldBuilding || []).filter(w => w.name && w.category === "Organization");
@@ -2176,10 +2537,18 @@ const ContextEngine = {
           parts.push(`\nCharacters:`);
           project.characters.forEach(c => {
             let line = `  • ${c.name} (${c.role}`;
-            if (c.occupation) line += `, ${c.occupation}`;
+            // Derive occupation from org positions
+            const crossRef = _deriveCrossRefs(project, c.id);
+            if (crossRef.derivedOccupation) line += `, ${crossRef.derivedOccupation}`;
+            else if (c.occupation) line += `, ${c.occupation}`;
             line += `)`;
             if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
-            if (c.allegiances) line += ` [Allegiance: ${c.allegiances}]`;
+            if (crossRef.derivedAllegiances) line += ` [Allegiance: ${crossRef.derivedAllegiances}]`;
+            else if (c.allegiances) line += ` [Allegiance: ${c.allegiances}]`;
+            // Location context
+            if (crossRef.charLocations?.length) line += ` [At: ${crossRef.charLocations.map(l => l.name).join(", ")}]`;
+            // Status
+            if (c.status && c.status !== "alive") line += ` [${c.status.toUpperCase()}]`;
             parts.push(line);
           });
         }
@@ -2209,6 +2578,9 @@ const ContextEngine = {
             if (r.char2Perspective) line += ` | ${c2Name}'s view: ${r.char2Perspective}`;
             if (r.evolutionTimeline) line += ` | Timeline: ${r.evolutionTimeline}`;
             if (r.notes) line += ` | Notes: ${r.notes}`;
+            // Auto-derived cross-references
+            const relCR = _buildRelCrossRefContext(project, r.id);
+            if (relCR) line += ` | Cross-refs: ${relCR.replace(/\n/g, "; ")}`;
             parts.push(line);
           });
           parts.push(`</existing_relationships>`);
@@ -3312,95 +3684,175 @@ const CleanViewModal = memo(({ project, startChapter, onClose }) => {
 });
 
 // ─── RELATIONSHIP WEB MODAL ───
-function computeWebLayout(characters, relationships) {
+function computeWebLayout(characters, relationships, worldBuilding) {
   const chars = characters || [];
   const rels = relationships || [];
+  const worlds = worldBuilding || [];
   if (!chars.length) return [];
-  const CX = 400, CY = 400, RADIUS = 220;
-  // Build adjacency for smarter initial placement
-  const adj = {};
-  chars.forEach(c => { if (c.id) adj[c.id] = []; });
-  rels.forEach(r => {
-    if (r.char1 && r.char2 && adj[r.char1] && adj[r.char2]) {
-      adj[r.char1].push(r.char2);
-      adj[r.char2].push(r.char1);
-    }
+  const CX = 500, CY = 500, CANVAS = 1000;
+
+  // ─── Step 1: Determine location & org membership for each character ───
+  const charLocMap = {}; // charId → [locationId, ...]
+  const locCharMap = {}; // locationId → [charId, ...]
+  const charOrgMap = {}; // charId → [{ orgId, parentCharId, depth }]
+  const locations = worlds.filter(w => (w.category === "Location" || !w.category) && Array.isArray(w.frequentCharacters) && w.frequentCharacters.length > 0 && w.name);
+  const orgs = worlds.filter(w => w.category === "Organization" && Array.isArray(w.orgHierarchy) && w.orgHierarchy.length > 0);
+
+  locations.forEach(loc => {
+    locCharMap[loc.id] = [];
+    loc.frequentCharacters.forEach(cid => {
+      if (!charLocMap[cid]) charLocMap[cid] = [];
+      charLocMap[cid].push(loc.id);
+      locCharMap[loc.id].push(cid);
+    });
   });
-  // Sort by connectivity for better initial layout
-  const sortedChars = [...chars].sort((a, b) => (adj[b.id]?.length || 0) - (adj[a.id]?.length || 0));
-  let nodes = sortedChars.map((c, i) => {
-    const angle = (i / chars.length) * Math.PI * 2 - Math.PI / 2;
-    // Place highly connected nodes closer to center
-    const connRatio = Math.max(0.4, 1 - (adj[c.id]?.length || 0) / Math.max(chars.length, 1));
-    return {
-      id: c.id,
-      x: CX + Math.cos(angle) * RADIUS * connRatio + (Math.random() - 0.5) * 30,
-      y: CY + Math.sin(angle) * RADIUS * connRatio + (Math.random() - 0.5) * 30,
-      vx: 0, vy: 0,
-    };
+
+  orgs.forEach(org => {
+    const hier = org.orgHierarchy;
+    hier.forEach(pos => {
+      if (!pos.charId) return;
+      // Compute depth in org tree
+      let depth = 0, parentCheck = pos.parentId;
+      const visited = new Set();
+      while (parentCheck && depth < 10) {
+        if (visited.has(parentCheck)) break;
+        visited.add(parentCheck);
+        const parent = hier.find(p => p.id === parentCheck);
+        if (parent) { depth++; parentCheck = parent.parentId; } else break;
+      }
+      const parentPos = pos.parentId ? hier.find(p => p.id === pos.parentId) : null;
+      if (!charOrgMap[pos.charId]) charOrgMap[pos.charId] = [];
+      charOrgMap[pos.charId].push({ orgId: org.id, parentCharId: parentPos?.charId || null, depth, posName: pos.name });
+    });
   });
+
+  // ─── Step 2: Build location zone centers (distribute around canvas) ───
+  const locZoneCenters = {};
+  const locIds = locations.map(l => l.id);
+  if (locIds.length > 0) {
+    const zoneRadius = Math.min(350, 200 + locIds.length * 20);
+    locIds.forEach((lid, i) => {
+      const angle = (i / locIds.length) * Math.PI * 2 - Math.PI / 2;
+      locZoneCenters[lid] = {
+        x: CX + Math.cos(angle) * zoneRadius * 0.7,
+        y: CY + Math.sin(angle) * zoneRadius * 0.7,
+      };
+    });
+  }
+
+  // ─── Step 3: Assign initial positions based on location/org context ───
+  const ROLE_LAYER = { protagonist: 0.15, antagonist: 0.25, "love interest": 0.2, deuteragonist: 0.3, villain: 0.35, "anti-hero": 0.35, mentor: 0.45, sidekick: 0.4, foil: 0.5, confidant: 0.45, supporting: 0.6, minor: 0.75 };
+
+  const placed = new Set();
+  let nodes = [];
   const nodeMap = {};
-  nodes.forEach(n => nodeMap[n.id] = n);
+
+  // Place characters with location assignments first — cluster them near their location center
+  chars.forEach(c => {
+    if (!c.id) return;
+    const locs = charLocMap[c.id] || [];
+    const orgInfo = charOrgMap[c.id] || [];
+    let x, y;
+
+    if (locs.length > 0) {
+      // Average the zone centers of all assigned locations
+      let sx = 0, sy = 0;
+      locs.forEach(lid => { const zc = locZoneCenters[lid]; if (zc) { sx += zc.x; sy += zc.y; } });
+      x = sx / locs.length;
+      y = sy / locs.length;
+      // Spread within the zone based on role importance
+      const roleRadius = 40 + (ROLE_LAYER[c.role] || 0.5) * 60;
+      const memberIdx = (locCharMap[locs[0]] || []).indexOf(c.id);
+      const memberCount = (locCharMap[locs[0]] || []).length;
+      const localAngle = memberCount > 1 ? (memberIdx / memberCount) * Math.PI * 2 : 0;
+      x += Math.cos(localAngle) * roleRadius * 0.4;
+      y += Math.sin(localAngle) * roleRadius * 0.4;
+    } else if (orgInfo.length > 0) {
+      // Place by org hierarchy — higher ranks closer to center, subordinates spread outward
+      const primary = orgInfo[0];
+      const baseAngle = (orgs.findIndex(o => o.id === primary.orgId) / Math.max(orgs.length, 1)) * Math.PI * 2;
+      const depthRadius = 120 + primary.depth * 60;
+      x = CX + Math.cos(baseAngle) * depthRadius * 0.5;
+      y = CY + Math.sin(baseAngle) * depthRadius * 0.5;
+    } else {
+      // Unassigned characters — place by role importance in rings around center
+      const roleFactor = ROLE_LAYER[c.role] || 0.65;
+      const angle = (chars.indexOf(c) / chars.length) * Math.PI * 2 - Math.PI / 2;
+      const r = 120 + roleFactor * 320;
+      x = CX + Math.cos(angle) * r;
+      y = CY + Math.sin(angle) * r;
+    }
+
+    const node = { id: c.id, x, y, vx: 0, vy: 0 };
+    nodes.push(node);
+    nodeMap[c.id] = node;
+    placed.add(c.id);
+  });
+
+  // ─── Step 4: Apply org hierarchy vertical bias (superiors above subordinates) ───
+  orgs.forEach(org => {
+    const hier = org.orgHierarchy;
+    hier.forEach(pos => {
+      if (!pos.charId || !pos.parentId) return;
+      const parent = hier.find(p => p.id === pos.parentId);
+      if (!parent?.charId) return;
+      const nSub = nodeMap[pos.charId];
+      const nSup = nodeMap[parent.charId];
+      if (nSub && nSup) {
+        // Nudge subordinate below superior
+        if (nSub.y <= nSup.y) nSub.y = nSup.y + 100;
+        // Keep horizontally close
+        const dx = nSub.x - nSup.x;
+        if (Math.abs(dx) > 160) nSub.x = nSup.x + Math.sign(dx) * 100;
+      }
+    });
+  });
+
+  // ─── Step 5: Force-directed refinement (respecting initial structure) ───
   const edgeSet = new Set();
   rels.forEach(r => { if (r.char1 && r.char2) edgeSet.add([r.char1, r.char2].sort().join("::")); });
   const edges = [...edgeSet].map(k => { const [a, b] = k.split("::"); return [a, b]; });
   const n = nodes.length;
-  // Adaptive iterations — fewer for large graphs, use Barnes-Hut-like optimization for 20+
-  const ITERS = n > 30 ? 40 : n > 15 ? 55 : n > 8 ? 80 : 120;
-  const SPRING_K = 0.025, REPULSION = 6000, TARGET_DIST = 170, CENTER_PULL = 0.008, DAMPING = 0.82;
+  const ITERS = n > 30 ? 30 : n > 15 ? 45 : 60;
+  const SPRING_K = 0.018, REPULSION = 8000, TARGET_DIST = 200, DAMPING = 0.78;
+
   for (let iter = 0; iter < ITERS; iter++) {
     const temp = 1 - iter / ITERS;
-    // For large graphs, use grid-based approximation to avoid O(n²)
-    if (n > 25) {
-      const CELL = 80;
-      const grid = {};
-      for (let i = 0; i < n; i++) {
-        const ni = nodes[i];
-        ni.vx = (CX - ni.x) * CENTER_PULL;
-        ni.vy = (CY - ni.y) * CENTER_PULL;
-        const cx = Math.floor(ni.x / CELL), cy = Math.floor(ni.y / CELL);
-        const key = `${cx},${cy}`;
-        if (!grid[key]) grid[key] = [];
-        grid[key].push(i);
-      }
-      for (let i = 0; i < n; i++) {
-        const ni = nodes[i];
-        const cx = Math.floor(ni.x / CELL), cy = Math.floor(ni.y / CELL);
-        for (let dx = -2; dx <= 2; dx++) {
-          for (let dy = -2; dy <= 2; dy++) {
-            const cell = grid[`${cx+dx},${cy+dy}`];
-            if (!cell) continue;
-            for (const j of cell) {
-              if (j <= i) continue;
-              const nj = nodes[j];
-              const ddx = ni.x - nj.x, ddy = ni.y - nj.y;
-              const distSq = ddx * ddx + ddy * ddy || 1;
-              const f = REPULSION / distSq;
-              const d = Math.sqrt(distSq);
-              const fx = (ddx / d) * f, fy = (ddy / d) * f;
-              ni.vx += fx; ni.vy += fy;
-              nj.vx -= fx; nj.vy -= fy;
-            }
-          }
+    // Location gravity — pull characters toward their assigned zones
+    const LOC_GRAVITY = 0.015 * (0.3 + temp * 0.7);
+    for (let i = 0; i < n; i++) {
+      const ni = nodes[i];
+      ni.vx = 0; ni.vy = 0;
+      // Gravity toward location center
+      const locs = charLocMap[ni.id] || [];
+      if (locs.length > 0) {
+        let gx = 0, gy = 0, cnt = 0;
+        locs.forEach(lid => { const zc = locZoneCenters[lid]; if (zc) { gx += zc.x; gy += zc.y; cnt++; } });
+        if (cnt > 0) {
+          gx /= cnt; gy /= cnt;
+          ni.vx += (gx - ni.x) * LOC_GRAVITY;
+          ni.vy += (gy - ni.y) * LOC_GRAVITY;
         }
-      }
-    } else {
-      for (let i = 0; i < n; i++) {
-        const ni = nodes[i];
-        ni.vx = (CX - ni.x) * CENTER_PULL;
-        ni.vy = (CY - ni.y) * CENTER_PULL;
-        for (let j = i + 1; j < n; j++) {
-          const nj = nodes[j];
-          const dx = ni.x - nj.x, dy = ni.y - nj.y;
-          const distSq = dx * dx + dy * dy || 1;
-          const f = REPULSION / distSq;
-          const d = Math.sqrt(distSq);
-          const fx = (dx / d) * f, fy = (dy / d) * f;
-          ni.vx += fx; ni.vy += fy;
-          nj.vx -= fx; nj.vy -= fy;
-        }
+      } else {
+        // Light center pull for unassigned characters
+        ni.vx += (CX - ni.x) * 0.003;
+        ni.vy += (CY - ni.y) * 0.003;
       }
     }
+    // Repulsion
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const ni = nodes[i], nj = nodes[j];
+        const dx = ni.x - nj.x, dy = ni.y - nj.y;
+        const distSq = dx * dx + dy * dy || 1;
+        const f = REPULSION / distSq;
+        const d = Math.sqrt(distSq);
+        const fx = (dx / d) * f, fy = (dy / d) * f;
+        ni.vx += fx; ni.vy += fy;
+        nj.vx -= fx; nj.vy -= fy;
+      }
+    }
+    // Spring attraction for connected characters
     for (const [a, b] of edges) {
       const na = nodeMap[a], nb = nodeMap[b];
       if (!na || !nb) continue;
@@ -3410,20 +3862,30 @@ function computeWebLayout(characters, relationships) {
       const fx = (dx / d) * f, fy = (dy / d) * f;
       na.vx += fx; na.vy += fy; nb.vx -= fx; nb.vy -= fy;
     }
-    const mult = DAMPING * (0.5 + temp * 0.5);
+    // Org hierarchy vertical constraint — gentle pull to keep subordinates below superiors
+    orgs.forEach(org => {
+      org.orgHierarchy.forEach(pos => {
+        if (!pos.charId || !pos.parentId) return;
+        const parent = org.orgHierarchy.find(p => p.id === pos.parentId);
+        if (!parent?.charId) return;
+        const nSub = nodeMap[pos.charId], nSup = nodeMap[parent.charId];
+        if (nSub && nSup && nSub.y < nSup.y + 50) {
+          nSub.vy += 0.8 * temp;
+          nSup.vy -= 0.4 * temp;
+        }
+      });
+    });
+    const mult = DAMPING * (0.4 + temp * 0.6);
     for (const nd of nodes) {
       nd.x += nd.vx * mult; nd.y += nd.vy * mult;
-      nd.x = Math.max(70, Math.min(730, nd.x)); nd.y = Math.max(70, Math.min(730, nd.y));
+      nd.x = Math.max(60, Math.min(940, nd.x)); nd.y = Math.max(60, Math.min(940, nd.y));
     }
   }
-  const connected = new Set(); edges.forEach(([a, b]) => { connected.add(a); connected.add(b); });
-  let isoIdx = 0; const isoCount = nodes.filter(nd => !connected.has(nd.id)).length;
-  nodes.forEach(nd => { if (!connected.has(nd.id)) { const angle = (isoIdx / Math.max(isoCount, 1)) * Math.PI * 2 - Math.PI / 2; nd.x = CX + Math.cos(angle) * (RADIUS + 90); nd.y = CY + Math.sin(angle) * (RADIUS + 90); isoIdx++; } });
   return nodes;
 }
 
 const RelationshipWebModal = memo(({ characters, relationships, onClose, povCharId, worldBuilding }) => {
-  const [nodes, setNodes] = useState(() => computeWebLayout(characters, relationships));
+  const [nodes, setNodes] = useState(() => computeWebLayout(characters, relationships, worldBuilding));
   const [selectedNode, setSelectedNode] = useState(null);
   const [hoveredInfo, setHoveredInfo] = useState(null); // {type: 'node'|'rel', id, x, y}
   const [filterCategory, setFilterCategory] = useState("all");
@@ -3438,7 +3900,7 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
   const nodesRef = useRef(nodes);
   nodesRef.current = nodes;
   const rafRef = useRef(null);
-  const N_R = 28; const CANVAS = 800;
+  const N_R = 24; const CANVAS = 1000;
 
   useEffect(() => { const h = e => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
   useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); }, []);
@@ -3650,7 +4112,7 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
   }, []);
 
   const resetView = useCallback(() => {
-    setNodes(computeWebLayout(chars, rels));
+    setNodes(computeWebLayout(chars, rels, worlds));
     panRef.current = { x: 0, y: 0 };
     zoomRef.current = 1;
     setSelectedNode(null); setHoveredInfo(null);
@@ -6017,6 +6479,507 @@ const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
 });
 
 
+// ─── CROSS-REFERENCE SYNC ENGINE ───
+// Compares old project state with new, auto-propagates changes to prevent
+// clashes, misinformation, or stale data across tabs.
+const _syncCrossRefs = (oldP, newP) => {
+  let p = { ...newP };
+  const oldChars = oldP.characters || [];
+  let newChars = [...(p.characters || [])];
+  const oldRels = oldP.relationships || [];
+  let newRels = [...(p.relationships || [])];
+  const oldWorlds = oldP.worldBuilding || [];
+  let newWorlds = [...(p.worldBuilding || [])];
+  let newPlots = [...(p.plotOutline || [])];
+  let newChapters = [...(p.chapters || [])];
+  let dirty = false;
+
+  // ═══════════════════════════════════════════════
+  // A. CHARACTER CHANGES → cascade to all other tabs
+  // ═══════════════════════════════════════════════
+  newChars.forEach((nc, ci) => {
+    const oc = oldChars.find(c => c.id === nc.id);
+    if (!oc) return;
+
+    // A1: Status → dead: auto-set statusChangedChapter
+    if (oc.status !== "dead" && nc.status === "dead" && !nc.statusChangedChapter) {
+      newChars[ci] = { ...newChars[ci], statusChangedChapter: newChapters.length || 1 };
+      dirty = true;
+    }
+    // A2: Status → alive: clear statusChangedChapter
+    if (oc.status === "dead" && nc.status === "alive") {
+      newChars[ci] = { ...newChars[ci], statusChangedChapter: 0 };
+      dirty = true;
+    }
+    // A3: Status → dead: mark all romantic relationships as "exes" or "estranged"
+    if (oc.status !== "dead" && nc.status === "dead") {
+      newRels = newRels.map(r => {
+        if (r.char1 !== nc.id && r.char2 !== nc.id) return r;
+        if (r.category === "romantic" && r.status !== "exes" && r.status !== "estranged") {
+          return { ...r, notes: `${r.notes ? r.notes + " | " : ""}[Auto: ${nc.name || "character"} died — relationship ended]` };
+        }
+        return r;
+      });
+      dirty = true;
+    }
+    // A4: Gender changed → auto-update pronouns if they were matching defaults
+    if (oc.gender !== nc.gender && nc.gender) {
+      const defaultPronouns = { "Female": "she/her", "Male": "he/him", "Non-binary": "they/them" };
+      const oldDefault = defaultPronouns[oc.gender];
+      if (nc.pronouns === oldDefault || !nc.pronouns) {
+        const newDefault = defaultPronouns[nc.gender];
+        if (newDefault) { newChars[ci] = { ...newChars[ci], pronouns: newDefault }; dirty = true; }
+      }
+    }
+    // A5: Role → protagonist: auto-append to project POV if empty
+    if (oc.role !== "protagonist" && nc.role === "protagonist" && nc.name && p.pov && !p.pov.includes(nc.name)) {
+      const hasPovChar = /[-—:]\s*\S/.test(p.pov);
+      if (!hasPovChar) { p = { ...p, pov: `${p.pov} - ${nc.name}` }; dirty = true; }
+    }
+    // A6: Role changed from protagonist → clear from POV string
+    if (oc.role === "protagonist" && nc.role !== "protagonist" && oc.name && p.pov?.includes(oc.name)) {
+      p = { ...p, pov: p.pov.replace(new RegExp(`\\s*[-—:]\\s*${oc.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, "i"), "") };
+      dirty = true;
+    }
+    // A7: firstAppearanceChapter set → add to plot entry for that chapter
+    if (oc.firstAppearanceChapter !== nc.firstAppearanceChapter && nc.firstAppearanceChapter > 0) {
+      const targetPlot = newPlots.find(pl => (pl.chapter || 0) === nc.firstAppearanceChapter);
+      if (targetPlot && Array.isArray(targetPlot.characters) && !targetPlot.characters.includes(nc.id)) {
+        newPlots = newPlots.map(pl => pl.id === targetPlot.id ? { ...pl, characters: [...pl.characters, nc.id] } : pl);
+        dirty = true;
+      }
+    }
+    // A8: Name changed → update legacy name-based relationship refs
+    if (oc.name !== nc.name && oc.name) {
+      newRels = newRels.map(r => {
+        let upd = { ...r };
+        if (r.char1 === oc.name) { upd.char1 = nc.id; return upd; }
+        if (r.char2 === oc.name) { upd.char2 = nc.id; return upd; }
+        return r;
+      });
+      // Update chapter POV strings that reference old name
+      newChapters = newChapters.map(ch => {
+        if (ch.pov && ch.pov.includes(oc.name)) {
+          return { ...ch, pov: ch.pov.replace(oc.name, nc.name) };
+        }
+        return ch;
+      });
+      // Update project POV
+      if (p.pov && p.pov.includes(oc.name)) {
+        p = { ...p, pov: p.pov.replace(oc.name, nc.name) };
+      }
+      dirty = true;
+    }
+    // A9: Backstory reveal chapter set → ensure character appears by that chapter
+    if (nc.backstoryRevealChapter > 0 && (!nc.firstAppearanceChapter || nc.firstAppearanceChapter > nc.backstoryRevealChapter)) {
+      if (oc.backstoryRevealChapter !== nc.backstoryRevealChapter) {
+        // Backstory can't be revealed before character appears — auto-set first appearance
+        if (!nc.firstAppearanceChapter) {
+          newChars[ci] = { ...newChars[ci], firstAppearanceChapter: nc.backstoryRevealChapter };
+          dirty = true;
+        }
+      }
+    }
+    // A10: Secret reveal chapter < first appearance → fix
+    if (nc.secretRevealChapter > 0 && nc.firstAppearanceChapter > 0 && nc.secretRevealChapter < nc.firstAppearanceChapter) {
+      if (oc.secretRevealChapter !== nc.secretRevealChapter) {
+        newChars[ci] = { ...newChars[ci], secretRevealChapter: nc.firstAppearanceChapter };
+        dirty = true;
+      }
+    }
+  });
+
+  // ═══════════════════════════════════════════════
+  // B. ORG HIERARCHY CHANGES → cascade occupation, allegiances, relationships
+  // ═══════════════════════════════════════════════
+  newWorlds.forEach(nw => {
+    if (nw.category !== "Organization" || !Array.isArray(nw.orgHierarchy)) return;
+    const ow = oldWorlds.find(w => w.id === nw.id);
+    const oldHier = ow?.orgHierarchy || [];
+
+    nw.orgHierarchy.forEach(pos => {
+      if (!pos.charId) return;
+      const oldPos = oldHier.find(op => op.id === pos.id);
+      const charIdx = newChars.findIndex(c => c.id === pos.charId);
+      if (charIdx < 0) return;
+      const char = newChars[charIdx];
+
+      // B1: New assignment → fill occupation if empty
+      if ((!oldPos || oldPos.charId !== pos.charId) && pos.name && !char.occupation) {
+        newChars[charIdx] = { ...newChars[charIdx], occupation: `${pos.name} (${nw.name})` };
+        dirty = true;
+      }
+      // B2: New assignment → add to orgMembers
+      if (!oldPos || oldPos.charId !== pos.charId) {
+        const members = Array.isArray(nw.orgMembers) ? [...nw.orgMembers] : [];
+        if (!members.includes(pos.charId)) {
+          newWorlds = newWorlds.map(w => w.id === nw.id ? { ...w, orgMembers: [...members, pos.charId] } : w);
+          dirty = true;
+        }
+      }
+      // B3: New assignment → append allegiances
+      if ((!oldPos || oldPos.charId !== pos.charId) && nw.name && !char.allegiances?.includes(nw.name)) {
+        newChars[charIdx] = { ...newChars[charIdx], allegiances: char.allegiances ? `${char.allegiances}, ${nw.name}` : nw.name };
+        dirty = true;
+      }
+      // B4: Position title changed → update occupation if it referenced old title
+      if (oldPos && oldPos.name !== pos.name && oldPos.charId === pos.charId && pos.name) {
+        if (char.occupation?.includes(oldPos.name)) {
+          newChars[charIdx] = { ...newChars[charIdx], occupation: char.occupation.replace(oldPos.name, pos.name) };
+          dirty = true;
+        }
+      }
+      // B5-B6: Two chars in same org → auto-create professional relationship
+      nw.orgHierarchy.forEach(otherPos => {
+        if (!otherPos.charId || otherPos.charId === pos.charId) return;
+        const existingRel = newRels.find(r =>
+          (r.char1 === pos.charId && r.char2 === otherPos.charId) || (r.char2 === pos.charId && r.char1 === otherPos.charId)
+        );
+        if (!existingRel) {
+          const wasAlreadyPaired = oldHier.some(op => op.charId === pos.charId) && oldHier.some(op => op.charId === otherPos.charId);
+          if (!wasAlreadyPaired) {
+            const isSubordinate = pos.parentId && nw.orgHierarchy.find(pp => pp.id === pos.parentId)?.charId === otherPos.charId;
+            const isSuperior = otherPos.parentId && nw.orgHierarchy.find(pp => pp.id === otherPos.parentId)?.charId === pos.charId;
+            newRels.push({
+              id: uid(), char1: pos.charId, char2: otherPos.charId,
+              dynamic: `Colleagues in ${nw.name}${isSubordinate ? ` (${pos.name} reports to ${otherPos.name})` : isSuperior ? ` (${otherPos.name} reports to ${pos.name})` : ""}`,
+              status: "acquaintances", tension: "none", tensionType: "neutral",
+              notes: `Auto-created: both serve in ${nw.name}`, char1Perspective: "", char2Perspective: "", progression: "",
+              meetsInChapter: 0, evolutionTimeline: "", category: "professional",
+              powerDynamic: isSubordinate ? "char2-dominant" : isSuperior ? "char1-dominant" : "equal",
+              sharedSecrets: "", keyScenes: "", chemistry: "", conflictSource: "", trustLevel: "medium", isPublic: true, taboos: "", terms: "",
+            });
+            dirty = true;
+          }
+        }
+      });
+    });
+
+    // B7: Character removed from position → clear occupation if it matched
+    oldHier.forEach(oldPos => {
+      if (!oldPos.charId) return;
+      const stillIn = nw.orgHierarchy.some(np => np.charId === oldPos.charId);
+      if (stillIn) return;
+      const ci = newChars.findIndex(c => c.id === oldPos.charId);
+      if (ci >= 0 && newChars[ci].occupation?.includes(nw.name)) {
+        const otherOrgs = newWorlds.filter(w => w.id !== nw.id && w.category === "Organization" && Array.isArray(w.orgHierarchy) && w.orgHierarchy.some(pp => pp.charId === oldPos.charId));
+        if (otherOrgs.length === 0) { newChars[ci] = { ...newChars[ci], occupation: "" }; dirty = true; }
+      }
+    });
+
+    // B8: Org name changed → update occupation/allegiances referencing old name
+    if (ow && ow.name !== nw.name && ow.name && nw.name) {
+      newChars = newChars.map(c => {
+        let updated = { ...c };
+        let changed = false;
+        if (c.occupation?.includes(ow.name)) { updated.occupation = c.occupation.replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name); changed = true; }
+        if (c.allegiances?.includes(ow.name)) { updated.allegiances = c.allegiances.replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name); changed = true; }
+        return changed ? updated : c;
+      });
+      // Update relationship notes that reference old org name
+      newRels = newRels.map(r => {
+        if (r.dynamic?.includes(ow.name) || r.notes?.includes(ow.name)) {
+          return { ...r, dynamic: (r.dynamic || "").replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name), notes: (r.notes || "").replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name) };
+        }
+        return r;
+      });
+      dirty = true;
+    }
+  });
+
+  // ═══════════════════════════════════════════════
+  // C. RELATIONSHIP CHANGES → cascade to characters and plot
+  // ═══════════════════════════════════════════════
+  newRels.forEach((nr, ri) => {
+    const or = oldRels.find(r => r.id === nr.id);
+    if (!or) return;
+
+    // C1: Status → enemies: auto-set tensionType hostile, bump tension
+    if (or.status !== "enemies" && nr.status === "enemies") {
+      const upd = { ...newRels[ri] };
+      if (nr.tensionType === "romantic" || nr.tensionType === "friendly") upd.tensionType = "hostile";
+      if (nr.tension === "none" || nr.tension === "low") upd.tension = "high";
+      newRels[ri] = upd; dirty = true;
+    }
+    // C2: Status → lovers/committed: auto-set category romantic
+    if ((nr.status === "lovers" || nr.status === "committed") && or.status !== nr.status && nr.category !== "romantic") {
+      newRels[ri] = { ...newRels[ri], category: "romantic" }; dirty = true;
+    }
+    // C3: Category → family: fix tensionType from romantic
+    if (or.category !== "family" && nr.category === "family" && nr.tensionType === "romantic") {
+      newRels[ri] = { ...newRels[ri], tensionType: "protective" }; dirty = true;
+    }
+    // C4: Category → professional: set tensionType neutral if romantic
+    if (or.category !== "professional" && nr.category === "professional" && nr.tensionType === "romantic") {
+      newRels[ri] = { ...newRels[ri], tensionType: "neutral" }; dirty = true;
+    }
+    // C5: Trust → none + category romantic: auto-note "trust broken"
+    if (or.trustLevel !== "none" && nr.trustLevel === "none" && nr.category === "romantic") {
+      if (!nr.notes?.includes("trust broken")) {
+        newRels[ri] = { ...newRels[ri], notes: `${nr.notes ? nr.notes + " | " : ""}Trust broken` }; dirty = true;
+      }
+    }
+    // C6: Status → exes: ensure tensionType isn't still "romantic"
+    if (or.status !== "exes" && nr.status === "exes" && nr.tensionType === "romantic") {
+      newRels[ri] = { ...newRels[ri], tensionType: "suspenseful" }; dirty = true;
+    }
+    // C7: Status → strangers: reset tension to none
+    if (or.status !== "strangers" && nr.status === "strangers") {
+      newRels[ri] = { ...newRels[ri], tension: "none", trustLevel: "none" }; dirty = true;
+    }
+    // C8: Tension → explosive: auto-bump isPublic to false if romantic/forbidden
+    if (or.tension !== "explosive" && nr.tension === "explosive" && (nr.status === "forbidden" || nr.status === "enemies-to-lovers")) {
+      if (nr.isPublic !== false) { newRels[ri] = { ...newRels[ri], isPublic: false }; dirty = true; }
+    }
+    // C9: PowerDynamic changed → update dynamic text hint
+    if (or.powerDynamic !== nr.powerDynamic && nr.powerDynamic !== "equal" && !nr.dynamic) {
+      const c1 = newChars.find(c => c.id === nr.char1);
+      const c2 = newChars.find(c => c.id === nr.char2);
+      const dominant = nr.powerDynamic === "char1-dominant" ? c1?.name : nr.powerDynamic === "char2-dominant" ? c2?.name : null;
+      if (dominant) { newRels[ri] = { ...newRels[ri], dynamic: `${dominant} holds the power` }; dirty = true; }
+    }
+    // C10: meetsInChapter set → ensure both chars are in that plot chapter
+    if (or.meetsInChapter !== nr.meetsInChapter && nr.meetsInChapter > 0) {
+      const targetPlot = newPlots.find(pl => (pl.chapter || 0) === nr.meetsInChapter);
+      if (targetPlot) {
+        const plotChars = Array.isArray(targetPlot.characters) ? [...targetPlot.characters] : [];
+        let plotDirty = false;
+        [nr.char1, nr.char2].forEach(cid => {
+          if (cid && !plotChars.includes(cid)) { plotChars.push(cid); plotDirty = true; }
+        });
+        if (plotDirty) { newPlots = newPlots.map(pl => pl.id === targetPlot.id ? { ...pl, characters: plotChars } : pl); dirty = true; }
+      }
+    }
+  });
+
+  // ═══════════════════════════════════════════════
+  // D. PLOT CHANGES → cascade to chapters, characters, locations
+  // ═══════════════════════════════════════════════
+  newPlots.forEach(np => {
+    const op = (oldP.plotOutline || []).find(pl => pl.id === np.id);
+    if (!op) return;
+
+    // D1: Title changed → sync chapter title
+    if (op.title !== np.title && np.title) {
+      const chIdx = (np.chapter || 1) - 1;
+      if (newChapters[chIdx] && newChapters[chIdx].title !== np.title) {
+        newChapters[chIdx] = { ...newChapters[chIdx], title: np.title }; dirty = true;
+      }
+    }
+    // D2: POV character set → write to chapter pov
+    if (op.povCharacterId !== np.povCharacterId && np.povCharacterId) {
+      const chIdx = (np.chapter || 1) - 1;
+      const povChar = newChars.find(c => c.id === np.povCharacterId);
+      if (newChapters[chIdx] && povChar?.name) {
+        const style = np.pov || p.pov || "Third person limited";
+        newChapters[chIdx] = { ...newChapters[chIdx], pov: `${style} - ${povChar.name}` }; dirty = true;
+      }
+    }
+    // D3: POV style changed → update chapter pov if POV char is set
+    if (op.pov !== np.pov && np.pov && np.povCharacterId) {
+      const chIdx = (np.chapter || 1) - 1;
+      const povChar = newChars.find(c => c.id === np.povCharacterId);
+      if (newChapters[chIdx] && povChar?.name) {
+        newChapters[chIdx] = { ...newChapters[chIdx], pov: `${np.pov} - ${povChar.name}` }; dirty = true;
+      }
+    }
+    // D4: Scene type → intimate: bump romantic tensions to high
+    if (op.sceneType !== "intimate" && np.sceneType === "intimate" && Array.isArray(np.characters)) {
+      for (let i = 0; i < np.characters.length; i++) {
+        for (let j = i + 1; j < np.characters.length; j++) {
+          const ri = newRels.findIndex(r => ((r.char1 === np.characters[i] && r.char2 === np.characters[j]) || (r.char2 === np.characters[i] && r.char1 === np.characters[j])) && r.category === "romantic");
+          if (ri >= 0 && (newRels[ri].tension === "none" || newRels[ri].tension === "low")) {
+            newRels[ri] = { ...newRels[ri], tension: "high" }; dirty = true;
+          }
+        }
+      }
+    }
+    // D5: Scene type → action/tension: bump non-romantic tensions to medium
+    if ((np.sceneType === "action" || np.sceneType === "tension") && op.sceneType !== np.sceneType && Array.isArray(np.characters)) {
+      for (let i = 0; i < np.characters.length; i++) {
+        for (let j = i + 1; j < np.characters.length; j++) {
+          const ri = newRels.findIndex(r => ((r.char1 === np.characters[i] && r.char2 === np.characters[j]) || (r.char2 === np.characters[i] && r.char1 === np.characters[j])) && r.tension === "none");
+          if (ri >= 0) { newRels[ri] = { ...newRels[ri], tension: "medium" }; dirty = true; }
+        }
+      }
+    }
+    // D6: Location added → auto-add location's frequent characters
+    if (Array.isArray(np.locations) && op.locations) {
+      const newLocs = np.locations.filter(lid => !Array.isArray(op.locations) || !op.locations.includes(lid));
+      newLocs.forEach(lid => {
+        const loc = newWorlds.find(w => w.id === lid);
+        if (loc && Array.isArray(loc.frequentCharacters)) {
+          const plotChars = Array.isArray(np.characters) ? [...np.characters] : [];
+          let changed = false;
+          loc.frequentCharacters.forEach(cid => {
+            if (!plotChars.includes(cid) && newChars.some(c => c.id === cid)) { plotChars.push(cid); changed = true; }
+          });
+          if (changed) { newPlots = newPlots.map(pl => pl.id === np.id ? { ...pl, characters: plotChars } : pl); dirty = true; }
+        }
+      });
+    }
+    // D7: Chapter number changed → re-link chapter
+    if (op.chapter !== np.chapter && np.title) {
+      const newIdx = (np.chapter || 1) - 1;
+      if (newChapters[newIdx] && !newChapters[newIdx].linkedPlotId) {
+        newChapters[newIdx] = { ...newChapters[newIdx], linkedPlotId: np.id }; dirty = true;
+      }
+    }
+    // D8: Date set → propagate to chapter notes if empty
+    if (op.date !== np.date && np.date) {
+      const chIdx = (np.chapter || 1) - 1;
+      if (newChapters[chIdx] && !newChapters[chIdx].notes?.includes(np.date)) {
+        // Don't auto-write, just noted for AI context
+      }
+    }
+  });
+
+  // ═══════════════════════════════════════════════
+  // E. CHAPTER CHANGES → cascade to plot
+  // ═══════════════════════════════════════════════
+  newChapters.forEach((nc, ci) => {
+    const oc = (oldP.chapters || [])[ci];
+    if (!oc) return;
+    // E1: Chapter title changed → sync plot title
+    if (oc.title !== nc.title && nc.title) {
+      const plotEntry = newPlots.find(pl => (pl.chapter || 0) === ci + 1);
+      if (plotEntry && plotEntry.title !== nc.title) {
+        newPlots = newPlots.map(pl => pl.id === plotEntry.id ? { ...pl, title: nc.title } : pl); dirty = true;
+      }
+    }
+    // E2: Chapter POV changed → sync to plot POV if plot's is empty
+    if (oc.pov !== nc.pov && nc.pov) {
+      const plotEntry = newPlots.find(pl => (pl.chapter || 0) === ci + 1);
+      if (plotEntry && !plotEntry.pov) {
+        newPlots = newPlots.map(pl => pl.id === plotEntry.id ? { ...pl, pov: nc.pov } : pl); dirty = true;
+      }
+    }
+    // E3: Chapter summary written → update plot summary if empty
+    if (oc.summary !== nc.summary && nc.summary) {
+      const plotEntry = newPlots.find(pl => (pl.chapter || 0) === ci + 1);
+      if (plotEntry && !plotEntry.summary) {
+        newPlots = newPlots.map(pl => pl.id === plotEntry.id ? { ...pl, summary: nc.summary } : pl); dirty = true;
+      }
+    }
+  });
+
+  // ═══════════════════════════════════════════════
+  // F. LOCATION CHANGES → cascade to characters, plot
+  // ═══════════════════════════════════════════════
+  newWorlds.forEach(nw => {
+    if (nw.category && nw.category !== "Location") return;
+    const ow = oldWorlds.find(w => w.id === nw.id);
+    if (!ow) return;
+
+    // F1: Location connected to org → add org members to location
+    if (Array.isArray(nw.connectedTo)) {
+      nw.connectedTo.forEach(connId => {
+        const conn = newWorlds.find(w => w.id === connId);
+        if (!conn || conn.category !== "Organization") return;
+        const wasConn = ow.connectedTo && Array.isArray(ow.connectedTo) && ow.connectedTo.includes(connId);
+        if (!wasConn && Array.isArray(conn.orgHierarchy)) {
+          const freq = Array.isArray(nw.frequentCharacters) ? [...nw.frequentCharacters] : [];
+          let changed = false;
+          conn.orgHierarchy.forEach(pos => {
+            if (pos.charId && !freq.includes(pos.charId)) { freq.push(pos.charId); changed = true; }
+          });
+          if (changed) { newWorlds = newWorlds.map(w => w.id === nw.id ? { ...w, frequentCharacters: freq } : w); dirty = true; }
+        }
+      });
+    }
+    // F2: Location name changed → update references in relationship notes
+    if (ow.name !== nw.name && ow.name && nw.name) {
+      newRels = newRels.map(r => {
+        if (r.notes?.includes(ow.name) || r.dynamic?.includes(ow.name)) {
+          return { ...r, dynamic: (r.dynamic || "").replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name), notes: (r.notes || "").replace(new RegExp(ow.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), "g"), nw.name) };
+        }
+        return r;
+      });
+      dirty = true;
+    }
+    // F3: Character added to location → auto-create relationship with others at same location
+    const oldFreq = Array.isArray(ow.frequentCharacters) ? ow.frequentCharacters : [];
+    const newFreq = Array.isArray(nw.frequentCharacters) ? nw.frequentCharacters : [];
+    const addedChars = newFreq.filter(cid => !oldFreq.includes(cid));
+    addedChars.forEach(newCid => {
+      newFreq.forEach(existingCid => {
+        if (existingCid === newCid) return;
+        if (oldFreq.includes(existingCid)) {
+          // Only auto-create if they don't have ANY relationship
+          const hasRel = newRels.some(r => (r.char1 === newCid && r.char2 === existingCid) || (r.char2 === newCid && r.char1 === existingCid));
+          if (!hasRel && newChars.some(c => c.id === newCid) && newChars.some(c => c.id === existingCid)) {
+            newRels.push({
+              id: uid(), char1: newCid, char2: existingCid,
+              dynamic: `Share space at ${nw.name}`, status: "acquaintances", tension: "none", tensionType: "acquaintance",
+              notes: `Auto-created: both frequent ${nw.name}`, char1Perspective: "", char2Perspective: "", progression: "",
+              meetsInChapter: 0, evolutionTimeline: "", category: "other", powerDynamic: "equal",
+              sharedSecrets: "", keyScenes: "", chemistry: "", conflictSource: "", trustLevel: "low", isPublic: true, taboos: "", terms: "",
+            });
+            dirty = true;
+          }
+        }
+      });
+    });
+  });
+
+  // ═══════════════════════════════════════════════
+  // G. DELETION CLEANUP
+  // ═══════════════════════════════════════════════
+  const deletedCharIds = oldChars.filter(oc => !newChars.find(nc => nc.id === oc.id)).map(c => c.id);
+  if (deletedCharIds.length > 0) {
+    newRels = newRels.filter(r => !deletedCharIds.includes(r.char1) && !deletedCharIds.includes(r.char2));
+    newPlots = newPlots.map(pl => ({ ...pl, characters: Array.isArray(pl.characters) ? pl.characters.filter(cid => !deletedCharIds.includes(cid)) : pl.characters, povCharacterId: deletedCharIds.includes(pl.povCharacterId) ? "" : pl.povCharacterId }));
+    newWorlds = newWorlds.map(w => ({ ...w, frequentCharacters: Array.isArray(w.frequentCharacters) ? w.frequentCharacters.filter(cid => !deletedCharIds.includes(cid)) : w.frequentCharacters, orgMembers: Array.isArray(w.orgMembers) ? w.orgMembers.filter(cid => !deletedCharIds.includes(cid)) : w.orgMembers, orgHierarchy: Array.isArray(w.orgHierarchy) ? w.orgHierarchy.map(pos => deletedCharIds.includes(pos.charId) ? { ...pos, charId: "" } : pos) : w.orgHierarchy }));
+    dirty = true;
+  }
+  const deletedWorldIds = oldWorlds.filter(ow => !newWorlds.find(nw => nw.id === ow.id)).map(w => w.id);
+  if (deletedWorldIds.length > 0) {
+    newPlots = newPlots.map(pl => ({ ...pl, locations: Array.isArray(pl.locations) ? pl.locations.filter(lid => !deletedWorldIds.includes(lid)) : pl.locations }));
+    newWorlds = newWorlds.map(w => ({ ...w, connectedTo: Array.isArray(w.connectedTo) ? w.connectedTo.filter(cid => !deletedWorldIds.includes(cid)) : w.connectedTo, parentLocation: w.parentLocation && deletedWorldIds.includes(w.parentLocation) ? "" : w.parentLocation }));
+    dirty = true;
+  }
+  const deletedRelIds = oldRels.filter(or => !newRels.find(nr => nr.id === or.id)).map(r => r.id);
+  // No cascading needed for relationship deletion — it's self-contained
+
+  // ═══════════════════════════════════════════════
+  // H. BIDIRECTIONAL CONNECTIONS
+  // ═══════════════════════════════════════════════
+  newWorlds.forEach(nw => {
+    if (!Array.isArray(nw.connectedTo)) return;
+    nw.connectedTo.forEach(connId => {
+      const other = newWorlds.find(w => w.id === connId);
+      if (!other) return;
+      const otherConns = Array.isArray(other.connectedTo) ? other.connectedTo : [];
+      if (!otherConns.includes(nw.id)) {
+        newWorlds = newWorlds.map(w => w.id === connId ? { ...w, connectedTo: [...otherConns, nw.id] } : w);
+        dirty = true;
+      }
+    });
+  });
+  oldWorlds.forEach(ow => {
+    if (!Array.isArray(ow.connectedTo)) return;
+    const nw = newWorlds.find(w => w.id === ow.id);
+    if (!nw) return;
+    const newConns = Array.isArray(nw.connectedTo) ? nw.connectedTo : [];
+    ow.connectedTo.forEach(oldConn => {
+      if (!newConns.includes(oldConn)) {
+        const other = newWorlds.find(w => w.id === oldConn);
+        if (other?.connectedTo?.includes(ow.id)) {
+          newWorlds = newWorlds.map(w => w.id === oldConn ? { ...w, connectedTo: other.connectedTo.filter(c => c !== ow.id) } : w);
+          dirty = true;
+        }
+      }
+    });
+  });
+
+  // ─── Apply ───
+  if (dirty) {
+    p = { ...p, characters: newChars, relationships: newRels, worldBuilding: newWorlds, plotOutline: newPlots, chapters: newChapters };
+  }
+  return p;
+};
+
+
 // ════════════════════════════════════════
 // ─── MAIN APP ───
 // ════════════════════════════════════════
@@ -6060,6 +7023,7 @@ export default function NovelForge() {
   const [dragOverIdx, setDragOverIdx] = useState(null); // C4: Chapter drag indicator
   const [expandedWorldIds, setExpandedWorldIds] = useState(new Set()); // D6: Collapsible world entries
   const [expandedRelIds, setExpandedRelIds] = useState(new Set()); // D11: Collapsible relationships
+  const [expandedPlotIds, setExpandedPlotIds] = useState(new Set()); // Collapsible plot entries
   const [deleteConfirmText, setDeleteConfirmText] = useState(""); // E7: Type-to-confirm delete
   const [flushConfirm, setFlushConfirm] = useState(false);
   const [charSuggestions, setCharSuggestions] = useState(null);
@@ -6488,7 +7452,12 @@ export default function NovelForge() {
 
   // ─── UPDATE HELPERS ───
   const updateProject = useCallback((updates) => {
-    setProjects(prev => prev.map(p => p.id === activeProjectId ? { ...p, ...updates } : p));
+    setProjects(prev => prev.map(p => {
+      if (p.id !== activeProjectId) return p;
+      const next = { ...p, ...updates };
+      // ─── CROSS-REF SYNC ENGINE: auto-propagate changes across tabs ───
+      return _syncCrossRefs(p, next);
+    }));
   }, [activeProjectId]);
 
   const updateChapter = useCallback((idx, updates) => {
@@ -6504,7 +7473,8 @@ export default function NovelForge() {
   const updateCharById = useCallback((charId, field, value) => {
     setProjects(prev => prev.map(p => {
       if (p.id !== activeProjectId) return p;
-      return { ...p, characters: p.characters.map(c => c.id === charId ? { ...c, [field]: value } : c) };
+      const next = { ...p, characters: p.characters.map(c => c.id === charId ? { ...c, [field]: value } : c) };
+      return _syncCrossRefs(p, next);
     }));
   }, [activeProjectId]);
 
@@ -9442,7 +10412,7 @@ YOUR OUTPUT FORMAT (follow this EXACTLY):
 (7) CAMERA SETTINGS: Specify lens, aperture, distance, framing, and whether characters are cropped or full-body. Do not specify aspect ratios.
 
 End with this EXACT paragraph:
-"Each character(s)’s expression must match the activity that he’s doing (very expressive though). Most importantly, this is a candid shot so the character must not be looking towards us unless it’s a POV angle, and framing must include slight misalignment, a hint of motion blur, or a cropped edge as if caught unintentionally. The scene is 50 degree celcius, 100% humidity, but no excessive fogging, just sweat. They have been training for hours too — so much more sweat, drenched even. It’s okay if their faces or bodies aren’t visible, depending on the camera angle or obstruction. Play with depth using foreground (blurred object) and background (abundance of items & decor) framing and bokeh. Refer to your project instructions, must be realistic to the skin pore. The atmosphere must feel thick and heavy, the kind that slows movement and breath. The moment must appear discovered, not staged — like a camera left running in the corner. Use the camera’s bright flash on the subject."
+"Each character(s)’s expression must match the activity that he’s doing (very expressive though). Most importantly, this is a candid shot so the character must not be looking towards us unless it’s a POV angle, and framing must include slight misalignment, a hint of motion blur, or a cropped edge as if caught unintentionally. It’s okay if their faces or bodies aren’t visible, depending on the camera angle or obstruction. Play with depth using foreground (blurred object) and background (abundance of items & decor) framing and bokeh. Refer to your project instructions, must be realistic to the skin pore. The atmosphere must feel thick and heavy, the kind that slows movement and breath. The moment must appear discovered, not staged — like a camera left running in the corner. Use the camera’s bright flash on the subject."
 
 CRITICAL RULES:
 - NEVER say "analyze", "determine", "infer from context" — YOU must have already done the analysis
@@ -11043,8 +12013,40 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0 12px" }}>
                 <Field label="Age" value={editingChar.age} onChange={v => updateCharById(editingCharId, "age", v)} placeholder="Age or age range" />
-                <DebouncedField label="Occupation / Title" value={editingChar.occupation || ""} onChange={v => updateCharById(editingCharId, "occupation", v)} placeholder="e.g. Healer, Detective, CEO" />
-                <Field label="First Appears (Chapter #)" value={editingChar.firstAppearanceChapter || ""} onChange={v => updateCharById(editingCharId, "firstAppearanceChapter", parseInt(v) || 0)} placeholder="0 = from start" type="number" />
+                {/* Occupation: auto-derived from org hierarchy if assigned, otherwise manual */}
+                {(() => {
+                  const orgPositions = [];
+                  (project?.worldBuilding || []).forEach(w => {
+                    if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+                    w.orgHierarchy.forEach(pos => {
+                      if (pos.charId === editingCharId && pos.name) orgPositions.push({ title: pos.name, org: w.name });
+                    });
+                  });
+                  const derivedOccupation = orgPositions.length > 0 ? orgPositions.map(o => `${o.title} (${o.org})`).join(", ") : "";
+                  return (
+                    <div className="nf-field" style={{ flex: 1 }}>
+                      <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        Occupation / Title
+                        {orgPositions.length > 0 && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from org</span>}
+                      </label>
+                      {orgPositions.length > 0 ? (
+                        <div>
+                          <div style={{ fontSize: 11, color: "var(--nf-accent-2)", padding: "5px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 4, fontWeight: 500 }}>
+                            {derivedOccupation}
+                          </div>
+                          <DebouncedField value={editingChar.occupation || ""} onChange={v => updateCharById(editingCharId, "occupation", v)} placeholder="Additional title (optional, overrides for AI)" small />
+                        </div>
+                      ) : (
+                        <DebouncedField value={editingChar.occupation || ""} onChange={v => updateCharById(editingCharId, "occupation", v)} placeholder="e.g. Healer, Detective, CEO" />
+                      )}
+                    </div>
+                  );
+                })()}
+                <Field label="First Appears (Chapter #)" value={editingChar.firstAppearanceChapter || ""} onChange={v => updateCharById(editingCharId, "firstAppearanceChapter", parseInt(v) || 0)} placeholder={(() => {
+                  // Auto-suggest from plot outline
+                  const plotAppearances = (project?.plotOutline || []).filter(pl => Array.isArray(pl.characters) && pl.characters.includes(editingCharId)).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
+                  return plotAppearances.length > 0 ? `From plot: Ch${plotAppearances[0].chapter || "?"}` : "0 = from start";
+                })()} type="number" />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0 12px" }}>
                 <SelectField label="Status" value={editingChar.status || "alive"} onChange={v => updateCharById(editingCharId, "status", v)} options={CHARACTER_STATUS_OPTIONS} />
@@ -11055,7 +12057,27 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
                 <SelectField label="Build" value={editingChar.build || ""} onChange={v => updateCharById(editingCharId, "build", v)} options={BUILD_OPTIONS} placeholder="Select..." />
-                <DebouncedField label="Allegiances / Factions" value={editingChar.allegiances || ""} onChange={v => updateCharById(editingCharId, "allegiances", v)} placeholder="e.g. Order of the Phoenix, Team Alpha" small />
+                {/* Allegiances: auto-derived from org memberships */}
+                {(() => {
+                  const orgNames = [];
+                  (project?.worldBuilding || []).forEach(w => {
+                    if (w.category !== "Organization") return;
+                    const isMember = (Array.isArray(w.orgMembers) && w.orgMembers.includes(editingCharId)) ||
+                      (Array.isArray(w.orgHierarchy) && w.orgHierarchy.some(p => p.charId === editingCharId));
+                    if (isMember && w.name) orgNames.push(w.name);
+                  });
+                  const derived = orgNames.length > 0 ? orgNames.join(", ") : "";
+                  return (
+                    <div className="nf-field" style={{ flex: 1 }}>
+                      <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        Allegiances / Factions
+                        {derived && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from orgs</span>}
+                      </label>
+                      {derived && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", padding: "3px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 3 }}>{derived}</div>}
+                      <DebouncedField value={editingChar.allegiances || ""} onChange={v => updateCharById(editingCharId, "allegiances", v)} placeholder={derived ? "Additional allegiances..." : "e.g. Order of the Phoenix, Team Alpha"} small />
+                    </div>
+                  );
+                })()}
               </div>
               <DebouncedField label="Tags / Traits" value={editingChar.tags || ""} onChange={v => updateCharById(editingCharId, "tags", v)} placeholder="Comma-separated: sarcastic, loyal, scarred, bookworm, insomniac" small />
             </div>
@@ -11066,6 +12088,25 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <DebouncedField label="Appearance" value={editingChar.appearance} onChange={v => updateCharById(editingCharId, "appearance", v)} multiline placeholder="Physical description — height, build, coloring, distinguishing features..." />
               <DebouncedField label="Personality" value={editingChar.personality} onChange={v => updateCharById(editingCharId, "personality", v)} multiline placeholder="Core traits, temperament, quirks, contradictions..." />
               <DebouncedField label="Speech & Voice" value={editingChar.speechPattern} onChange={v => updateCharById(editingCharId, "speechPattern", v)} multiline placeholder="Vocabulary, accent, verbal tics, how they sound under stress..." small />
+              {/* Auto-derived: how others address this character (from relationship terms) */}
+              {(() => {
+                const addressTerms = [];
+                (project?.relationships || []).forEach(r => {
+                  if (!r.terms) return;
+                  if (r.char1 === editingCharId || r.char2 === editingCharId) {
+                    const otherId = r.char1 === editingCharId ? r.char2 : r.char1;
+                    const other = (project?.characters || []).find(c => c.id === otherId);
+                    if (other?.name) addressTerms.push({ name: other.name, terms: r.terms });
+                  }
+                });
+                if (addressTerms.length === 0) return null;
+                return (
+                  <div style={{ fontSize: 10, padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginBottom: 4 }}>
+                    <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Address terms (from relationships): </span>
+                    {addressTerms.map((t, i) => <span key={i}>{i > 0 ? " · " : ""}{t.name}: {t.terms}</span>)}
+                  </div>
+                );
+              })()}
               <DebouncedField label="Voice Samples (example quotes)" value={editingChar.voiceSamples || ""} onChange={v => updateCharById(editingCharId, "voiceSamples", v)} multiline placeholder={`"I don't trust anyone who smiles that much." / "You think darkness scares me? I was born in it."`} small />
               <DebouncedField label="Habits & Mannerisms" value={editingChar.habits || ""} onChange={v => updateCharById(editingCharId, "habits", v)} multiline placeholder="Cracks knuckles when nervous, always carries a lighter, hums when cooking..." small />
             </div>
@@ -11108,6 +12149,25 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <DebouncedField label="Known Secrets (reader knows, sent to AI)" value={editingChar.secrets || ""} onChange={v => updateCharById(editingCharId, "secrets", v)} multiline placeholder="Secrets the reader/AI should know — hidden heritage, double identity, forbidden power..." small />
                 <DebouncedField label="Hidden Secrets (NOT sent to AI until reveal)" value={editingChar.hiddenSecrets || ""} onChange={v => updateCharById(editingCharId, "hiddenSecrets", v)} multiline placeholder="Plot twists — keep hidden from AI context until the reveal chapter..." small />
                 <Field label="Secret Reveal (Ch#)" value={editingChar.secretRevealChapter || ""} onChange={v => updateCharById(editingCharId, "secretRevealChapter", parseInt(v) || 0)} placeholder="0 = never auto-reveal" type="number" small />
+                {/* Auto-derived: shared secrets from relationships */}
+                {(() => {
+                  const relSecrets = [];
+                  (project?.relationships || []).forEach(r => {
+                    if (!r.sharedSecrets) return;
+                    if (r.char1 === editingCharId || r.char2 === editingCharId) {
+                      const otherId = r.char1 === editingCharId ? r.char2 : r.char1;
+                      const other = (project?.characters || []).find(c => c.id === otherId);
+                      if (other?.name) relSecrets.push({ name: other.name, secret: r.sharedSecrets });
+                    }
+                  });
+                  if (relSecrets.length === 0) return null;
+                  return (
+                    <div style={{ fontSize: 10, padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginTop: 6 }}>
+                      <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Shared secrets (from relationships):</span>
+                      {relSecrets.map((s, i) => <div key={i} style={{ marginTop: 2 }}>🤫 With {s.name}: {s.secret}</div>)}
+                    </div>
+                  );
+                })()}
               </div>
               {/* FIX 1: Hardcoded relationship stream from Relationships tab — read-only */}
               {(() => {
@@ -11150,6 +12210,181 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <div className="nf-char-section-label">Notes</div>
               <DebouncedField label="Canon Notes (sent to AI)" value={editingChar.canonNotes} onChange={v => updateCharById(editingCharId, "canonNotes", v)} multiline placeholder="Facts the AI should always know: scars, secrets, abilities..." small />
               <DebouncedField label="Author Notes (private — NOT sent to AI)" value={editingChar.notes} onChange={v => updateCharById(editingCharId, "notes", v)} multiline placeholder="Your planning notes, reminders, ideas..." small />
+
+              {/* ─── Connections: Edit locations, relationships, orgs directly from here ─── */}
+              <div className="nf-char-section-label" style={{ marginTop: 16 }}>Connections</div>
+              <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
+                {/* LOCATIONS — toggle directly from character tab */}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                    📍 Locations — toggle where {editingChar.name || "this character"} is found
+                  </div>
+                  {(() => {
+                    const locationEntries = (project?.worldBuilding || []).filter(w => w.name && (w.category === "Location" || !w.category));
+                    if (locationEntries.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No locations yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("world")}>World</span> tab</div>;
+                    return (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {locationEntries.map(loc => {
+                          const freqChars = Array.isArray(loc.frequentCharacters) ? loc.frequentCharacters : [];
+                          const isAssigned = freqChars.includes(editingCharId);
+                          return (
+                            <button key={loc.id} type="button" onClick={() => {
+                              const updated = isAssigned ? freqChars.filter(cid => cid !== editingCharId) : [...freqChars, editingCharId];
+                              updateProject({ worldBuilding: (project?.worldBuilding || []).map(w => w.id === loc.id ? { ...w, frequentCharacters: updated } : w) });
+                            }} style={{
+                              padding: "3px 10px", borderRadius: 6, fontSize: 10, fontWeight: isAssigned ? 600 : 400, cursor: "pointer",
+                              background: isAssigned ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
+                              border: `1px solid ${isAssigned ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
+                              color: isAssigned ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
+                              transition: "all 0.15s",
+                            }}>
+                              {isAssigned ? "✓ " : ""}📍 {loc.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* RELATIONSHIPS — view + quick-add from character tab */}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>
+                      ↔ Relationships
+                    </div>
+                    {(project?.characters || []).filter(c => c.id !== editingCharId && c.name).length > 0 && (
+                      <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <select onChange={e => {
+                          if (!e.target.value) return;
+                          const otherId = e.target.value;
+                          // Check if relationship already exists
+                          const existing = (project?.relationships || []).find(r =>
+                            (r.char1 === editingCharId && r.char2 === otherId) || (r.char2 === editingCharId && r.char1 === otherId)
+                          );
+                          if (existing) { e.target.value = ""; return; }
+                          const newId = uid();
+                          updateProject({ relationships: [...(project?.relationships || []), {
+                            id: newId, char1: editingCharId, char2: otherId, dynamic: "", status: "developing", tension: "medium", tensionType: "romantic",
+                            notes: "", char1Perspective: "", char2Perspective: "", progression: "", meetsInChapter: 0, evolutionTimeline: "",
+                            category: "romantic", powerDynamic: "equal", sharedSecrets: "", keyScenes: "", chemistry: "", conflictSource: "",
+                            trustLevel: "medium", isPublic: true, taboos: "", terms: "",
+                          }] });
+                          e.target.value = "";
+                        }} style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)", cursor: "pointer" }}>
+                          <option value="">+ Add relationship...</option>
+                          {(project?.characters || []).filter(c => c.id !== editingCharId && c.name).filter(c => {
+                            // Hide characters that already have a relationship with this one
+                            return !(project?.relationships || []).some(r =>
+                              (r.char1 === editingCharId && r.char2 === c.id) || (r.char2 === editingCharId && r.char1 === c.id)
+                            );
+                          }).map(c => <option key={c.id} value={c.id}>{c.name}{c.role ? ` (${c.role})` : ""}</option>)}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                  {(() => {
+                    const charRels = (project?.relationships || []).filter(r => r.char1 === editingCharId || r.char2 === editingCharId);
+                    const allChars = project?.characters || [];
+                    if (charRels.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No relationships yet — use the dropdown above to add one</div>;
+                    const tensionColors = { none: "var(--nf-text-muted)", low: "var(--nf-success)", medium: "var(--nf-accent-2)", high: "var(--nf-accent)", explosive: "var(--nf-accent)" };
+                    return (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {charRels.map(r => {
+                          const otherId = r.char1 === editingCharId ? r.char2 : r.char1;
+                          const other = allChars.find(c => c.id === otherId);
+                          return (
+                            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 4,
+                              background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)" }}>
+                              {other?.image && <img src={other.image} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />}
+                              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)", cursor: "pointer" }} onClick={() => setEditingCharId(otherId)}>{other?.name || "?"}</span>
+                              <select value={r.status || "developing"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, status: e.target.value } : re) })}
+                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 95 }}>
+                                {RELATIONSHIP_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                              <select value={r.tension || "medium"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, tension: e.target.value } : re) })}
+                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: `1px solid ${tensionColors[r.tension] || "var(--nf-border)"}`, borderRadius: 2, color: tensionColors[r.tension] || "var(--nf-text-muted)", cursor: "pointer", fontWeight: 600, maxWidth: 80 }}>
+                                {TENSION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                              <select value={r.category || "romantic"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, category: e.target.value } : re) })}
+                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 80 }}>
+                                {RELATIONSHIP_CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                              </select>
+                              <button onClick={() => { setActiveTab("relationships"); setExpandedRelIds(prev => new Set([...prev, r.id])); }}
+                                className="nf-btn-icon" style={{ padding: 2, marginLeft: "auto" }} title="Open full editor"><Icons.Maximize /></button>
+                              <button onClick={() => updateProject({ relationships: (project?.relationships || []).filter(re => re.id !== r.id) })}
+                                className="nf-btn-icon" style={{ padding: 2 }} title="Remove"><Icons.X /></button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* ORGANIZATIONS — show current positions */}
+                {(() => {
+                  const charOrgs = [];
+                  (project?.worldBuilding || []).forEach(w => {
+                    if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+                    w.orgHierarchy.forEach(pos => {
+                      if (pos.charId === editingCharId) {
+                        charOrgs.push({ orgName: w.name, orgId: w.id, position: pos.name, role: pos.role });
+                      }
+                    });
+                  });
+                  return charOrgs.length > 0 ? (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                        ⛨ Organizations ({charOrgs.length})
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {charOrgs.map((o, i) => (
+                          <span key={i} onClick={() => { setActiveTab("world"); setExpandedWorldIds(prev => new Set([...prev, o.orgId])); }}
+                            style={{ padding: "3px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
+                              background: "rgba(160,140,200,0.08)", border: "1px solid rgba(160,140,200,0.3)",
+                              color: "rgba(160,140,200,0.8)", fontWeight: 500 }}>
+                            ⛨ {o.position || "Member"} — {o.orgName}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null;
+                })()}
+
+                {/* PLOT APPEARANCES — toggle directly */}
+                <div>
+                  <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                    Appears in chapters
+                  </div>
+                  {(() => {
+                    const plotEntries = (project?.plotOutline || []).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
+                    if (plotEntries.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No plot entries yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("plot")}>Plot</span> tab</div>;
+                    return (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {plotEntries.map(pl => {
+                          const charIds = Array.isArray(pl.characters) ? pl.characters : [];
+                          const isIn = charIds.includes(editingCharId);
+                          return (
+                            <button key={pl.id} type="button" onClick={() => {
+                              const updated = isIn ? charIds.filter(cid => cid !== editingCharId) : [...charIds, editingCharId];
+                              updateProject({ plotOutline: (project?.plotOutline || []).map(p => p.id === pl.id ? { ...p, characters: updated } : p) });
+                            }} style={{
+                              padding: "2px 8px", borderRadius: 4, fontSize: 9, cursor: "pointer", fontWeight: isIn ? 600 : 400,
+                              background: isIn ? "var(--nf-accent-glow)" : "var(--nf-bg-surface)",
+                              border: `1px solid ${isIn ? "var(--nf-accent)" : "var(--nf-border)"}`,
+                              color: isIn ? "var(--nf-accent)" : "var(--nf-text-muted)",
+                              transition: "all 0.15s",
+                            }}>
+                              {isIn ? "✓ " : ""}Ch{pl.chapter || "?"}{pl.title ? `: ${pl.title}` : ""}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
             </div>
           </>) : (<div className="nf-empty-state">Select or create a character</div>)}
         </div>
@@ -11181,7 +12416,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
     }));
     return (
       <div className="nf-write-layout">
-        <div className="nf-content-scroll" style={{ maxWidth: 800, flex: 1 }}>
+        <div className="nf-content-scroll" style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
             <h2 className="nf-page-title">World-Building</h2>
             <div style={{ display: "flex", gap: 6 }}>
@@ -11298,13 +12533,28 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           ) : (
                             <div style={{ fontSize: 11, color: "var(--nf-text-muted)", padding: "6px 0", fontStyle: "italic" }}>Add named characters first</div>
                           )}
-                          {/* Show selected characters summary */}
+                          {/* Show selected characters with image bubbles */}
                           {Array.isArray(item.frequentCharacters) && item.frequentCharacters.length > 0 && (
-                            <div style={{ fontSize: 10, color: "var(--nf-text-dim)", marginTop: 4, padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
-                              {item.frequentCharacters.length} character{item.frequentCharacters.length !== 1 ? "s" : ""} assigned: {item.frequentCharacters.map(cid => {
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, padding: "6px 10px", background: "var(--nf-bg-deep)", borderRadius: 2, flexWrap: "wrap" }}>
+                              {item.frequentCharacters.map(cid => {
                                 const ch = (project?.characters || []).find(c => c.id === cid);
-                                return ch?.name || "?";
-                              }).join(", ")}
+                                if (!ch) return null;
+                                return (
+                                  <div key={cid} onClick={() => { setEditingCharId(cid); setActiveTab("characters"); }}
+                                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 3px",
+                                      borderRadius: 20, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)",
+                                      cursor: "pointer", transition: "all 0.15s", fontSize: 10 }}
+                                    title={`${ch.name} (${ch.role}) — click to edit`}>
+                                    {ch.image ? (
+                                      <img src={ch.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover" }} />
+                                    ) : (
+                                      <span style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 600 }}>{(ch.name || "?")[0]}</span>
+                                    )}
+                                    <span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{(ch.name || "?").split(/\s+/)[0]}</span>
+                                    {ch.role && <span style={{ fontSize: 8, color: "var(--nf-text-muted)" }}>{ch.role}</span>}
+                                  </div>
+                                );
+                              })}
                             </div>
                           )}
                         </div>
@@ -11349,67 +12599,95 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               ) : <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add characters first</div>}
                             </div>
 
-                            {/* Hierarchy tree */}
+                            {/* Hierarchy tree — proper top-down family tree */}
                             {Array.isArray(item.orgHierarchy) && item.orgHierarchy.length > 0 && (
                               <div style={{ marginTop: 8 }}>
-                                <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 6 }}>Positions & Ranks</div>
-                                {item.orgHierarchy.map((pos, posIdx) => {
-                                  const parentOptions = item.orgHierarchy.filter(p => p.id !== pos.id && p.name).map(p => ({ value: p.id, label: p.name || `Position ${item.orgHierarchy.indexOf(p) + 1}` }));
-                                  const linkedChar = pos.charId ? (project?.characters || []).find(c => c.id === pos.charId) : null;
-                                  // Depth calculation for indentation
-                                  let depth = 0;
-                                  let parentCheck = pos.parentId;
-                                  const visited = new Set();
-                                  while (parentCheck && depth < 6) {
-                                    if (visited.has(parentCheck)) break;
-                                    visited.add(parentCheck);
-                                    const parent = item.orgHierarchy.find(p => p.id === parentCheck);
-                                    if (parent) { depth++; parentCheck = parent.parentId; } else break;
-                                  }
-                                  return (
-                                    <div key={pos.id} style={{
-                                      marginLeft: depth * 20, marginBottom: 6, padding: "6px 10px",
-                                      background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 2,
-                                      borderLeft: `3px solid ${depth === 0 ? "var(--nf-accent)" : depth === 1 ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
-                                    }}>
-                                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
-                                        <Field label="Title / Position" value={pos.name || ""} onChange={v => {
-                                          const hierarchy = [...item.orgHierarchy];
-                                          hierarchy[posIdx] = { ...hierarchy[posIdx], name: v };
-                                          updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                                        }} placeholder="e.g. Grand Master, Captain, Spy" small />
-                                        <Field label="Role Description" value={pos.role || ""} onChange={v => {
-                                          const hierarchy = [...item.orgHierarchy];
-                                          hierarchy[posIdx] = { ...hierarchy[posIdx], role: v };
-                                          updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                                        }} placeholder="What they do" small />
+                                <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 10 }}>Positions & Ranks</div>
+                                <style>{`
+                                  .nf-org-tree { --line: var(--nf-border); }
+                                  .nf-org-tree ul { display: flex; justify-content: center; padding-top: 20px; position: relative; margin: 0; padding-left: 0; list-style: none; }
+                                  .nf-org-tree ul::before { content: ''; position: absolute; top: 0; left: 50%; border-left: 1.5px solid var(--line); height: 20px; }
+                                  .nf-org-tree li { display: flex; flex-direction: column; align-items: center; position: relative; padding: 20px 6px 0; }
+                                  .nf-org-tree li::before, .nf-org-tree li::after { content: ''; position: absolute; top: 0; width: 50%; height: 20px; border-top: 1.5px solid var(--line); }
+                                  .nf-org-tree li::before { right: 50%; border-right: 1.5px solid var(--line); border-top-right-radius: 4px; }
+                                  .nf-org-tree li::after { left: 50%; border-left: 1.5px solid var(--line); border-top-left-radius: 4px; }
+                                  .nf-org-tree li:only-child::before, .nf-org-tree li:only-child::after { border-top: none; }
+                                  .nf-org-tree li:only-child::before { border-right: 1.5px solid var(--line); border-top-right-radius: 0; }
+                                  .nf-org-tree li:first-child::before { border: none; }
+                                  .nf-org-tree li:last-child::after { border: none; }
+                                  .nf-org-tree li:first-child::after { border-top-left-radius: 0; }
+                                  .nf-org-tree li:last-child::before { border-top-right-radius: 0; }
+                                  .nf-org-tree > ul { padding-top: 0; }
+                                  .nf-org-tree > ul::before { display: none; }
+                                  .nf-org-tree > ul > li::before, .nf-org-tree > ul > li::after { display: none; }
+                                  .nf-org-tree > ul > li { padding-top: 0; }
+                                `}</style>
+                                {(() => {
+                                  const hier = item.orgHierarchy;
+                                  const getChildren = (parentId) => hier.filter(p => p.parentId === parentId);
+                                  const roots = hier.filter(p => !p.parentId || !hier.find(pp => pp.id === p.parentId));
+
+                                  const renderCard = (pos) => {
+                                    const posIdx = hier.indexOf(pos);
+                                    const linkedChar = pos.charId ? (project?.characters || []).find(c => c.id === pos.charId) : null;
+                                    const depthColor = (() => {
+                                      let d = 0, check = pos.parentId;
+                                      const visited = new Set();
+                                      while (check && d < 8) { if (visited.has(check)) break; visited.add(check); const p = hier.find(pp => pp.id === check); if (p) { d++; check = p.parentId; } else break; }
+                                      return d === 0 ? "var(--nf-accent)" : d === 1 ? "var(--nf-accent-2)" : "rgba(160,140,200,0.6)";
+                                    })();
+                                    return (
+                                      <div style={{ background: "var(--nf-bg-surface)", border: `1px solid var(--nf-border)`, borderTop: `3px solid ${depthColor}`, borderRadius: 3, padding: "8px 8px 6px", width: 170, position: "relative" }}>
                                         <button onClick={() => {
-                                          const hierarchy = item.orgHierarchy.filter((_, i) => i !== posIdx);
-                                          updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                                        }} className="nf-btn-icon" style={{ padding: 2, marginBottom: 6 }}><Icons.X /></button>
-                                      </div>
-                                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
-                                        {parentOptions.length > 0 && (
-                                          <SelectField label="Reports To" value={pos.parentId || ""} onChange={v => {
-                                            const hierarchy = [...item.orgHierarchy];
-                                            hierarchy[posIdx] = { ...hierarchy[posIdx], parentId: v };
-                                            updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                                          }} options={[{ value: "", label: "— Top Level —" }, ...parentOptions]} />
-                                        )}
-                                        <SelectField label="Held By (Character)" value={pos.charId || ""} onChange={v => {
-                                          const hierarchy = [...item.orgHierarchy];
-                                          hierarchy[posIdx] = { ...hierarchy[posIdx], charId: v };
-                                          updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                                        }} options={[{ value: "", label: "— Vacant / NPC —" }, ...charOptions]} />
-                                      </div>
-                                      {linkedChar && (
-                                        <div style={{ marginTop: 4, fontSize: 10, color: "var(--nf-accent-2)" }}>
-                                          ↳ {linkedChar.name} ({linkedChar.role})
+                                          updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: item.orgHierarchy.filter((_, i) => i !== posIdx) } : it) });
+                                        }} className="nf-btn-icon" style={{ padding: 1, position: "absolute", top: 2, right: 2, opacity: 0.3 }}><Icons.X /></button>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                                          {linkedChar?.image ? (
+                                            <img src={linkedChar.image} alt="" style={{ width: 32, height: 32, borderRadius: "50%", objectFit: "cover", border: `2px solid ${depthColor}`, flexShrink: 0 }} />
+                                          ) : (
+                                            <div style={{ width: 32, height: 32, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "var(--nf-text-muted)", border: `2px dashed var(--nf-border)`, flexShrink: 0 }}>
+                                              {linkedChar ? (linkedChar.name || "?")[0] : "?"}
+                                            </div>
+                                          )}
+                                          <div style={{ overflow: "hidden" }}>
+                                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pos.name || "Untitled"}</div>
+                                            <div style={{ fontSize: 9, color: linkedChar ? depthColor : "var(--nf-text-muted)", fontWeight: 500 }}>{linkedChar ? linkedChar.name : "vacant"}</div>
+                                          </div>
                                         </div>
-                                      )}
+                                        <Field label="" value={pos.name || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], name: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} placeholder="Title" small />
+                                        <SelectField label="" value={pos.charId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], charId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "— Vacant —" }, ...charOptions]} />
+                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
+                                          <Field label="" value={pos.role || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], role: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} placeholder="Role desc" small />
+                                          {hier.filter(p => p.id !== pos.id && p.name).length > 0 ? (
+                                            <SelectField label="" value={pos.parentId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], parentId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "Top level" }, ...hier.filter(p => p.id !== pos.id && p.name).map(p => ({ value: p.id, label: p.name }))]} />
+                                          ) : <div />}
+                                        </div>
+                                      </div>
+                                    );
+                                  };
+
+                                  const renderBranch = (node) => {
+                                    const children = getChildren(node.id);
+                                    return (
+                                      <li key={node.id}>
+                                        {renderCard(node)}
+                                        {children.length > 0 && (
+                                          <ul>
+                                            {children.map(child => renderBranch(child))}
+                                          </ul>
+                                        )}
+                                      </li>
+                                    );
+                                  };
+
+                                  return (
+                                    <div className="nf-org-tree" style={{ overflowX: "auto", padding: "8px 0" }}>
+                                      <ul>
+                                        {roots.map(root => renderBranch(root))}
+                                      </ul>
                                     </div>
                                   );
-                                })}
+                                })()}
                               </div>
                             )}
                           </div>
@@ -11427,6 +12705,39 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                             Connected To (other world entries)
                           </div>
+
+                        {/* ─── Auto-derived: plot chapters using this location + relationships at this location ─── */}
+                        {(() => {
+                          const derivedItems = [];
+                          // Plot chapters that reference this location
+                          const plotChapters = (project?.plotOutline || []).filter(pl => Array.isArray(pl.locations) && pl.locations.includes(item.id));
+                          if (plotChapters.length > 0) {
+                            derivedItems.push({ label: "Used in chapters", items: plotChapters.map(pl => `Ch${pl.chapter || "?"}: ${pl.title || "Untitled"}`), color: "var(--nf-text-muted)" });
+                          }
+                          // Relationships between characters at this location
+                          const locChars = Array.isArray(item.frequentCharacters) ? item.frequentCharacters : [];
+                          if (locChars.length >= 2 && project?.relationships?.length) {
+                            const locRels = project.relationships.filter(r =>
+                              locChars.includes(r.char1) && locChars.includes(r.char2) && r.dynamic
+                            );
+                            if (locRels.length > 0) {
+                              derivedItems.push({ label: "Active dynamics here", items: locRels.map(r => {
+                                const c1 = (project?.characters || []).find(c => c.id === r.char1);
+                                const c2 = (project?.characters || []).find(c => c.id === r.char2);
+                                return `${c1?.name || "?"} ↔ ${c2?.name || "?"}: ${r.status || "?"} (${r.tension || "?"} tension)`;
+                              }), color: "var(--nf-accent-2)" });
+                            }
+                          }
+                          if (derivedItems.length === 0) return null;
+                          return (
+                            <div style={{ padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 8, fontSize: 10, lineHeight: 1.6 }}>
+                              <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--nf-accent-2)" }}>Cross-references </span>
+                              {derivedItems.map((d, di) => (
+                                <div key={di} style={{ color: d.color }}>{d.label}: {d.items.join(" · ")}</div>
+                              ))}
+                            </div>
+                          );
+                        })()}
                           {items.filter(it => it.id !== item.id && it.name).length > 0 ? (
                             <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                               {items.filter(it => it.id !== item.id && it.name).map(other => {
@@ -11453,7 +12764,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           )}
                         </div>
 						
-                        {/* Image Prompts — 4 walls of the room */}
+                        {/* Image Prompts — 4 walls of the room (NOT for Organizations) */}
+                        {item.category !== "Organization" && (
                         <div style={{ marginTop: 12 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                             <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-body)" }}>
@@ -11673,6 +12985,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                             })()}
                           </div>
                         </div>
+                      )}
                       </div>
                       <button onClick={() => updateProject({ worldBuilding: items.filter(it => it.id !== item.id) })} className="nf-btn-icon" style={{ marginTop: 20 }} aria-label="Delete entry"><Icons.Trash /></button>
                     </div>
@@ -11695,16 +13008,26 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
   };
 
   // ─── TAB: PLOT ───
+  const togglePlotExpand = (id) => setExpandedPlotIds(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
   const renderPlot = () => {
     const outline = project?.plotOutline || [];
     // D8: Sort by chapter number for display
     const sortedOutline = [...outline].sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
     return (
       <div className="nf-write-layout">
-        <div className="nf-content-scroll" style={{ maxWidth: 900, flex: 1 }}>
+        <div className="nf-content-scroll" style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
             <h2 className="nf-page-title">Plot Outline</h2>
             <div style={{ display: "flex", gap: 6 }}>
+              {outline.length > 1 && (
+                <button onClick={() => setExpandedPlotIds(prev => prev.size === outline.length ? new Set() : new Set(outline.map(p => p.id)))} className="nf-btn-micro">
+                  {expandedPlotIds.size === outline.length ? "Collapse All" : "Expand All"}
+                </button>
+              )}
               <button onClick={() => setShowTimeline(true)} className="nf-btn-icon-sm"><Icons.Target /> Timeline</button>
               <button onClick={() => {
                 const existingChNums = (project?.plotOutline || []).map(pl => pl.chapter || 0);
@@ -11717,6 +13040,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   chapters: [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }],
                 };
                 updateProject({ plotOutline: [...(project?.plotOutline || []), newPlot], ...chapterUpdate });
+                setExpandedPlotIds(prev => new Set([...prev, newPlot.id]));
               }} className="nf-btn-icon-sm"><Icons.Plus /> Add</button>
             </div>
           </div>
@@ -11724,14 +13048,44 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             // D9: Check if a matching chapter exists
             const chIdx = (p.chapter || i + 1) - 1;
             const hasMatchingChapter = project?.chapters?.[chIdx];
+            const isPlotExpanded = expandedPlotIds.has(p.id);
+            const beatsCount = Array.isArray(p.beats) ? p.beats.length : 0;
+            const charCount = Array.isArray(p.characters) ? p.characters.length : 0;
             return (
-            <div key={p.id} className="nf-card">
-              <div style={{ display: "flex", gap: 12, alignItems: "start" }}>
-                <div className="nf-plot-number" style={{ cursor: hasMatchingChapter ? "pointer" : "default", opacity: hasMatchingChapter ? 1 : 0.5 }}
-                  onClick={() => { if (hasMatchingChapter) { setActiveTab("write"); setActiveChapterIdx(chIdx); forceRepopulateEditor(); } }}
+            <div key={p.id} className="nf-card" style={{ cursor: isPlotExpanded ? undefined : "pointer" }}>
+              {/* Collapsed header */}
+              <div onClick={() => !isPlotExpanded && togglePlotExpand(p.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <button onClick={(e) => { e.stopPropagation(); togglePlotExpand(p.id); }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0 }} aria-label={isPlotExpanded ? "Collapse" : "Expand"}>
+                  {isPlotExpanded ? <Icons.ChevDown /> : <Icons.ChevRight />}
+                </button>
+                <div className="nf-plot-number" style={{ cursor: hasMatchingChapter ? "pointer" : "default", opacity: hasMatchingChapter ? 1 : 0.5, flexShrink: 0 }}
+                  onClick={(e) => { e.stopPropagation(); if (hasMatchingChapter) { setActiveTab("write"); setActiveChapterIdx(chIdx); forceRepopulateEditor(); } }}
                   title={hasMatchingChapter ? `Go to Chapter ${p.chapter || i + 1}` : `Chapter ${p.chapter || i + 1} doesn't exist yet`}>
                   {p.chapter || i + 1}
                 </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{p.title || <span style={{ opacity: 0.4, fontStyle: "italic" }}>Untitled</span>}</span>
+                    {p.sceneType && p.sceneType !== "narrative" && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{p.sceneType}</span>}
+                    {beatsCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{beatsCount} beat{beatsCount !== 1 ? "s" : ""}</span>}
+                    {charCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{charCount} char{charCount !== 1 ? "s" : ""}</span>}
+                    {p.date && <span style={{ fontSize: 9, color: "var(--nf-accent-2)" }}>{p.date}</span>}
+                  </div>
+                  {!isPlotExpanded && p.summary && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.summary.slice(0, 120)}</div>}
+                </div>
+                {!isPlotExpanded && (
+                  <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+                    <button onClick={(e) => { e.stopPropagation(); if (i > 0) { const prev = sortedOutline[i - 1]; updateProject({ plotOutline: outline.map(pl => { if (pl.id === p.id) return { ...pl, chapter: prev.chapter || i }; if (pl.id === prev.id) return { ...pl, chapter: p.chapter || i + 1 }; return pl; }) }); } }} disabled={i === 0} className="nf-btn-icon" style={{ padding: 1, opacity: i === 0 ? 0.2 : 1 }} aria-label="Move up">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg>
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) }); }} className="nf-btn-icon" style={{ padding: 1 }} aria-label="Delete plot entry"><Icons.Trash /></button>
+                  </div>
+                )}
+              </div>
+              {/* Expanded form */}
+              {isPlotExpanded && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--nf-border)" }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "start" }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ display: "grid", gridTemplateColumns: "70px 1fr 120px 120px", gap: 12, marginBottom: 8 }}>
                     {/* FIX 5.2/5.3: Validate chapter number — warn on duplicates */}
@@ -11853,12 +13207,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               const updated = isSelected ? charIds.filter(cid => cid !== c.id) : [...charIds, c.id];
                               updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, characters: updated } : pl) });
                             }} style={{
-                              padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
+                              padding: "3px 10px 3px 4px", borderRadius: 20, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
                               background: isSelected ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                               border: `1px solid ${isSelected ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                               color: isSelected ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
-                              transition: "all 0.15s",
+                              transition: "all 0.15s", display: "flex", alignItems: "center", gap: 4,
                             }}>
+                              {c.image ? <img src={c.image} alt="" style={{ width: 18, height: 18, borderRadius: "50%", objectFit: "cover" }} /> : <span style={{ width: 18, height: 18, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8, color: "var(--nf-text-muted)" }}>{(c.name || "?")[0]}</span>}
                               {isSelected ? "✓ " : ""}{c.name}
                             </button>
                           );
@@ -11899,6 +13254,55 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       );
                     })()}
                   </div>
+                  {/* ─── Auto-derived scene context from characters/locations/relationships ─── */}
+                  {(() => {
+                    const selChars = Array.isArray(p.characters) ? p.characters : [];
+                    const selLocs = Array.isArray(p.locations) ? p.locations : [];
+                    if (selChars.length === 0 && selLocs.length === 0) return null;
+                    const items2 = [];
+                    // Location details
+                    selLocs.forEach(lid => {
+                      const loc = (project?.worldBuilding || []).find(w => w.id === lid);
+                      if (!loc) return;
+                      if (loc.atmosphere) items2.push({ icon: "🌫", text: `${loc.name} atmosphere: ${loc.atmosphere}`, color: "var(--nf-text-muted)" });
+                      if (loc.dangers) items2.push({ icon: "⚠", text: `${loc.name} dangers: ${loc.dangers}`, color: "var(--nf-accent)" });
+                      if (loc.rules) items2.push({ icon: "📜", text: `${loc.name} rules: ${loc.rules}`, color: "var(--nf-text-muted)" });
+                      // Characters at location not yet in scene
+                      if (Array.isArray(loc.frequentCharacters)) {
+                        const missing = loc.frequentCharacters.filter(cid => !selChars.includes(cid));
+                        if (missing.length > 0) {
+                          const names = missing.map(cid => { const ch = (project?.characters || []).find(c => c.id === cid); return ch?.name; }).filter(Boolean);
+                          if (names.length > 0) items2.push({ icon: "👥", text: `Also at ${loc.name}: ${names.join(", ")} (not in this scene)`, color: "var(--nf-accent-2)" });
+                        }
+                      }
+                    });
+                    // Character relationship tensions for this scene
+                    if (selChars.length >= 2 && project?.relationships?.length) {
+                      const sceneRels = project.relationships.filter(r =>
+                        selChars.includes(r.char1) && selChars.includes(r.char2) && r.tension && r.tension !== "none"
+                      );
+                      sceneRels.forEach(r => {
+                        const c1 = (project?.characters || []).find(c => c.id === r.char1);
+                        const c2 = (project?.characters || []).find(c => c.id === r.char2);
+                        const tensionColors = { low: "var(--nf-success)", medium: "var(--nf-accent-2)", high: "var(--nf-accent)", explosive: "var(--nf-accent)" };
+                        items2.push({ icon: r.tension === "explosive" ? "⚡" : r.tension === "high" ? "🔥" : "↔", text: `${c1?.name || "?"} ↔ ${c2?.name || "?"}: ${r.tension} tension (${r.category || "romantic"})${r.dynamic ? ` — ${r.dynamic.slice(0, 60)}` : ""}`, color: tensionColors[r.tension] || "var(--nf-text-muted)" });
+                      });
+                      // Dead characters warning
+                      selChars.forEach(cid => {
+                        const ch = (project?.characters || []).find(c => c.id === cid);
+                        if (ch?.status === "dead") items2.push({ icon: "†", text: `${ch.name} is dead${ch.statusChangedChapter ? ` (since Ch${ch.statusChangedChapter})` : ""} — flashback?`, color: "var(--nf-accent)" });
+                      });
+                    }
+                    if (items2.length === 0) return null;
+                    return (
+                      <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 8, fontSize: 10, lineHeight: 1.7 }}>
+                        <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Scene context (auto-derived)</div>
+                        {items2.map((item3, idx) => (
+                          <div key={idx} style={{ color: item3.color }}>{item3.icon} {item3.text}</div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 4 }}>
                   {/* FIX 5: Move up/down buttons — swap chapter numbers */}
@@ -11931,6 +13335,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   <button onClick={() => updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) })} className="nf-btn-icon" style={{ padding: 1 }} aria-label="Delete plot entry"><Icons.Trash /></button>
                 </div>
               </div>
+              </div>
+              )}
             </div>
             );
           })}
@@ -11965,7 +13371,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
     const tensionColors = { none: "var(--nf-text-muted)", low: "var(--nf-success)", medium: "var(--nf-accent-2)", high: "var(--nf-accent)", explosive: "var(--nf-accent)" };
     return (
       <div className="nf-write-layout">
-        <div className="nf-content-scroll" style={{ maxWidth: 800, flex: 1 }}>
+        <div className="nf-content-scroll" style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
             <h2 className="nf-page-title">Relationships</h2>
             <div style={{ display: "flex", gap: 6 }}>
@@ -12013,8 +13419,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   </button>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      {(() => { const c1 = allChars.find(c => c.id === r.char1); return c1?.image ? <img src={c1.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} /> : null; })()}
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{c1Name || "?"}</span>
                       <span style={{ color: "var(--nf-accent)", fontSize: 14 }}>↔</span>
+                      {(() => { const c2 = allChars.find(c => c.id === r.char2); return c2?.image ? <img src={c2.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} /> : null; })()}
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{c2Name || "?"}</span>
                       {r.status && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)" }}>{r.status}</span>}
                       {r.category && r.category !== "romantic" && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{r.category}</span>}
@@ -12036,6 +13444,45 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 {/* Expanded form */}
                 {isExpanded && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--nf-border)" }}>
+                    {/* ─── Auto-derived context from characters ─── */}
+                    {r.char1 && r.char2 && (() => {
+                      const c1 = allChars.find(c => c.id === r.char1);
+                      const c2 = allChars.find(c => c.id === r.char2);
+                      if (!c1 && !c2) return null;
+                      // Shared locations
+                      const c1Locs = new Set(), c2Locs = new Set(), sharedLocs = [];
+                      (project?.worldBuilding || []).forEach(w => {
+                        if (!Array.isArray(w.frequentCharacters) || !w.name) return;
+                        if (w.frequentCharacters.includes(r.char1)) c1Locs.add(w.name);
+                        if (w.frequentCharacters.includes(r.char2)) c2Locs.add(w.name);
+                        if (w.frequentCharacters.includes(r.char1) && w.frequentCharacters.includes(r.char2)) sharedLocs.push(w.name);
+                      });
+                      // Shared orgs
+                      const sharedOrgs = [];
+                      (project?.worldBuilding || []).forEach(w => {
+                        if (w.category !== "Organization" || !Array.isArray(w.orgHierarchy)) return;
+                        const c1In = w.orgHierarchy.some(p => p.charId === r.char1) || (Array.isArray(w.orgMembers) && w.orgMembers.includes(r.char1));
+                        const c2In = w.orgHierarchy.some(p => p.charId === r.char2) || (Array.isArray(w.orgMembers) && w.orgMembers.includes(r.char2));
+                        if (c1In && c2In && w.name) sharedOrgs.push(w.name);
+                      });
+                      // Shared plot chapters
+                      const sharedChapters = (project?.plotOutline || []).filter(pl =>
+                        Array.isArray(pl.characters) && pl.characters.includes(r.char1) && pl.characters.includes(r.char2)
+                      );
+                      // Status warnings
+                      const c1Dead = c1?.status === "dead", c2Dead = c2?.status === "dead";
+                      if (!sharedLocs.length && !sharedOrgs.length && !sharedChapters.length && !c1Dead && !c2Dead) return null;
+                      return (
+                        <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginBottom: 10, fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.7 }}>
+                          <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Auto-derived context</div>
+                          {(c1Dead || c2Dead) && <div style={{ color: "var(--nf-accent)", fontWeight: 600 }}>⚠ {c1Dead && c1 ? `${c1.name} is dead` : ""}{c1Dead && c2Dead ? " & " : ""}{c2Dead && c2 ? `${c2.name} is dead` : ""} — relationship is historical</div>}
+                          {sharedLocs.length > 0 && <div>📍 Shared locations: <span style={{ color: "var(--nf-accent-2)", fontWeight: 500 }}>{sharedLocs.join(", ")}</span></div>}
+                          {sharedOrgs.length > 0 && <div>⛨ Same organization: <span style={{ color: "rgba(160,140,200,0.8)", fontWeight: 500 }}>{sharedOrgs.join(", ")}</span></div>}
+                          {sharedChapters.length > 0 && <div>Together in {sharedChapters.length} chapter{sharedChapters.length !== 1 ? "s" : ""}: {sharedChapters.map(pl => `Ch${pl.chapter || "?"}`).join(", ")}</div>}
+                          {c1?.personality && c2?.personality && <div style={{ marginTop: 2 }}>Personality clash: <span style={{ fontStyle: "italic" }}>{c1.name}: {c1.personality.split(/[.,]/)[0]?.trim()}</span> vs <span style={{ fontStyle: "italic" }}>{c2.name}: {c2.personality.split(/[.,]/)[0]?.trim()}</span></div>}
+                        </div>
+                      );
+                    })()}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 12, alignItems: "end", marginBottom: 8 }}>
                       {charOptions.length >= 2 ? (
                         <SelectField label="Character 1" value={r.char1} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, char1: v } : re) })} options={charOptions} placeholder="Select..." />

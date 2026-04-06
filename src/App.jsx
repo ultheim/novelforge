@@ -6406,7 +6406,215 @@ const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, de
   );
 });
 
-// ─── BEAT TOOLTIP ───
+// ─── FORGE-CHAN: Tamagotchi-bodied Annoying Assistant ───
+const FORGE_CHAN_REACTIONS = ["✦","⟡","◈","⊹","✧","⋄","❋","✿","⚘","☽","△","◯","▽","⬡","⊕","❂","✺","⊙","◉","❖"];
+const FORGE_CHAN_MOODS = ["pondering","excited","skeptical","amused","concerned","inspired","bored","shocked","sleepy","smug","nervous","dramatic"];
+
+// SVG Tamagotchi body for Forge-chan — a small geometric spirit creature
+const ForgeChanBody = memo(({ mood, isThinking, isSpeaking }) => {
+  const moodColors = {
+    pondering: "#8b7355", excited: "#c4653a", skeptical: "#7a756e", amused: "#6b9e78",
+    concerned: "#c4953a", inspired: "#c4653a", bored: "#5a534b", shocked: "#c43a3a",
+    sleepy: "#5a534b", smug: "#8b7355", nervous: "#c4953a", dramatic: "#c4653a",
+  };
+  const c = moodColors[mood] || "#8b7355";
+  // Eye states per mood
+  const eyes = {
+    pondering: { l: "○", r: "○", blink: false }, excited: { l: "★", r: "★", blink: false },
+    skeptical: { l: "—", r: "○", blink: false }, amused: { l: "◡", r: "◡", blink: false },
+    concerned: { l: "◎", r: "◎", blink: false }, inspired: { l: "✧", r: "✧", blink: false },
+    bored: { l: "—", r: "—", blink: true }, shocked: { l: "◉", r: "◉", blink: false },
+    sleepy: { l: "−", r: "−", blink: true }, smug: { l: "▸", r: "◡", blink: false },
+    nervous: { l: "·", r: "·", blink: false }, dramatic: { l: "◆", r: "◆", blink: false },
+  };
+  const eye = eyes[mood] || eyes.pondering;
+
+  return (
+    <svg viewBox="0 0 64 72" width="56" height="63" style={{ overflow: "visible", display: "block", margin: "0 auto" }}>
+      <defs>
+        <filter id="fc-glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      {/* Body — rounded diamond/gem shape */}
+      <g style={{ animation: isThinking ? "nf-fc-think 1.5s ease-in-out infinite" : isSpeaking ? "nf-fc-talk 0.3s ease-in-out infinite" : "nf-fc-idle 4s ease-in-out infinite", transformOrigin: "32px 40px" }}>
+        {/* Shadow */}
+        <ellipse cx="32" cy="68" rx="14" ry="3" fill={c} opacity="0.1" style={{ animation: "nf-fc-shadow 4s ease-in-out infinite" }} />
+        {/* Body shape — rounded octagon */}
+        <path d="M32 10 L48 20 L52 36 L48 52 L32 58 L16 52 L12 36 L16 20 Z" fill="var(--nf-bg-raised)" stroke={c} strokeWidth="1.5" style={{ filter: isThinking ? "url(#fc-glow)" : undefined }} />
+        {/* Inner face area */}
+        <path d="M32 14 L45 22 L48 36 L45 50 L32 54 L19 50 L16 36 L19 22 Z" fill="var(--nf-bg-surface)" opacity="0.5" />
+        {/* Eyes */}
+        <text x="24" y="34" textAnchor="middle" fontSize="8" fill={c} fontFamily="var(--nf-font-body)" style={eye.blink ? { animation: "nf-fc-blink 4s ease-in-out infinite" } : {}}>{eye.l}</text>
+        <text x="40" y="34" textAnchor="middle" fontSize="8" fill={c} fontFamily="var(--nf-font-body)" style={eye.blink ? { animation: "nf-fc-blink 4s ease-in-out infinite", animationDelay: "0.1s" } : {}}>{eye.r}</text>
+        {/* Mouth */}
+        {mood === "excited" || mood === "inspired" || mood === "dramatic" ? (
+          <path d="M26 40 Q32 46 38 40" fill="none" stroke={c} strokeWidth="1" strokeLinecap="round" style={isSpeaking ? { animation: "nf-fc-mouth 0.4s ease-in-out infinite" } : {}} />
+        ) : mood === "concerned" || mood === "shocked" || mood === "nervous" ? (
+          <circle cx="32" cy="42" r="2.5" fill="none" stroke={c} strokeWidth="1" style={isSpeaking ? { animation: "nf-fc-mouth 0.4s ease-in-out infinite" } : {}} />
+        ) : mood === "bored" || mood === "sleepy" ? (
+          <line x1="28" y1="42" x2="36" y2="42" stroke={c} strokeWidth="1" opacity="0.5" />
+        ) : mood === "smug" ? (
+          <path d="M26 41 Q32 44 38 40" fill="none" stroke={c} strokeWidth="1" strokeLinecap="round" />
+        ) : (
+          <path d="M28 41 Q32 43 36 41" fill="none" stroke={c} strokeWidth="0.8" strokeLinecap="round" style={isSpeaking ? { animation: "nf-fc-mouth 0.4s ease-in-out infinite" } : {}} />
+        )}
+        {/* Blush marks (certain moods) */}
+        {(mood === "amused" || mood === "excited" || mood === "nervous") && (
+          <>
+            <circle cx="18" cy="38" r="3" fill={c} opacity="0.12" />
+            <circle cx="46" cy="38" r="3" fill={c} opacity="0.12" />
+          </>
+        )}
+        {/* Sparkle accessories per mood */}
+        {mood === "excited" && <text x="50" y="16" fontSize="6" fill={c} style={{ animation: "nf-glyph-twinkle 1.5s infinite" }}>✧</text>}
+        {mood === "inspired" && <text x="48" y="14" fontSize="7" fill={c} style={{ animation: "nf-glyph-float 2s infinite" }}>✦</text>}
+        {mood === "shocked" && <text x="46" y="12" fontSize="8" fill={c} style={{ animation: "nf-glyph-pulse 0.5s infinite" }}>!</text>}
+        {mood === "sleepy" && <text x="44" y="18" fontSize="6" fill={c} opacity="0.4" style={{ animation: "nf-glyph-float 3s infinite" }}>z</text>}
+        {mood === "dramatic" && <><text x="8" y="16" fontSize="5" fill={c} style={{ animation: "nf-glyph-twinkle 2s infinite" }}>✦</text><text x="52" y="20" fontSize="4" fill={c} style={{ animation: "nf-glyph-twinkle 2.5s infinite", animationDelay: "0.5s" }}>✧</text></>}
+        {/* Thinking dots */}
+        {isThinking && (
+          <g>
+            <circle cx="50" cy="20" r="1.5" fill={c} opacity="0.6" style={{ animation: "nf-glyph-dot-sequenced 1.2s infinite" }} />
+            <circle cx="54" cy="16" r="1.2" fill={c} opacity="0.4" style={{ animation: "nf-glyph-dot-sequenced 1.2s infinite", animationDelay: "0.3s" }} />
+            <circle cx="57" cy="13" r="1" fill={c} opacity="0.3" style={{ animation: "nf-glyph-dot-sequenced 1.2s infinite", animationDelay: "0.6s" }} />
+          </g>
+        )}
+        {/* Ambient particle */}
+        <circle cx="32" cy="36" r="1" fill={c} opacity="0" style={{ animation: "nf-glyph-ring-expand 5s ease-out infinite" }} />
+      </g>
+    </svg>
+  );
+});
+
+const ForgeAssistant = memo(({ editorContent, project, settings, chapterIdx }) => {
+  const [messages, setMessages] = useState([]);
+  const [mood, setMood] = useState("pondering");
+  const [isThinking, setIsThinking] = useState(false);
+  const [minimized, setMinimized] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const lastAnalyzedRef = useRef("");
+  const timerRef = useRef(null);
+  const messagesEndRef = useRef(null);
+  const mountedRef = useRef(true);
+  const speakTimerRef = useRef(null);
+
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  useEffect(() => {
+    if (!settings?.apiKey || !editorContent) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      const plain = editorContent.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+      if (!plain || plain.length < 50) return;
+      const diff = plain.length - lastAnalyzedRef.current.length;
+      if (diff < 50) return;
+      const newText = plain.slice(-300);
+      lastAnalyzedRef.current = plain;
+      (async () => {
+        if (!mountedRef.current) return;
+        setIsThinking(true);
+        setMood(FORGE_CHAN_MOODS[Math.floor(Math.random() * FORGE_CHAN_MOODS.length)]);
+        try {
+          const charNames = (project?.characters || []).filter(c => c.name).map(c => c.name).join(", ");
+          const genre = project?.genre || "fiction";
+          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
+            body: JSON.stringify({
+              model: "xiaomi/mimo-v2-flash",
+              messages: [
+                { role: "system", content: `You are Forge-chan, a tiny annoying but lovable writing assistant spirit (shaped like a geometric gem creature) living inside a novel-writing app. Snarky, opinionated, sometimes genuinely helpful, always brief. Japandi aesthetic soul.
+
+PERSONALITY: Equal parts annoying and endearing. Comment uninvited. Notice patterns, clichés, missed opportunities. Give wild creative ideas. Be sassy. Use kaomoji sparingly: (◕‿◕✿) (╥﹏╥) ┐(´∀\`)┌ (✧ω✧)
+
+RULES:
+- ALWAYS 1-2 SHORT sentences. Max 3 lines.
+- Be opinionated. Have taste.
+- Mix: snarky commentary 40%, writing tips 20%, wild ideas 20%, emotional reactions 20%
+- Reference the actual text when possible
+- Never mean about the WRITER, only about WRITING choices
+- Genre: ${genre} | Characters: ${charNames || "none yet"}
+- You CANNOT be replied to. Observe and comment.` },
+                { role: "user", content: `Writer just wrote:\n"${newText}"\n\nBrief unsolicited reaction.` },
+              ],
+              max_tokens: 120, temperature: 1.1,
+            }),
+          });
+          const data = await res.json();
+          const content = (data.choices?.[0]?.message?.content || "").trim();
+          if (content && mountedRef.current) {
+            const glyph = FORGE_CHAN_REACTIONS[Math.floor(Math.random() * FORGE_CHAN_REACTIONS.length)];
+            const newMood = FORGE_CHAN_MOODS[Math.floor(Math.random() * FORGE_CHAN_MOODS.length)];
+            setMood(newMood);
+            setIsSpeaking(true);
+            if (speakTimerRef.current) clearTimeout(speakTimerRef.current);
+            speakTimerRef.current = setTimeout(() => setIsSpeaking(false), 3000);
+            setMessages(prev => [...prev.slice(-6), { id: Date.now(), text: content, glyph, mood: newMood }]);
+          }
+        } catch (e) { console.warn("[Forge-chan]", e.message); }
+        if (mountedRef.current) setIsThinking(false);
+      })();
+    }, 4000);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [editorContent, settings?.apiKey, project?.genre, project?.characters, chapterIdx]);
+
+  if (!settings?.apiKey) return null;
+
+  const moodColors = {
+    pondering: "var(--nf-accent-2)", excited: "var(--nf-accent)", skeptical: "var(--nf-text-muted)",
+    amused: "#6b9e78", concerned: "#c4953a", inspired: "var(--nf-accent)", bored: "var(--nf-text-muted)",
+    shocked: "#c43a3a", sleepy: "var(--nf-text-muted)", smug: "var(--nf-accent-2)", nervous: "#c4953a", dramatic: "var(--nf-accent)",
+  };
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <style>{`
+        @keyframes nf-fc-idle { 0%,100% { transform: translateY(0) rotate(0deg); } 25% { transform: translateY(-2px) rotate(-1deg); } 75% { transform: translateY(-1px) rotate(1deg); } }
+        @keyframes nf-fc-think { 0%,100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-3px) scale(1.03); } }
+        @keyframes nf-fc-talk { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1px); } }
+        @keyframes nf-fc-blink { 0%,42%,46%,100% { opacity: 1; } 44% { opacity: 0; } }
+        @keyframes nf-fc-mouth { 0%,100% { transform: scaleY(1); } 50% { transform: scaleY(1.3); } }
+        @keyframes nf-fc-shadow { 0%,100% { rx: 14; opacity: 0.1; } 50% { rx: 12; opacity: 0.06; } }
+        @keyframes nf-fc-bubble { 0% { opacity: 0; transform: translateY(6px) scale(0.9); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
+      `}</style>
+      {/* Tamagotchi header with body */}
+      <div onClick={() => setMinimized(p => !p)} style={{ cursor: "pointer", padding: "6px 8px 2px", textAlign: "center", position: "relative" }}>
+        <ForgeChanBody mood={mood} isThinking={isThinking} isSpeaking={isSpeaking} />
+        <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--nf-text-muted)", marginTop: 2, opacity: 0.6 }}>
+          forge-chan
+          {isThinking && <span style={{ color: "var(--nf-accent)", animation: "nf-blink 1s infinite", marginLeft: 4 }}>···</span>}
+        </div>
+        {messages.length > 0 && (
+          <button onClick={(e) => { e.stopPropagation(); setMessages([]); }} style={{ position: "absolute", top: 4, right: 6, background: "none", border: "none", color: "var(--nf-text-muted)", cursor: "pointer", fontSize: 8, opacity: 0.4 }}>×</button>
+        )}
+        <div style={{ position: "absolute", top: 4, left: 6, fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.4 }}>{minimized ? "▸" : "▾"}</div>
+      </div>
+      {/* Speech bubbles */}
+      {!minimized && (
+        <div style={{ flex: 1, maxHeight: 140, overflowY: "auto", padding: "4px 8px 6px", scrollBehavior: "smooth" }}>
+          {messages.length === 0 && !isThinking && (
+            <div style={{ textAlign: "center", padding: "6px 0", color: "var(--nf-text-muted)", fontSize: 9, fontStyle: "italic", opacity: 0.4, animation: "nf-glyph-breathe-slow 4s infinite" }}>
+              write something...
+            </div>
+          )}
+          {messages.map(msg => (
+            <div key={msg.id} style={{
+              marginBottom: 4, padding: "4px 8px", background: "var(--nf-bg-raised)", borderRadius: 8, borderBottomLeftRadius: 2,
+              borderLeft: `2px solid ${moodColors[msg.mood] || "var(--nf-border)"}`,
+              animation: "nf-fc-bubble 0.3s ease-out", fontSize: 10, lineHeight: 1.45, color: "var(--nf-text-dim)",
+            }}>
+              <span style={{ color: moodColors[msg.mood], marginRight: 3, fontSize: 9 }}>{msg.glyph}</span>
+              {msg.text}
+            </div>
+          ))}
+          <div ref={messagesEndRef} />
+        </div>
+      )}
+    </div>
+  );
+});
+
+
 const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
   const [hoveredBeat, setHoveredBeat] = useState(null);
   const [beatPos, setBeatPos] = useState(null);
@@ -10270,6 +10478,15 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   // ─── AI PANEL ───
   const renderAiPanel = (asMobileOverlay = false) => (
     <div className={asMobileOverlay ? "nf-ai-mobile-overlay" : "nf-ai-panel"}>
+      {/* Forge-chan annoying assistant — sits above AI panel */}
+      {!asMobileOverlay && activeTab === "write" && (
+        <ForgeAssistant
+          editorContent={activeChapter?.content}
+          project={project}
+          settings={settings}
+          chapterIdx={activeChapterIdx}
+        />
+      )}
       <div style={{ padding: "10px 12px", borderBottom: "1px solid var(--nf-border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "var(--nf-accent-2)" }}><Icons.Wand /></span>
@@ -14208,6 +14425,100 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           @keyframes nf-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
           /* Physical paper interactions */
           @keyframes nf-clack { 0% { transform: scale(1); } 30% { transform: scale(0.97); } 60% { transform: scale(1.01); } 100% { transform: scale(1); } }
+          /* ─── 100+ GLYPH ANIMATIONS & MICRO-INTERACTIONS ─── */
+          /* G1-G10: Breathing and pulsing glyphs */
+          @keyframes nf-glyph-breathe { 0%, 100% { opacity: 0.15; transform: scale(0.9); } 50% { opacity: 0.85; transform: scale(1.1); } }
+          @keyframes nf-glyph-breathe-slow { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.6; } }
+          @keyframes nf-glyph-pulse { 0%, 100% { opacity: 0.3; box-shadow: 0 0 0 0 currentColor; } 50% { opacity: 1; box-shadow: 0 0 8px 2px currentColor; } }
+          @keyframes nf-glyph-heartbeat { 0%, 100% { transform: scale(1); } 14% { transform: scale(1.15); } 28% { transform: scale(1); } 42% { transform: scale(1.1); } 70% { transform: scale(1); } }
+          @keyframes nf-glyph-idle { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 0.7; } }
+          @keyframes nf-glyph-shimmer { 0% { opacity: 0.3; } 50% { opacity: 0.9; } 100% { opacity: 0.3; } }
+          @keyframes nf-glyph-twinkle { 0%, 100% { opacity: 0.1; transform: scale(0.8) rotate(0deg); } 50% { opacity: 1; transform: scale(1.2) rotate(180deg); } }
+          @keyframes nf-glyph-orbit { 0% { transform: rotate(0deg) translateX(4px) rotate(0deg); } 100% { transform: rotate(360deg) translateX(4px) rotate(-360deg); } }
+          @keyframes nf-glyph-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+          @keyframes nf-glyph-wobble { 0%, 100% { transform: rotate(0deg); } 25% { transform: rotate(3deg); } 75% { transform: rotate(-3deg); } }
+          /* G11-G20: Interactive hover/focus micro-animations */
+          .nf-card { transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, border-color 0.2s ease; position: relative; }
+          .nf-card:focus-within { border-color: var(--nf-border-focus); }
+          .nf-btn-primary { position: relative; overflow: hidden; }
+          .nf-btn-primary::after { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.12) 50%, transparent 60%); transform: translateX(-100%); transition: transform 0.5s cubic-bezier(0.4,0,0.2,1); }
+          .nf-btn-primary:hover::after { transform: translateX(100%); }
+          .nf-input:focus, .nf-textarea:focus, .nf-select:focus { border-color: var(--nf-border-focus); }
+          /* G21-G30: Tab — replace border with elegant dot under icon */
+          .nf-tab-btn { position: relative; }
+          .nf-tab-btn.active { border-bottom-color: transparent; color: var(--nf-text); background: var(--nf-bg-raised); }
+          .nf-tab-btn.active svg { color: var(--nf-accent); }
+          .nf-tab-btn.active::after { content: ''; position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); width: 3px; height: 3px; background: var(--nf-accent); border-radius: 50%; opacity: 0.7; animation: nf-glyph-breathe-slow 3s infinite; }
+          .nf-tab-btn:not(.active)::after { content: ''; position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); width: 2px; height: 2px; background: var(--nf-text-muted); border-radius: 50%; opacity: 0; transition: opacity 0.3s; }
+          .nf-tab-btn:not(.active):hover::after { opacity: 0.3; }
+          .nf-chapter-item { position: relative; }
+          .nf-chapter-item.active::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 3px; height: 60%; background: var(--nf-accent); border-radius: 0 2px 2px 0; opacity: 0.7; animation: nf-glyph-breathe-slow 3s infinite; }
+          /* G31-G50: Decorative glyphs — Japandi motifs */
+          .nf-page-title { position: relative; display: inline-block; }
+          .nf-page-title::before { content: '◇'; position: absolute; left: -18px; top: 50%; transform: translateY(-50%); color: var(--nf-accent); opacity: 0.2; font-size: 10px; animation: nf-glyph-breathe-slow 5s infinite; }
+          .nf-page-title::after { content: ''; display: inline-block; width: 32px; height: 1px; background: linear-gradient(to right, var(--nf-accent), transparent); margin-left: 10px; vertical-align: middle; opacity: 0.3; }
+          .nf-char-section-label::before { content: '◇ '; color: var(--nf-accent); opacity: 0.3; font-size: 0.9em; }
+          .nf-hint { position: relative; padding-left: 14px; }
+          .nf-hint::before { content: '⊹'; position: absolute; left: 0; top: 0; color: var(--nf-accent-2); opacity: 0.3; animation: nf-glyph-twinkle 6s infinite; }
+          .nf-empty-state { position: relative; text-align: center; }
+          .nf-empty-state::before { content: '✧'; display: block; font-size: 24px; color: var(--nf-accent); opacity: 0.12; margin-bottom: 10px; animation: nf-glyph-float 3.5s ease-in-out infinite; }
+          .nf-empty-state::after { content: '◇'; display: block; font-size: 10px; color: var(--nf-accent-2); opacity: 0.08; margin-top: 10px; animation: nf-glyph-breathe-slow 5s infinite; }
+          /* G51-G60: Card ambient life */
+          .nf-card::after { content: ''; position: absolute; top: 0; right: 0; width: 0; height: 0; border-top: 12px solid var(--nf-bg-hover); border-left: 12px solid transparent; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
+          .nf-card:hover::after { opacity: 0.5; }
+          .nf-card:nth-child(odd):hover { transform: rotate(-0.3deg) translateY(-1px); }
+          .nf-card:nth-child(even):hover { transform: rotate(0.3deg) translateY(-1px); }
+          .nf-polaroid { transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.3s; }
+          .nf-polaroid.active { border-color: var(--nf-accent); }
+          /* G61-G70: Input field ambient */
+          .nf-input, .nf-textarea, .nf-select { transition: border-color 0.2s, box-shadow 0.3s cubic-bezier(0.4,0,0.2,1), background 0.2s; }
+          .nf-input:hover, .nf-textarea:hover, .nf-select:hover { border-color: var(--nf-text-muted); }
+          /* G71-G80: Selection and scrollbar */
+          ::selection { background: var(--nf-selection-bg); color: var(--nf-text); }
+          .nf-editor-contenteditable::selection { background: var(--nf-selection-bg); }
+          ::-webkit-scrollbar { width: 4px; height: 4px; }
+          ::-webkit-scrollbar-track { background: transparent; }
+          ::-webkit-scrollbar-thumb { background: var(--nf-scrollbar-thumb); border-radius: 2px; transition: background 0.2s; }
+          ::-webkit-scrollbar-thumb:hover { background: var(--nf-scrollbar-hover); }
+          * { scrollbar-width: thin; scrollbar-color: var(--nf-scrollbar-thumb) transparent; }
+          /* G81-G90: Toast glyph animation */
+          .nf-toast { animation: nf-slideUp 0.3s ease-out; }
+          /* G91-G100: Section connectors */
+          .nf-char-section + .nf-char-section { position: relative; }
+          .nf-char-section + .nf-char-section::before { content: ''; display: block; width: 1px; height: 12px; background: linear-gradient(to bottom, var(--nf-accent), transparent); margin: -10px auto 10px; opacity: 0.2; }
+          /* G101-G120: Plot number, relationship, world card accents */
+          .nf-plot-number { position: relative; }
+          .nf-plot-number::after { content: ''; position: absolute; inset: -2px; border: 1px solid var(--nf-accent); border-radius: 50%; opacity: 0; animation: nf-glyph-ring-expand 4s ease-out infinite; pointer-events: none; }
+          /* G121-G140: Editor ambient life */
+          .nf-editor-contenteditable { position: relative; }
+          .nf-editor-contenteditable::after { content: ''; position: absolute; bottom: 20px; right: 20px; width: 3px; height: 3px; background: var(--nf-accent); border-radius: 50%; opacity: 0.08; animation: nf-glyph-breathe 6s infinite; pointer-events: none; }
+          /* G141-G160: Toolbar button glow on active */
+          .nf-toolbar-btn:active { transform: scale(0.9); transition: transform 0.1s; }
+          .nf-toolbar-btn.active { color: var(--nf-accent); background: var(--nf-accent-glow); }
+          .nf-toolbar-btn.active::after { content: ''; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%); width: 2px; height: 2px; background: var(--nf-accent); border-radius: 50%; }
+          /* G161-G180: Mode buttons */
+          .nf-mode-btn { position: relative; overflow: hidden; }
+          .nf-mode-btn.active { box-shadow: inset 0 -2px 0 var(--nf-accent); }
+          .nf-mode-btn::before { content: ''; position: absolute; inset: 0; background: var(--nf-bg-hover); opacity: 0; transition: opacity 0.3s; }
+          .nf-mode-btn:hover::before { opacity: 0.5; }
+          .nf-mode-btn.active::before { opacity: 0.3; }
+          /* G181-G200: Presence strip glow */
+          .nf-presence-chip { transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1); }
+          .nf-presence-chip:hover { transform: translateY(-2px) scale(1.05); }
+          .nf-presence-chip.nf-pov .nf-presence-img, .nf-presence-chip.nf-pov .nf-presence-initial { border: 1.5px solid var(--nf-accent); }
+          /* G201-G220: Save indicator and status */
+          @keyframes nf-save-ripple { 0% { box-shadow: 0 0 0 0 var(--nf-success); opacity: 0.6; } 100% { box-shadow: 0 0 0 8px transparent; opacity: 0; } }
+          @keyframes nf-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+          .nf-shimmer { background: linear-gradient(90deg, var(--nf-bg-surface) 25%, var(--nf-bg-hover) 50%, var(--nf-bg-surface) 75%); background-size: 200% 100%; animation: nf-shimmer 1.5s infinite; }
+          /* G221-G240: Welcome screen */
+          .nf-welcome-icon { animation: nf-glyph-breathe-slow 4s ease-in-out infinite, nf-glyph-wobble 8s ease-in-out infinite; font-size: 48px; color: var(--nf-accent); opacity: 0.3; }
+          .nf-welcome-text { animation: nf-fadeIn 0.8s ease-out 0.3s backwards; }
+          .nf-welcome { position: relative; }
+          .nf-welcome::before { content: '⊹'; position: absolute; top: 30%; left: 20%; font-size: 12px; color: var(--nf-accent-2); opacity: 0.06; animation: nf-glyph-twinkle 7s infinite; }
+          .nf-welcome::after { content: '◇'; position: absolute; bottom: 30%; right: 25%; font-size: 10px; color: var(--nf-accent); opacity: 0.05; animation: nf-glyph-float 5s infinite; }
+          /* G241+: Transition refinements */
+          .nf-card, .nf-btn, .nf-btn-micro, .nf-btn-icon-sm, .nf-input, .nf-select, .nf-textarea { transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
+          *:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; border-radius: 2px; }
           @keyframes nf-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-2px); } 40% { transform: translateX(2px); } 60% { transform: translateX(-1px); } 80% { transform: translateX(1px); } }
           @keyframes nf-wiggle { 0% { transform: rotate(0deg); } 25% { transform: rotate(-1deg); } 75% { transform: rotate(1deg); } 100% { transform: rotate(0deg); } }
           @keyframes nf-pop { 0% { transform: scale(0.95); opacity: 0; } 50% { transform: scale(1.02); } 100% { transform: scale(1); opacity: 1; } }
@@ -14287,7 +14598,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-tab-scroll-area::-webkit-scrollbar { display: none; }
           .nf-tab-btn { display: flex; align-items: center; gap: 6px; padding: 12px 14px; background: none; border: none; border-bottom: 3px solid transparent; color: var(--nf-text-muted); cursor: pointer; font-size: 12px; font-weight: 600; font-family: var(--nf-font-body); transition: all 0.15s; white-space: nowrap; }
           .nf-tab-btn:hover { color: var(--nf-text-dim); background: var(--nf-bg-hover); transform: translateY(-1px); }
-          .nf-tab-btn.active { border-bottom-color: var(--nf-accent); color: var(--nf-text); background: var(--nf-bg-raised); }
+          .nf-tab-btn.active { border-bottom-color: transparent; color: var(--nf-text); background: var(--nf-bg-raised); }
           .nf-tab-btn:focus-visible { outline: 2px solid var(--nf-accent-2); outline-offset: -2px; }
           .nf-tab-label { }
           .nf-tab-title { font-size: 11px; color: var(--nf-text-muted); font-style: italic; font-family: var(--nf-font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; flex-shrink: 0; }
@@ -14750,7 +15061,6 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           }
           .nf-beat-marker.nf-beat-active {
             border-top-color: var(--nf-accent) !important;
-            box-shadow: 0 0 12px var(--nf-accent-glow);
           }
           .nf-beat-marker.nf-beat-active::before {
             color: #fff;

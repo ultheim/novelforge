@@ -6261,221 +6261,382 @@ const RelWebMinimap = memo(({ characters, relationships, onClick }) => {
   );
 });
 
-// ─── GLYPH RAIL — Nothing Phone-inspired ambient indicators ───
-// ─── EDITOR COLOR CODING: Character Voice & Narrative Mode ───
-// Colors the actual TEXT in the editor (non-destructive — stripped on save)
-const VOICE_COLORS = [
-  "#c4653a", "#6b9e78", "#7a8bc4", "#c49e3a", "#9e6bc4", "#3ac4a8",
-  "#c43a6b", "#8bc43a", "#3a8bc4", "#c47a3a", "#6bc49e", "#c43a9e",
-];
-const NARRATIVE_FONT_COLORS = {
-  dialogue: "#c4653a",   // warm amber
-  thought: "#7a8bc4",    // cool blue
-  action: "#6b9e78",     // green
-  exposition: "#8b7355", // muted earth
-};
-const NARRATIVE_LABELS = { dialogue: "Dialogue", thought: "Thought", action: "Action", exposition: "Exposition" };
+// ─── EDITOR COLOR CODING v3: Strict dialogue-only voice detection ───
+const VOICE_COLORS = ["#c4653a","#6b9e78","#7a8bc4","#c49e3a","#9e6bc4","#3ac4a8","#c43a6b","#8bc43a","#3a8bc4","#c47a3a","#6bc49e","#c43a9e"];
+const NARRATIVE_FONT_COLORS = { dialogue: "#c4653a", thought: "#7a8bc4", action: "#6b9e78", exposition: "#8b7355" };
 
-const _charColorMap = (characters) => {
-  const map = {};
-  (characters || []).filter(c => c.name && !c.isBulk).forEach((c, i) => {
-    map[c.id] = { color: VOICE_COLORS[i % VOICE_COLORS.length], name: c.name, image: c.image, aliases: (c.aliases || "").split(",").map(a => a.trim()).filter(Boolean) };
+const _charColorMap = (chars) => {
+  const m = {};
+  (chars || []).filter(c => c.name && !c.isBulk).forEach((c, i) => {
+    m[c.id] = { color: VOICE_COLORS[i % VOICE_COLORS.length], name: c.name, image: c.image,
+      firstLower: c.name.split(/\s+/)[0].toLowerCase(),
+      fullLower: c.name.toLowerCase(),
+      aliasesLower: (c.aliases || "").split(",").map(a => a.trim().toLowerCase()).filter(a => a.length > 1),
+      isFemale: /^(she|female|trans woman)/i.test((c.pronouns || "") + " " + (c.gender || "")),
+      isMale: /^(he|male|trans man)/i.test((c.pronouns || "") + " " + (c.gender || "")),
+    };
   });
-  return map;
+  return m;
 };
 
-// Build name → charId lookup
-const _buildNameLookup = (charColorMap) => {
-  const lookup = {};
-  for (const [id, info] of Object.entries(charColorMap)) {
-    lookup[info.name.toLowerCase()] = id;
-    const first = info.name.split(/\s+/)[0];
-    if (first.length > 2) lookup[first.toLowerCase()] = id;
-    info.aliases.forEach(a => { if (a.length > 1) lookup[a.toLowerCase()] = id; });
+// Strict dialogue detection: only match actual dialogue quotes (paired open+close)
+const _hasDialogue = (text) => {
+  // Match paired smart quotes or paired straight quotes around 3+ chars
+  return /\u201C[^\u201D]{3,}\u201D/.test(text) || /(?<![a-zA-Z])"[^"]{3,}"(?![a-zA-Z])/.test(text);
+};
+
+// Find speaker: look for name/pronoun within attribution phrases NEAR the dialogue
+const _findSpeakerStrict = (text, charMap) => {
+  const t = text.toLowerCase();
+  // Extract the non-dialogue parts (the attribution text around the quotes)
+  const attribution = t.replace(/[\u201C"][^\u201D"]*[\u201D"]/g, "___QUOTE___");
+  // Common speech verb patterns
+  const speechVerbs = /\b(said|asked|replied|whispered|muttered|shouted|yelled|cried|exclaimed|murmured|growled|snapped|hissed|sighed|laughed|called|answered|demanded|insisted|suggested|admitted|added|continued|began|warned|promised|agreed|argued|explained|offered|announced|pleaded|screamed|begged|stated|declared|protested|grumbled|chuckled|breathed|rasped)\b/;
+  
+  if (!speechVerbs.test(attribution)) {
+    // No speech verb in attribution — can't determine speaker from this paragraph alone
+    return null;
   }
-  return lookup;
-};
-
-// Find speaker for a paragraph containing dialogue
-const _findSpeaker = (text, nameLookup) => {
-  const textLower = text.toLowerCase();
-  let bestId = null, bestDist = Infinity;
-  for (const [name, id] of Object.entries(nameLookup)) {
-    const idx = textLower.indexOf(name);
-    if (idx >= 0 && idx < bestDist) { bestDist = idx; bestId = id; }
+  
+  // Find all character names/first-names in the attribution text (not inside quotes)
+  const entries = Object.entries(charMap);
+  // Sort by name length desc to match longest first
+  entries.sort((a, b) => b[1].fullLower.length - a[1].fullLower.length);
+  
+  for (const [id, info] of entries) {
+    // Check full name
+    const fullIdx = attribution.indexOf(info.fullLower);
+    if (fullIdx >= 0) {
+      const before = fullIdx > 0 ? attribution[fullIdx - 1] : " ";
+      const after = fullIdx + info.fullLower.length < attribution.length ? attribution[fullIdx + info.fullLower.length] : " ";
+      if (!/[a-z]/.test(before) && !/[a-z]/.test(after)) return id;
+    }
+    // Check first name (only if 3+ chars to avoid false positives)
+    if (info.firstLower.length >= 3) {
+      const firstIdx = attribution.indexOf(info.firstLower);
+      if (firstIdx >= 0) {
+        const before = firstIdx > 0 ? attribution[firstIdx - 1] : " ";
+        const after = firstIdx + info.firstLower.length < attribution.length ? attribution[firstIdx + info.firstLower.length] : " ";
+        if (!/[a-z]/.test(before) && !/[a-z]/.test(after)) return id;
+      }
+    }
+    // Check aliases
+    for (const alias of info.aliasesLower) {
+      const aIdx = attribution.indexOf(alias);
+      if (aIdx >= 0) {
+        const before = aIdx > 0 ? attribution[aIdx - 1] : " ";
+        const after = aIdx + alias.length < attribution.length ? attribution[aIdx + alias.length] : " ";
+        if (!/[a-z]/.test(before) && !/[a-z]/.test(after)) return id;
+      }
+    }
   }
-  return bestId;
+  
+  // Pronoun detection: "she said" → find last mentioned female character
+  const pronounMatch = attribution.match(/\b(she|he|they)\s+\w*(said|asked|replied|whispered|muttered|shouted)/);
+  if (pronounMatch) {
+    const p = pronounMatch[1];
+    // Return null — pronoun alone isn't enough, let lastSpeaker carry forward instead
+    return null;
+  }
+  return null;
 };
 
-// Classify narrative mode of a paragraph
-const _classifyNarrative = (text) => {
-  const t = text.trim();
-  if (!t) return null;
-  if (/[""\u201C][^""\u201D]+[""\u201D]/.test(t)) return "dialogue";
-  if (/\b(thought|wondered|realized|felt|knew|remembered|wished|considered|pondered|mused)\b/i.test(t) || /^[*_].*[*_]$/.test(t)) return "thought";
-  if (/^(She|He|They|I|We|The|A|It)\s+(walked|ran|grabbed|pulled|pushed|jumped|turned|looked|moved|stood|sat|fell|threw|kicked|punched|drew|swung|dodged|ducked|leapt|lunged|dashed|sprinted|crept|crawled|climbed|stepped|reached|opened|closed|slammed|blocked|fired|charged|struck|hurled|bolted|froze)/i.test(t)) return "action";
-  if (t.length < 100 && /\b(grabbed|slammed|rushed|burst|dashed|crashed|leapt|dodged|struck|blocked|swung|fired|charged|bolted|froze)\b/i.test(t)) return "action";
+const _classifyNarrative = (t) => {
+  const s = t.trim(); if (!s) return null;
+  if (_hasDialogue(s)) return "dialogue";
+  if (/\b(thought|wondered|realized|felt|knew|remembered|wished|considered|pondered|mused)\b/i.test(s)) return "thought";
+  if (/^(She|He|They|I|We|The|A|It)\s+(walked|ran|grabbed|pulled|pushed|jumped|turned|looked|moved|stood|sat|fell|threw|kicked|drew|swung|dodged|ducked|leapt|lunged|dashed|sprinted|crept|crawled|climbed|stepped|reached|opened|closed|slammed|blocked|fired|charged|struck|hurled|bolted|froze)/i.test(s)) return "action";
+  if (s.length < 100 && /\b(grabbed|slammed|rushed|burst|dashed|crashed|leapt|dodged|struck|blocked|swung|fired|charged|bolted|froze)\b/i.test(s)) return "action";
   return "exposition";
 };
 
-// Hook: apply/remove text colors directly on editor DOM paragraphs
-const useEditorColorCoding = (editorRef, colorMode, characters, contentTrigger) => {
+const useEditorColorCoding = (editorRef, colorMode, characters, contentVersion) => {
   const charColors = useMemo(() => _charColorMap(characters), [characters]);
-  const nameLookup = useMemo(() => _buildNameLookup(charColors), [charColors]);
-  const lastSpeakerRef = useRef(null);
-
+  const timerRef = useRef(null);
   useEffect(() => {
-    const el = editorRef.current;
-    if (!el) return;
-
-    // Get all block-level children (p, div, or direct text nodes)
-    const blocks = el.querySelectorAll("p, div:not(.nf-img-wrapper):not(figure)");
-    const directChildren = blocks.length > 0 ? blocks : el.childNodes;
-
+    const el = editorRef.current; if (!el) return;
     if (colorMode === "off") {
-      // Strip all color styles
-      for (const node of directChildren) {
-        if (node.style) { node.style.color = ""; node.style.borderLeft = ""; node.style.paddingLeft = ""; node.removeAttribute("data-nf-speaker"); }
-      }
-      lastSpeakerRef.current = null;
+      el.querySelectorAll("p").forEach(p => { p.style.removeProperty("color"); p.removeAttribute("data-nfc"); });
       return;
     }
-
-    lastSpeakerRef.current = null;
-
-    for (const node of directChildren) {
-      if (!node.textContent?.trim()) {
-        if (node.style) { node.style.color = ""; node.style.borderLeft = ""; node.style.paddingLeft = ""; }
-        continue;
-      }
-      const text = node.textContent;
-
-      if (colorMode === "voice") {
-        const hasQuote = /[""\u201C]/.test(text);
-        let speakerId = null;
-        if (hasQuote) {
-          speakerId = _findSpeaker(text, nameLookup);
-          if (!speakerId) speakerId = lastSpeakerRef.current; // carry forward
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      const sel = window.getSelection(); let saved = null;
+      if (sel.rangeCount > 0 && el.contains(sel.anchorNode)) try { saved = sel.getRangeAt(0).cloneRange(); } catch {}
+      const blocks = el.querySelectorAll("p");
+      let lastSpeaker = null;
+      blocks.forEach(block => {
+        const text = block.textContent || "";
+        if (!text.trim()) { block.style.removeProperty("color"); block.removeAttribute("data-nfc"); return; }
+        let color = null;
+        if (colorMode === "voice") {
+          // ONLY color paragraphs with actual dialogue
+          if (_hasDialogue(text)) {
+            let sid = _findSpeakerStrict(text, charColors);
+            if (!sid) sid = lastSpeaker; // Carry forward ONLY for dialogue lines
+            if (sid) lastSpeaker = sid;
+            if (sid && charColors[sid]) { color = charColors[sid].color; block.setAttribute("data-nfc", sid); }
+            else block.removeAttribute("data-nfc");
+          } else {
+            // NOT dialogue — never color, never carry forward
+            block.style.removeProperty("color");
+            block.removeAttribute("data-nfc");
+            return; // Skip color assignment
+          }
+        } else if (colorMode === "narrative") {
+          const mode = _classifyNarrative(text);
+          if (mode) { color = NARRATIVE_FONT_COLORS[mode]; block.setAttribute("data-nfc", mode); }
+          else block.removeAttribute("data-nfc");
         }
-        if (speakerId) lastSpeakerRef.current = speakerId;
-
-        if (speakerId && charColors[speakerId]) {
-          const c = charColors[speakerId];
-          node.style.color = c.color;
-          node.setAttribute("data-nf-speaker", speakerId);
-        } else {
-          node.style.color = "";
-          node.removeAttribute("data-nf-speaker");
-        }
-        // No border — just font color
-        node.style.borderLeft = "";
-        node.style.paddingLeft = "";
-
-      } else if (colorMode === "narrative") {
-        const mode = _classifyNarrative(text);
-        if (mode && NARRATIVE_FONT_COLORS[mode]) {
-          node.style.color = NARRATIVE_FONT_COLORS[mode];
-        } else {
-          node.style.color = "";
-        }
-        node.style.borderLeft = "";
-        node.style.paddingLeft = "";
-        node.removeAttribute("data-nf-speaker");
-      }
-    }
-  }, [colorMode, editorRef, charColors, nameLookup, contentTrigger]);
-
+        if (color) block.style.setProperty("color", color, "important");
+        else block.style.removeProperty("color");
+      });
+      if (saved) try { sel.removeAllRanges(); sel.addRange(saved); } catch {}
+    }, 300);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [colorMode, editorRef, charColors, contentVersion]);
   return charColors;
 };
 
-// Character hover popup on colored text
 const VoiceHoverPopup = memo(({ editorRef, charColors }) => {
   const [popup, setPopup] = useState(null);
-
   useEffect(() => {
-    const el = editorRef.current;
-    if (!el) return;
-
-    const onMove = (e) => {
-      const target = e.target.closest?.("[data-nf-speaker]") || (e.target.getAttribute?.("data-nf-speaker") ? e.target : null);
-      if (target) {
-        const speakerId = target.getAttribute("data-nf-speaker");
-        const info = charColors[speakerId];
-        if (info) { setPopup({ info, x: e.clientX + 14, y: e.clientY - 8 }); return; }
-      }
-      setPopup(null);
-    };
-    const onLeave = () => setPopup(null);
-
-    el.addEventListener("mousemove", onMove);
-    el.addEventListener("mouseleave", onLeave);
-    return () => { el.removeEventListener("mousemove", onMove); el.removeEventListener("mouseleave", onLeave); };
+    const el = editorRef.current; if (!el) return;
+    const onMove = (e) => { const t = e.target.closest?.("[data-nfc]"); if (t) { const id = t.getAttribute("data-nfc"); const info = charColors[id]; if (info) { setPopup({ info, x: e.clientX + 14, y: e.clientY - 8 }); return; } } setPopup(null); };
+    el.addEventListener("mousemove", onMove); el.addEventListener("mouseleave", () => setPopup(null));
+    return () => { el.removeEventListener("mousemove", onMove); el.removeEventListener("mouseleave", () => {}); };
   }, [editorRef, charColors]);
-
   if (!popup) return null;
-
-  return createPortal(
-    <div style={{
-      position: "fixed", top: popup.y, left: popup.x, zIndex: 10000,
-      background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)",
-      borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 8,
-      boxShadow: "var(--nf-shadow)", pointerEvents: "none", animation: "nf-fadeIn 0.1s ease-out",
-    }}>
-      {popup.info.image ? (
-        <img src={popup.info.image} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `2px solid ${popup.info.color}`, flexShrink: 0 }} />
-      ) : (
-        <div style={{ width: 26, height: 26, borderRadius: "50%", background: popup.info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#fff", fontWeight: 600, flexShrink: 0 }}>
-          {popup.info.name[0]}
-        </div>
-      )}
-      <div>
-        <div style={{ fontSize: 11, fontWeight: 600, color: popup.info.color, lineHeight: 1.2 }}>{popup.info.name}</div>
-        <div style={{ fontSize: 8, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>speaking</div>
-      </div>
-    </div>,
-    document.body
-  );
+  return createPortal(<div style={{ position: "fixed", top: popup.y, left: popup.x, zIndex: 10000, background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)", borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 8, boxShadow: "var(--nf-shadow)", pointerEvents: "none", animation: "nf-fadeIn 0.1s ease-out" }}>
+    {popup.info.image ? <img src={popup.info.image} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `2px solid ${popup.info.color}`, flexShrink: 0 }} /> : <div style={{ width: 26, height: 26, borderRadius: "50%", background: popup.info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#fff", fontWeight: 600, flexShrink: 0 }}>{popup.info.name[0]}</div>}
+    <div><div style={{ fontSize: 11, fontWeight: 600, color: popup.info.color, lineHeight: 1.2 }}>{popup.info.name}</div><div style={{ fontSize: 8, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>speaking</div></div>
+  </div>, document.body);
 });
 
-// Color mode legend bar
 const ColorModeBar = memo(({ colorMode, setColorMode, characters }) => {
   const charColors = useMemo(() => _charColorMap(characters), [characters]);
   if (colorMode === "off") return null;
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: 6, padding: "3px 12px",
-      borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)",
-      minHeight: 26, animation: "nf-fadeIn 0.15s ease-out",
-    }}>
-      {colorMode === "voice" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, overflow: "hidden" }}>
-          <span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span>
-          <div style={{ display: "flex", gap: 6, overflow: "hidden", flexWrap: "nowrap" }}>
-            {Object.entries(charColors).slice(0, 8).map(([id, info]) => (
-              <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                {info.image ? <img src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8, color: "#fff", fontWeight: 600 }}>{info.name[0]}</div>}
-                <span style={{ fontSize: 9, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {colorMode === "narrative" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}>
-          <span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Mode</span>
-          {Object.entries(NARRATIVE_FONT_COLORS).map(([mode, color]) => (
-            <div key={mode} style={{ display: "flex", alignItems: "center", gap: 3 }}>
-              <span style={{ color, fontSize: 11, fontWeight: 600 }}>A</span>
-              <span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "capitalize" }}>{mode}</span>
-            </div>
-          ))}
-        </div>
-      )}
-      <button onClick={() => setColorMode("off")} className="nf-btn-icon" style={{ padding: 2, opacity: 0.5 }}><Icons.X /></button>
-    </div>
-  );
+  return (<div style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 12px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", minHeight: 26, animation: "nf-fadeIn 0.15s ease-out" }}>
+    {colorMode === "voice" && <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, overflow: "hidden" }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span><div style={{ display: "flex", gap: 6, overflow: "hidden" }}>{Object.entries(charColors).slice(0, 8).map(([id, info]) => <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>{info.image ? <img src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, fontSize: 8, color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{info.name[0]}</div>}<span style={{ fontSize: 9, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span></div>)}</div></div>}
+    {colorMode === "narrative" && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Mode</span>{Object.entries(NARRATIVE_FONT_COLORS).map(([mode, color]) => <div key={mode} style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color, fontSize: 11, fontWeight: 600 }}>A</span><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "capitalize" }}>{mode}</span></div>)}</div>}
+    <button onClick={() => setColorMode("off")} className="nf-btn-icon" style={{ padding: 2, opacity: 0.5 }}><Icons.X /></button>
+  </div>);
 });
 
+// ─── WRITE OR WHIP! v3 — Beat-scoped content tracking ───
+// ─── WRITE OR WHIP! v4 — One beat at a time, locked progression ───
+// ─── WRITE OR WHIP! v5 — No memo, editorRef direct DOM reads, one beat at a time ───
+function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose }) {
+  const [unlockedUpTo, setUnlockedUpTo] = useState(0);
+  const [beatScores, setBeatScores] = useState({});
+  const [isScoring, setIsScoring] = useState(false);
+  const abortRef = useRef(null);
+  // Store snapshots: word count at the moment each beat was started
+  const beatSnapshots = useRef({});
+  // Force re-render counter
+  const [, forceUpdate] = useState(0);
+
+  // Find plot entry — try linkedPlotId first, then chapter number match
+  const plotEntry = useMemo(() => {
+    const outline = project?.plotOutline || [];
+    const ch = project?.chapters?.[chapterIdx];
+    return outline.find(pl => ch?.linkedPlotId && pl.id === ch.linkedPlotId) || outline.find(pl => (pl.chapter || 0) === (chapterIdx + 1)) || null;
+  }, [project?.plotOutline, project?.chapters, chapterIdx]);
+
+  // Get beats — handle string, array, or missing
+  const beats = useMemo(() => {
+    if (!plotEntry) return [];
+    const b = plotEntry.beats;
+    if (Array.isArray(b)) return b;
+    if (typeof b === "string" && b.trim()) {
+      return b.split("\n").filter(l => l.trim()).map((l, i) => ({ id: `tmp_${i}`, title: `Beat ${i + 1}`, description: l.trim() }));
+    }
+    return [];
+  }, [plotEntry]);
+
+  const currentBeatIdx = Math.min(unlockedUpTo, beats.length - 1);
+  const currentBeat = beats[currentBeatIdx];
+  const currentScore = beatScores[currentBeatIdx];
+  const passed = currentScore?.score >= 7;
+  const allDone = beats.length > 0 && currentBeatIdx >= beats.length - 1 && passed;
+
+  // Read fresh text from editor DOM
+  const getEditorText = useCallback(() => {
+    const el = editorRef?.current;
+    if (!el) return "";
+    return (el.innerText || el.textContent || "").trim();
+  }, [editorRef]);
+
+  // Initialize first beat snapshot
+  useEffect(() => {
+    if (beats.length > 0 && beatSnapshots.current[0] === undefined) {
+      beatSnapshots.current[0] = getEditorText();
+    }
+  }, [beats.length, getEditorText]);
+
+  // Get text written for CURRENT beat
+  const getBeatText = useCallback(() => {
+    const full = getEditorText();
+    const snap = beatSnapshots.current[currentBeatIdx];
+    if (snap === undefined || snap === null) return full;
+    if (full === snap) return "";
+    // Try to extract only new text
+    if (full.length > snap.length) {
+      // Check if the snapshot is a prefix
+      if (full.startsWith(snap)) return full.slice(snap.length).trim();
+      // Otherwise just take the difference in length from the end
+      return full.slice(snap.length).trim();
+    }
+    // User deleted text — return whatever is there
+    return full;
+  }, [getEditorText, currentBeatIdx]);
+
+  // Score
+  const scoreCurrentBeat = useCallback(async () => {
+    if (!currentBeat || !settings?.apiKey) return;
+    // Read FRESH from DOM right now
+    const beatText = getBeatText();
+    const fullText = getEditorText();
+    const textToScore = beatText.length >= 15 ? beatText : fullText;
+    if (textToScore.length < 15) return;
+
+    if (abortRef.current) abortRef.current.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setIsScoring(true);
+    try {
+      const title = typeof currentBeat === "string" ? currentBeat : (currentBeat.title || currentBeat.description || `Beat ${currentBeatIdx + 1}`);
+      const desc = typeof currentBeat === "object" ? (currentBeat.description || "") : "";
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST", signal: ctrl.signal,
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
+        body: JSON.stringify({
+          model: "xiaomi/mimo-v2-flash",
+          messages: [
+            { role: "system", content: "You are Forge-chan, a BRUTAL writing coach. Score writing against a beat/scene goal.\n\nFORMAT (exactly):\nSCORE: X/10\nThen 2-3 lines of harsh specific feedback.\n7+ = pass. Below 7 = fail, demand rewrite." },
+            { role: "user", content: `BEAT GOAL: "${title}"${desc ? `\nDetails: ${desc}` : ""}\n\nTEXT (last ${Math.min(textToScore.length, 800)} chars):\n"${textToScore.slice(-800)}"\n\n${beatText.length < 15 ? "(Warning: almost no new text for this beat)" : ""}\nScore it.` },
+          ],
+          max_tokens: 200, temperature: 0.85,
+        }),
+      });
+      const data = await res.json();
+      const raw = (data.choices?.[0]?.message?.content || "").trim();
+      const sm = raw.match(/SCORE:\s*(\d+)/i);
+      const ns = sm ? Math.min(10, Math.max(1, parseInt(sm[1]))) : 5;
+      setBeatScores(prev => ({ ...prev, [currentBeatIdx]: { score: ns, feedback: raw.replace(/SCORE:\s*\d+\/?\d*\s*/i, "").trim() } }));
+    } catch (e) { if (e.name !== "AbortError") console.warn("[WoW]", e); }
+    setIsScoring(false);
+  }, [currentBeat, currentBeatIdx, settings?.apiKey, getBeatText, getEditorText]);
+
+  // Unlock next beat
+  const advanceBeat = useCallback(() => {
+    if (!passed || currentBeatIdx >= beats.length - 1) return;
+    const nextIdx = currentBeatIdx + 1;
+    // Snapshot the current editor text as the starting point for the next beat
+    beatSnapshots.current[nextIdx] = getEditorText();
+    setUnlockedUpTo(nextIdx);
+    // Force re-render to show new beat
+    forceUpdate(c => c + 1);
+  }, [passed, currentBeatIdx, beats.length, getEditorText]);
+
+  // No beats
+  if (!beats.length) return (
+    <div style={{ padding: 12, textAlign: "center", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)" }}>
+      <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>No beats for this chapter. Add beats in Plot tab first.</div>
+      <button onClick={onClose} className="nf-btn-micro" style={{ marginTop: 6 }}><Icons.X /> Close</button>
+    </div>
+  );
+
+  const sc = currentScore?.score;
+  const scoreColor = sc >= 7 ? "#6b9e78" : sc >= 4 ? "#c4953a" : sc ? "#c43a3a" : "var(--nf-text-muted)";
+
+  return (
+    <div style={{ borderBottom: "2px solid var(--nf-accent)", background: "var(--nf-bg-deep)" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", borderBottom: "1px solid var(--nf-border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 12 }}>⚡</span>
+          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent)" }}>Write or Whip!</span>
+        </div>
+        <button onClick={onClose} className="nf-btn-icon" style={{ padding: 2 }}><Icons.X /></button>
+      </div>
+
+      {/* Progress dots */}
+      <div style={{ display: "flex", gap: 3, padding: "5px 10px", alignItems: "center" }}>
+        {beats.map((_, i) => {
+          const bs = beatScores[i];
+          const isPassed = bs?.score >= 7;
+          const isCurrent = i === currentBeatIdx;
+          const isLocked = i > unlockedUpTo;
+          return <div key={i} style={{
+            flex: 1, height: 4, borderRadius: 2, transition: "all 0.3s",
+            background: isPassed ? "#6b9e78" : isCurrent ? "var(--nf-accent)" : "var(--nf-border)",
+            opacity: isLocked ? 0.15 : 1,
+          }} />;
+        })}
+        <span style={{ fontSize: 8, color: "var(--nf-text-muted)", marginLeft: 4, flexShrink: 0 }}>{currentBeatIdx + 1}/{beats.length}</span>
+      </div>
+
+      {/* Content */}
+      {allDone ? (
+        <div style={{ padding: "16px 10px", textAlign: "center" }}>
+          <div style={{ fontSize: 20, marginBottom: 6 }}>🏆</div>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#6b9e78" }}>All {beats.length} beats completed!</div>
+          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4 }}>Forge-chan reluctantly approves.</div>
+        </div>
+      ) : currentBeat ? (
+        <div style={{ padding: "8px 10px 10px" }}>
+          {/* Beat header */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--nf-accent)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{currentBeatIdx + 1}</div>
+            <div style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--nf-text)" }}>
+              {typeof currentBeat === "string" ? currentBeat : (currentBeat.title || `Beat ${currentBeatIdx + 1}`)}
+            </div>
+            <button onClick={scoreCurrentBeat} disabled={isScoring} className="nf-btn-micro"
+              style={isScoring ? { opacity: 0.5 } : { borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}>
+              {isScoring ? "⚡..." : currentScore ? "⚡ Rescore" : "⚡ Score"}
+            </button>
+          </div>
+
+          {/* Beat description */}
+          {typeof currentBeat === "object" && currentBeat.description && (
+            <div style={{ fontSize: 10, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6, padding: "4px 8px", background: "var(--nf-bg-surface)", borderRadius: 3, borderLeft: "2px solid var(--nf-accent)" }}>
+              {currentBeat.description}
+            </div>
+          )}
+
+          {/* Instruction */}
+          <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginBottom: 6, fontStyle: "italic" }}>
+            Write this beat in the editor, then click Score. Need 7/10 to unlock next beat.
+          </div>
+
+          {/* Score */}
+          {currentScore && (
+            <div style={{ padding: "8px 10px", background: "var(--nf-bg-raised)", borderRadius: 4, borderLeft: `3px solid ${scoreColor}`, marginBottom: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <span style={{ fontSize: 24, fontWeight: 700, color: scoreColor, fontFamily: "var(--nf-font-display)", lineHeight: 1 }}>{sc}</span>
+                <div>
+                  <div style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>/10</div>
+                  {sc >= 7 ? <div style={{ fontSize: 10, color: "#6b9e78", fontWeight: 700 }}>✓ PASSED</div> : <div style={{ fontSize: 10, color: "#c43a3a", fontWeight: 700 }}>✗ REWRITE</div>}
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: "var(--nf-text-dim)", lineHeight: 1.5 }}>{currentScore.feedback}</div>
+            </div>
+          )}
+
+          {/* Unlock next beat — ONLY after passing */}
+          {passed && currentBeatIdx < beats.length - 1 && (
+            <button onClick={advanceBeat} className="nf-btn nf-btn-primary" style={{ width: "100%", justifyContent: "center", fontSize: 11, padding: "8px 0" }}>
+              Unlock Beat {currentBeatIdx + 2} →
+            </button>
+          )}
+        </div>
+      ) : (
+        <div style={{ padding: 12, fontSize: 10, color: "var(--nf-text-muted)" }}>No beat data found.</div>
+      )}
+    </div>
+  );
+}
 
 const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, detectedCharIds, relationships, sessionProgress }) => {
   const CW = 22;
@@ -7511,6 +7672,7 @@ export default function NovelForge() {
   const [showRelWeb, setShowRelWeb] = useState(false);
   const [cleanView, setCleanView] = useState(false); // Full-screen reader mode
   const [colorMode, setColorMode] = useState("off"); // "off" | "voice" | "narrative"
+  const [whipMode, setWhipMode] = useState(false); // Write or Whip! mode
   const [pdfExportMode, setPdfExportMode] = useState(null);
   const [imagePromptData, setImagePromptData] = useState(null); // { prompt, mentionedChars, primaryWorld, worldRefImages }
   const imagePromptAbortRef = useRef(null);
@@ -8188,7 +8350,7 @@ export default function NovelForge() {
     if (!el) return;
     let html = el.innerHTML;
     // Strip color-coding styles injected by useEditorColorCoding (non-destructive)
-    html = html.replace(/\s*style="color: rgb\([^"]*\);?"/g, "").replace(/\s*data-nf-speaker="[^"]*"/g, "");
+    html = html.replace(/\s*style="color:[^"]*!important;?\s*"/g, "").replace(/\s*style="color: rgb\([^"]*\);?"/g, "").replace(/\s*data-nf-speaker="[^"]*"/g, "").replace(/\s*data-nfc="[^"]*"/g, "");
     const currentContent = activeChapter?.content || "";
     if (html !== lastSyncedContentRef.current || html !== currentContent) {
       lastSyncedContentRef.current = html;
@@ -10825,6 +10987,16 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   // ─── AI PANEL ───
   const renderAiPanel = (asMobileOverlay = false) => (
     <div className={asMobileOverlay ? "nf-ai-mobile-overlay" : "nf-ai-panel"}>
+      {/* Write or Whip! — beat scoring panel */}
+      {!asMobileOverlay && activeTab === "write" && whipMode && (
+        <WriteOrWhipPanel
+          project={project}
+          settings={settings}
+          chapterIdx={activeChapterIdx}
+          editorRef={editorRef}
+          onClose={() => setWhipMode(false)}
+        />
+      )}
       {/* Forge-chan annoying assistant — sits above AI panel */}
       {!asMobileOverlay && activeTab === "write" && (
         <ForgeAssistant
@@ -11890,6 +12062,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             <Tooltip text="Color: Narrative mode">
               <button onClick={() => setColorMode(prev => prev === "narrative" ? "off" : "narrative")} className="nf-btn-icon-sm" style={colorMode === "narrative" ? { borderColor: "var(--nf-accent-2)", color: "var(--nf-accent-2)" } : {}} aria-label="Narrative mode colors">
                 <Icons.Layers /> {!isMobile && "Mode"}
+              </button>
+            </Tooltip>
+            <Tooltip text="Write or Whip! — beat scoring mode">
+              <button onClick={() => setWhipMode(prev => !prev)} className="nf-btn-icon-sm" style={whipMode ? { borderColor: "var(--nf-accent)", color: "var(--nf-accent)", background: "var(--nf-accent-glow)" } : {}} aria-label="Write or Whip mode">
+                <Icons.Zap /> {!isMobile && "Whip!"}
               </button>
             </Tooltip>
             <Tooltip text="Export to PDF">

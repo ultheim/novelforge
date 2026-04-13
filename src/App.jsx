@@ -610,6 +610,39 @@ const estimateTokens = (text) => {
 };
 const stripThinkingTokens = (text) => {
   if (!text) return text;
+
+
+// ─── AI MODEL FALLBACK ───
+const _getModel = (settings) => settings?.model || "anthropic/claude-sonnet-4";
+
+
+// ─── AI RATE LIMIT TRACKER ───
+const _aiRateTracker = {
+  _lastCall: 0,
+  _minInterval: 500, // ms between calls
+  canCall() {
+    const now = Date.now();
+    if (now - this._lastCall < this._minInterval) return false;
+    this._lastCall = now;
+    return true;
+  }
+};
+
+// ─── SAFE AI FETCH — handles HTTP errors, strips thinking tokens ───
+const _safeAIFetch = async (url, options, signal) => {
+  const opts = { ...options };
+  if (signal) opts.signal = signal;
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    const status = res.status;
+    if (status === 429) throw new Error("Rate limited — wait a moment and try again");
+    if (status === 401 || status === 403) throw new Error("Invalid API key — check your key in Settings");
+    if (status === 402) throw new Error("Insufficient credits — add credits to your OpenRouter account");
+    if (status >= 500) throw new Error("AI service temporarily unavailable — try again");
+    throw new Error(`API error (${status})`);
+  }
+  return res;
+};
   // I2: First strip complete think blocks, then strip unclosed think tags
   // Use lazy match for complete blocks, and for unclosed tags only strip to end
   let result = text.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -701,7 +734,7 @@ const renderMarkdown = (text) => {
   html = html.replace(/~~(.+?)~~/g, '<del>$1</del>');
   html = html.replace(/^### (.+)$/gm, '<div style="font-size:14px;font-weight:700;margin:14px 0 6px;color:var(--nf-text)">$1</div>');
   html = html.replace(/^## (.+)$/gm, '<div style="font-size:15px;font-weight:700;margin:16px 0 6px;color:var(--nf-text)">$1</div>');
-  html = html.replace(/^# (.+)$/gm, '<div style="font-size:17px;font-weight:700;margin:18px 0 8px;color:var(--nf-text)">$1</div>');
+  html = html.replace(/^# (.+)$/gm, '<div style="font-size:18px;font-weight:700;margin:18px 0 8px;color:var(--nf-text)">$1</div>');
   html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--nf-border);margin:14px 0"/>');
   html = html.replace(/^- (.+)$/gm, '<div style="padding-left:18px;position:relative;margin:3px 0"><span style="position:absolute;left:5px;color:var(--nf-accent)">•</span>$1</div>');
   html = html.replace(/^(\d+)\. (.+)$/gm, '<div style="padding-left:22px;position:relative;margin:3px 0"><span style="position:absolute;left:0;color:var(--nf-accent-2);font-weight:600;font-size:0.9em">$1.</span>$2</div>');
@@ -1177,7 +1210,7 @@ const _buildCrossRefContext = (project, charId) => {
       if (o.reportsTo) line += ` (reports to ${o.reportsTo}, ${o.reportsToTitle})`;
       if (o.subordinates?.length) line += ` (manages: ${o.subordinates.map(s => `${s.name} as ${s.title}`).join(", ")})`;
       if (o.peers?.length) line += ` (peers: ${o.peers.map(p => p.name).join(", ")})`;
-      if (o.orgPurpose) line += ` — mission: ${o.orgPurpose.slice(0, 100)}`;
+      if (o.orgPurpose) line += ` — mission: ${_truncateAtBoundary(o.orgPurpose, 100)}`;
       lines.push(line);
     });
   }
@@ -1185,6 +1218,16 @@ const _buildCrossRefContext = (project, charId) => {
   if (cr.locationDangers?.length) lines.push(`Location dangers: ${cr.locationDangers.map(d => `${d.name}: ${d.dangers}`).join("; ")}`);
   if (cr.locationRules?.length) lines.push(`Location rules: ${cr.locationRules.map(r => `${r.name}: ${r.rules}`).join("; ")}`);
   if (cr.locationAtmospheres?.length) lines.push(`Location vibes: ${cr.locationAtmospheres.map(a => `${a.name}: ${a.atmosphere}`).join("; ")}`);
+  if (cr.locationSensory?.length) lines.push(`Location sensory: ${cr.locationSensory.map(s => `${s.name}: ${s.sensory}`).join("; ")}`);
+  if (cr.charRelationships?.length > 0) {
+    const relSummary = cr.charRelationships.slice(0, 8).map(r => {
+      let desc = `${r.otherName} (${r.category || "other"}, ${r.status || "?"})`;
+      if (r.tension && r.tension !== "none") desc += ` [${r.tension} tension]`;
+      if (r.trustLevel) desc += ` [trust: ${r.trustLevel}]`;
+      return desc;
+    });
+    lines.push(`Relationships: ${relSummary.join("; ")}`);
+  }
   if (cr.enemies?.length) lines.push(`Enemies/rivals: ${cr.enemies.map(e => e.otherName).join(", ")}`);
   if (cr.allies?.length) lines.push(`Trusted allies: ${cr.allies.map(a => `${a.otherName} (trust: ${a.trustLevel})`).join(", ")}`);
   if (cr.romanticInterests?.length) lines.push(`Romantic: ${cr.romanticInterests.map(r => `${r.otherName} (${r.status}, ${r.tension} tension)`).join(", ")}`);
@@ -1197,6 +1240,23 @@ const _buildCrossRefContext = (project, charId) => {
   if (cr.connectedWorldEntries?.length) lines.push(`Connected world lore: ${cr.connectedWorldEntries.map(w => `${w.name} [${w.category || "?"}]`).join(", ")}`);
   if (cr.orgPeers?.length) lines.push(`Org peers (same level): ${cr.orgPeers.map(p => p.name).join(", ")}`);
   if (cr.relKeyScenes?.length) lines.push(`Key relationship scenes: ${cr.relKeyScenes.map(s => `with ${s.name}: ${s.scenes}`).join("; ")}`);
+  // Motif connections — which motifs are associated with this character
+  if (project.motifs?.length > 0) {
+    const charName = (project.characters || []).find(c => c.id === charId)?.name;
+    if (charName) {
+      const charMotifs = project.motifs.filter(m => m.name && (m.appearances || []).some(a => a.context && a.context.toLowerCase().includes(charName.toLowerCase())));
+      if (charMotifs.length) lines.push(`Associated motifs: ${charMotifs.map(m => `${m.name} (${m.meaning || "?"})`).join(", ")}`);
+    }
+  }
+  // Thematic role
+  if (project.thematicArgument?.embodiedBy?.[charId]) {
+    lines.push(`Thematic role: embodies ${project.thematicArgument.embodiedBy[charId]}`);
+  }
+  // Reader knowledge — what does the reader know about this character?
+  if (project.readerKnowledge?.length > 0) {
+    const charKnowledge = project.readerKnowledge.filter(rk => rk.fact && (rk.knownBy || []).includes(charId));
+    if (charKnowledge.length) lines.push(`Character knows: ${charKnowledge.map(rk => `"${_truncateAtBoundary(rk.fact, 60)}"`).join("; ")}`);
+  }
   return lines.join("\n");
 };
 
@@ -1238,7 +1298,7 @@ const _buildPlotCrossRefContext = (project, plotId) => {
       let line = `  ${r.c1} ↔ ${r.c2}: ${r.tension || "?"} tension (${r.category || "?"})`;
       if (r.terms) line += ` — address: ${r.terms}`;
       if (r.powerDynamic && r.powerDynamic !== "equal") line += ` — power: ${r.powerDynamic}`;
-      if (r.sharedSecrets) line += ` — shared secret: ${r.sharedSecrets.slice(0, 60)}`;
+      if (r.sharedSecrets) line += ` — shared secret: ${_truncateAtBoundary(r.sharedSecrets, 60)}`;
       if (r.taboos) line += ` — taboo: ${r.taboos}`;
       lines.push(line);
     });
@@ -1273,6 +1333,57 @@ const ContextEngine = {
       if (plot?.chapter) return plot.chapter;
     }
     return chapterIdx + 1;
+  },
+
+  // ─── TIMELINE-AWARE: Parse story dates for chronological comparison ───
+  _parseStoryDate(dateStr) {
+    if (!dateStr) return null;
+    // Try standard date parsing first
+    const d = new Date(dateStr);
+    if (!isNaN(d.getTime())) return d.getTime();
+    // Try "Year X" or "Year X, Day Y" format
+    const yearMatch = dateStr.match(/year\s+(\d+)/i);
+    if (yearMatch) {
+      const dayMatch = dateStr.match(/day\s+(\d+)/i);
+      return parseInt(yearMatch[1], 10) * 10000 + (dayMatch ? parseInt(dayMatch[1], 10) : 0);
+    }
+    // Try extracting any 4-digit year
+    const anyYear = dateStr.match(/\b(\d{4})\b/);
+    if (anyYear) return parseInt(anyYear[1], 10) * 10000;
+    return null;
+  },
+
+  // Get the story date for the current chapter (from plot entry or chapter)
+  _currentStoryDate(project, chapterIdx) {
+    const plotEntry = this._plotEntryForChapter(project, chapterIdx);
+    return this._parseStoryDate(plotEntry?.date);
+  },
+
+  // Check if a story date is "before" the current chapter's date
+  // Returns true if the event has happened by the current story date
+  _hasOccurredByDate(eventDate, eventChapter, currentDate, currentChapter) {
+    // If we have dates for both, use date comparison
+    if (eventDate && currentDate) return currentDate >= eventDate;
+    // Fallback to chapter comparison
+    if (eventChapter > 0 && currentChapter > 0) return currentChapter >= eventChapter;
+    // If event has a date but current doesn't (or vice versa), fall back to chapter
+    return eventChapter > 0 ? currentChapter >= eventChapter : true;
+  },
+
+  // Detect if the current chapter is a flashback
+  _detectFlashback(project, chapterIdx) {
+    const currentDate = this._currentStoryDate(project, chapterIdx);
+    if (!currentDate) return null;
+    // Find the latest story date from previous chapters
+    let latestPrevDate = null;
+    for (let i = 0; i < chapterIdx; i++) {
+      const d = this._currentStoryDate(project, i);
+      if (d && (!latestPrevDate || d > latestPrevDate)) latestPrevDate = d;
+    }
+    if (latestPrevDate && currentDate < latestPrevDate) {
+      return { isFlashback: true, currentDate, latestPrevDate };
+    }
+    return null;
   },
   
   // Look up the plot entry for a chapter by its linkedPlotId, falling back to position
@@ -1374,6 +1485,10 @@ const ContextEngine = {
     const curPlotEntry = (project.plotOutline || []).find(pl => (pl.chapter || 0) === currentChNum);
     const sceneType = curPlotEntry?.sceneType || "";
     const isIntimateScene = sceneType === "intimate" || /\b(intimate|sex|love\s*scene|bedroom|kiss|sensual)\b/i.test(sceneNotes);
+    const isDialogueScene = sceneType === "dialogue" || /\b(conversation|discuss|argue|negotiate|confess|interview)\b/i.test(sceneNotes);
+    const isActionScene = sceneType === "action" || sceneType === "tension" || /\b(fight|chase|battle|escape|combat|danger)\b/i.test(sceneNotes);
+    const isEmotionalScene = sceneType === "emotional" || /\b(grief|mourn|breakdown|reunion|confront|reveal emotion)\b/i.test(sceneNotes);
+    const isRevelationScene = sceneType === "revelation" || /\b(reveal|discover|uncover|truth|secret.*out|twist)\b/i.test(sceneNotes);
     const heatLevel = project.heatLevel || 0;
 
     // --- Section 1: Core metadata (always included) ---
@@ -1390,6 +1505,79 @@ const ContextEngine = {
     }
     if (project.contentPrefs) meta.push(`CONTENT PREFERENCES: ${project.contentPrefs}`);
     if (project.avoidList) meta.push(`HARD LIMITS / AVOID: ${project.avoidList}`);
+    // Scene type context modifier
+    if (sceneType && sceneType !== "narrative") {
+      const sceneGuides = {
+        dialogue: "SCENE FOCUS: Dialogue-heavy — prioritize speech patterns, voice, personality. Write distinct voices for each character.",
+        action: "SCENE FOCUS: Action/tension — prioritize physicality, skills, environment dangers. Keep prose kinetic.",
+        intimate: "SCENE FOCUS: Intimate — prioritize emotional connection, sensory detail, chemistry between characters.",
+        tension: "SCENE FOCUS: High tension — prioritize stakes, power dynamics, unspoken subtext, environmental pressure.",
+        emotional: "SCENE FOCUS: Emotional — prioritize internal conflict, fears, desires, relationship dynamics.",
+        revelation: "SCENE FOCUS: Revelation/twist — build to the reveal carefully. Use dramatic irony if POV character doesn't know yet.",
+      };
+      if (sceneGuides[sceneType]) meta.push(sceneGuides[sceneType]);
+    }
+    // ─── TIMELINE-AWARE: Flashback detection ───
+    const flashback = this._detectFlashback(project, chapterIdx);
+    if (flashback) {
+      meta.push(`[FLASHBACK: This chapter is set EARLIER in the story timeline than previous chapters. The reader has already seen future events. Write with dramatic irony — the reader knows what's coming, the characters don't. Do NOT reference events that haven't happened yet in THIS timeline position.]`);
+    }
+    // ─── NARRATIVE DISTANCE ───
+    if (curChapter?.narrativeDistance) {
+      const distGuides = {
+        "cinematic": "NARRATIVE DISTANCE: Cinematic/wide — describe scenes from outside. Focus on what can be seen, heard, observed. Minimal interiority.",
+        "close-third": "NARRATIVE DISTANCE: Close third — stay near the POV character's thoughts but maintain some narrative distance. Balance action and reflection.",
+        "deep-interiority": "NARRATIVE DISTANCE: Deep interiority — live inside the POV character's head. Stream of consciousness, raw thought, sensory immediacy. Minimal exposition.",
+      };
+      if (distGuides[curChapter.narrativeDistance]) meta.push(distGuides[curChapter.narrativeDistance]);
+    }
+    // ─── SENSORY PALETTE ───
+    if (curChapter?.sensoryPalette) {
+      meta.push(`SENSORY PALETTE: ${curChapter.sensoryPalette} — weight descriptions toward these sensory elements.`);
+    }
+    // ─── SUBTEXT ───
+    if (curChapter?.subtextNotes) {
+      meta.push(`SUBTEXT: ${curChapter.subtextNotes} — this is what's happening beneath the surface. Characters may not say what they mean.`);
+    }
+    // ─── MOTIFS & SYMBOLS ───
+    if (project.motifs?.length > 0) {
+      const relevantMotifs = project.motifs.filter(m => m.name && (m.appearances || []).some(a => a.chapter <= currentChNum));
+      if (relevantMotifs.length > 0) {
+        meta.push(`MOTIFS/SYMBOLS (weave naturally): ${relevantMotifs.map(m => `${m.name} (${m.meaning || "meaning TBD"}${m.evolution ? ` → evolves: ${_truncateAtBoundary(m.evolution, 80)}` : ""})`).join("; ")}`);
+      }
+    }
+    // ─── THEMATIC ARGUMENT ───
+    if (project.thematicArgument?.thesis) {
+      const ta = project.thematicArgument;
+      let thematicLine = `THEMATIC ARGUMENT: Thesis: "${ta.thesis}"`;
+      if (ta.antithesis) thematicLine += ` | Antithesis: "${ta.antithesis}"`;
+      if (ta.synthesis) thematicLine += ` | Synthesis: "${ta.synthesis}"`;
+      // Which characters embody which side
+      if (ta.embodiedBy && Object.keys(ta.embodiedBy).length > 0) {
+        const chars = project.characters || [];
+        const sides = Object.entries(ta.embodiedBy).map(([cid, side]) => {
+          const ch = chars.find(c => c.id === cid);
+          return ch ? `${ch.name} embodies ${side}` : null;
+        }).filter(Boolean);
+        if (sides.length) thematicLine += ` | ${sides.join(", ")}`;
+      }
+      meta.push(thematicLine);
+    }
+    // ─── READER KNOWLEDGE STATE ───
+    if (project.readerKnowledge?.length > 0) {
+      const knownFacts = project.readerKnowledge.filter(rk => {
+        if (!rk.fact) return false;
+        const revealDate = this._parseStoryDate(rk.revealedDate);
+        const currentDate = this._currentStoryDate(project, chapterIdx);
+        return this._hasOccurredByDate(revealDate, rk.revealedInChapter || 0, currentDate, currentChNum);
+      });
+      if (knownFacts.length > 0) {
+        meta.push(`READER KNOWLEDGE (the reader knows these facts): ${knownFacts.map(rk => {
+          const knownByNames = (rk.knownBy || []).map(cid => (project.characters || []).find(c => c.id === cid)?.name).filter(Boolean);
+          return `"${_truncateAtBoundary(rk.fact, 80)}"${knownByNames.length ? ` (known by: ${knownByNames.join(", ")})` : " (no characters know this yet)"}`;
+        }).join("; ")}`);
+      }
+    }
     if (project.writingStyle) meta.push(`WRITING STYLE NOTES: ${project.writingStyle}`);
     if (project.continuityNotes) {
       // I8: If continuity notes contain chapter-scoped entries (e.g., "Ch5: Elena gets the scar"),
@@ -1399,7 +1587,7 @@ const ContextEngine = {
       for (const line of lines) {
         const chMatch = line.match(/^(?:•\s*)?Ch(?:apter)?\s*(\d+)\s*[:\-–—]/i);
         if (chMatch) {
-          const entryChapter = parseInt(chMatch[1]);
+          const entryChapter = parseInt(chMatch[1], 10);
           // Only include entries from the current chapter or earlier (no future spoilers)
           if (entryChapter <= currentChNum) relevantLines.push(line.trim());
         } else {
@@ -1512,6 +1700,7 @@ const ContextEngine = {
       // A9: Fields to include vary by scene context
       const getCharFields = (c, isInScene) => {
         const fields = [];
+        if (c.aliases) fields.push(["Also known as", c.aliases]);
         if (c.gender) fields.push(["Gender", c.gender]);
         if (c.age) fields.push(["Age", `${c.age}${c.firstAppearanceChapter > 0 ? ` (as of story start)` : ""}`]); // A15
         if (c.pronouns) fields.push(["Pronouns", c.pronouns]);
@@ -1563,18 +1752,24 @@ const ContextEngine = {
         if (c.strengths) fields.push(["Strengths", c.strengths]);
         if (c.skills) fields.push(["Skills/Abilities", c.skills]);
         if (c.habits) fields.push(["Habits/Mannerisms", c.habits]);
-        // A2: Backstory gated by reveal chapter
+        // A2: Backstory gated by reveal chapter OR reveal date (timeline-aware)
         if (c.backstory) {
-          if (c.backstoryRevealChapter > 0 && currentChNum < c.backstoryRevealChapter) {
+          const revealDate = ContextEngine._parseStoryDate(c.backstoryRevealDate);
+          const curDate = ContextEngine._currentStoryDate(project, chapterIdx);
+          const isRevealed = ContextEngine._hasOccurredByDate(revealDate, c.backstoryRevealChapter, curDate, currentChNum);
+          if (!isRevealed && (c.backstoryRevealChapter > 0 || c.backstoryRevealDate)) {
             fields.push(["Backstory", "[UNREVEALED — will be revealed later. Do NOT hint at or reference backstory details.]"]);
           } else {
             fields.push(["Backstory", c.backstory]);
           }
         }
-        // Secrets — gated like backstory
+        // Secrets — gated like backstory (date-aware)
         if (c.secrets) fields.push(["Known Secrets", c.secrets]);
         if (c.hiddenSecrets) {
-          if (c.secretRevealChapter > 0 && currentChNum < c.secretRevealChapter) {
+          const sRevealDate = ContextEngine._parseStoryDate(c.secretRevealDate);
+          const sCurDate = ContextEngine._currentStoryDate(project, chapterIdx);
+          const sIsRevealed = ContextEngine._hasOccurredByDate(sRevealDate, c.secretRevealChapter, sCurDate, currentChNum);
+          if (!sIsRevealed && (c.secretRevealChapter > 0 || c.secretRevealDate)) {
             fields.push(["Hidden Secrets", "[UNREVEALED — Do NOT hint at these secrets yet.]"]);
           } else {
             fields.push(["Hidden Secrets (NOW REVEALED)", c.hiddenSecrets]);
@@ -1620,6 +1815,11 @@ const ContextEngine = {
         }
         // A17: Canon notes — FIX 1.22: truncate long canon notes
         if (c.canonNotes) fields.push(["Canon notes", _truncateAtBoundary(c.canonNotes, 1000)]);
+        // Scene-type-aware emphasis notes
+        if (isDialogueScene && c.speechPattern) fields.push(["[SCENE NOTE]", "Dialogue scene — maintain this character's distinct voice throughout"]);
+        if (isActionScene && c.skills) fields.push(["[SCENE NOTE]", "Action scene — leverage this character's skills and physical capabilities"]);
+        if (isEmotionalScene && (c.fears || c.internalConflict)) fields.push(["[SCENE NOTE]", "Emotional scene — explore this character's inner world and vulnerabilities"]);
+        if (isRevelationScene && (c.hiddenSecrets || c.backstory)) fields.push(["[SCENE NOTE]", "Revelation scene — what this character knows or discovers matters"]);
         // A20: Status — FIX 1.28: Note "unknown" status explicitly
         if (c.status && c.status !== "alive") {
           let statusNote = c.status.toUpperCase();
@@ -1703,6 +1903,10 @@ const ContextEngine = {
             if (c.personality) compact += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
             // A6: Include speech pattern snippet for characters who might speak
             if (c.speechPattern) compact += ` | Voice: ${_truncateAtBoundary(c.speechPattern, 1000)}`;
+            if (c.occupation) compact += ` | ${c.occupation}`;
+            if (c.aliases) compact += ` | AKA: ${c.aliases}`;
+            if (c.allegiances) compact += ` | Loyal to: ${c.allegiances}`;
+            if (c.desires && keyRoles.has(c.role)) compact += ` | Wants: ${_truncateAtBoundary(c.desires, 100)}`;
             // A1: Arc phase only (no full arc text)
             if (c.arc) {
               const totalCh = project.chapters?.length || 1;
@@ -1863,10 +2067,12 @@ const ContextEngine = {
         const sortBySceneRelevance = (entries) => {
           if (!sceneType) return entries;
           const categoryPriority = {
-            action: ["Magic/Tech", "Location", "Organization"],
-            dialogue: ["Culture", "Organization", "Location"],
-            intimate: ["Location", "Culture"],
-            emotional: ["Culture", "Location", "History"],
+            action: ["Magic System", "Technology", "Location", "Organization"],
+            dialogue: ["Culture", "Organization", "Language", "Location"],
+            intimate: ["Location", "Culture", "Religion"],
+            emotional: ["Culture", "Location", "History", "Religion"],
+            tension: ["Location", "Organization", "Rule / Law", "Magic System"],
+            revelation: ["History", "Organization", "Religion", "Culture"],
           };
           const priorities = categoryPriority[sceneType] || [];
           return [...entries].sort((a, b) => {
@@ -1967,12 +2173,18 @@ const ContextEngine = {
             tokensUsed += this._estimateLen(entry);
           }
         }
-        // C5: Sentence-boundary truncation for compact entries
+        // C5: Compact entries for non-scene world items — category + key field
         if (others.length) {
           for (const w of others) {
             const typePrefix = w.category ? `[${w.category}] ` : "";
             let e = `• ${typePrefix}${w.name}`;
-            if (w.description) e += `: ${_truncateAtBoundary(w.description, 1000)}`;
+            if (w.description) e += `: ${_truncateAtBoundary(w.description, 120)}`;
+            // Add ONE key field per category for context
+            if (w.category === "Magic System" && w.magicRules) e += ` (rules: ${_truncateAtBoundary(w.magicRules, 80)})`;
+            else if (w.category === "Religion" && w.coreBeliefs) e += ` (beliefs: ${_truncateAtBoundary(w.coreBeliefs, 80)})`;
+            else if (w.category === "Technology" && w.techFunction) e += ` (${_truncateAtBoundary(w.techFunction, 80)})`;
+            else if (w.category === "Rule / Law" && w.enforcement) e += ` (enforced: ${_truncateAtBoundary(w.enforcement, 80)})`;
+            else if ((w.category === "Location" || !w.category) && w.atmosphere) e += ` (${w.atmosphere})`;
             if (tokensUsed + this._estimateLen(e) < budgetWorld) {
               worldParts.push(e);
               tokensUsed += this._estimateLen(e);
@@ -1998,7 +2210,7 @@ const ContextEngine = {
         // Skip very distant future chapters (>5 ahead) entirely to save tokens
         if (chNum > currentChNum + 5) return;
         let prefix = isCurrent ? "[CURRENT] " : isNearby ? "  " : "    ";
-        let line = `${prefix}Ch${chNum}: ${pl.title || "Untitled"}`;
+        let line = `${prefix}Ch${chNum || 1}: ${pl.title || "Untitled"}`;
         if (pl.pov || pl.date) {
           const povDateParts = [];
           if (pl.pov) povDateParts.push(`POV: ${pl.pov}`);
@@ -2084,6 +2296,11 @@ const ContextEngine = {
     }
 
     const sections = [metaStr, ...charParts, ...relParts, ...worldParts, ...plotParts, `</novel_bible>`];
+    // Context size safety check
+    const totalEstimate = sections.reduce((sum, s) => sum + (s?.length || 0), 0);
+    if (totalEstimate > 200000) {
+      console.warn(`[NovelForge] Context is very large (~${Math.round(totalEstimate/1000)}k chars / ~${Math.round(totalEstimate/4)}  tokens). May exceed model limits.`);
+    }
     return sections.filter(s => s).join("\n");
   },
 
@@ -2119,7 +2336,7 @@ const ContextEngine = {
         const titleDisplay = /^Chapter\s+\d+$/i.test(ch.title || "") && ch.summary
           ? `${ch.title} — ${ch.summary.split(/[.!?]/)[0]?.trim() || ch.title}`
           : ch.title || "Untitled";
-        const summaryLine = `Ch${chNum} "${titleDisplay}" summary: ${ch.summary}${staleHint}`;
+        const summaryLine = `Ch${chNum || 1} "${titleDisplay}" summary: ${ch.summary}${staleHint}`;
         if (historyUsed + summaryLine.length < historyBudget) {
           parts.push(summaryLine);
           historyUsed += summaryLine.length;
@@ -2130,15 +2347,15 @@ const ContextEngine = {
           if (!hasHistory) { parts.push(`\n<chapter_history>`); hasHistory = true; }
           // E9: Increased head+tail budget for unsummarized recent chapters
           if (plain.length <= 2000) {
-            const entry = `Ch${chNum} "${ch.title}" (full): ${plain}`;
+            const entry = `Ch${chNum || 1} "${ch.title}" (full): ${plain}`;
             if (historyUsed + entry.length < historyBudget) {
               parts.push(entry); historyUsed += entry.length;
             }
           } else {
             const head = _sliceHeadAtBoundary(plain, 600);
             const tail = _sliceAtBoundary(plain, 1000);
-            const entry1 = `Ch${chNum} "${ch.title}" (opening): ${head}`;
-            const entry2 = `Ch${chNum} "${ch.title}" (tail): ...${tail}`;
+            const entry1 = `Ch${chNum || 1} "${ch.title}" (opening): ${head}`;
+            const entry2 = `Ch${chNum || 1} "${ch.title}" (tail): ...${tail}`;
             if (historyUsed + entry1.length + entry2.length < historyBudget) {
               parts.push(entry1); parts.push(entry2);
               historyUsed += entry1.length + entry2.length;
@@ -2152,7 +2369,7 @@ const ContextEngine = {
         if (wc > 0) {
           if (!hasHistory) { parts.push(`\n<chapter_history>`); hasHistory = true; }
           const microSummary = _sliceHeadAtBoundary(plain, 200);
-          const entry = `Ch${chNum} "${ch.title}": ${microSummary}... [${wc} words total, unsummarized]`;
+          const entry = `Ch${chNum || 1} "${ch.title}": ${microSummary}... [${wc} words total, unsummarized]`;
           if (historyUsed + entry.length < historyBudget) {
             parts.push(entry); historyUsed += entry.length;
           }
@@ -2354,10 +2571,13 @@ const ContextEngine = {
           if (editing) {
             parts.push(`\n<currently_editing_character>`);
             // G5: Explicitly label which fields are empty vs filled
-            const fields = [["name","Name"],["role","Role"],["gender","Gender"],["age","Age"],["pronouns","Pronouns"],["orientation","Orientation"],["aliases","Aliases"],["occupation","Occupation"],["height","Height"],["build","Build"],["tags","Tags"],["allegiances","Allegiances"],["appearance","Appearance"],["personality","Personality"],["backstory","Backstory"],["desires","Desires"],["shortTermGoals","Short-term goals"],["longTermGoals","Long-term goals"],["speechPattern","Speech pattern"],["voiceSamples","Voice samples"],["habits","Habits & mannerisms"],["fears","Fears"],["flaws","Flaws"],["strengths","Strengths"],["skills","Skills"],["internalConflict","Internal conflict"],["externalConflict","External conflict"],["signatureItems","Signature items"],["secrets","Known secrets"],["hiddenSecrets","Hidden secrets"],["kinks","Preferences"],["arc","Arc"],["canonNotes","Canon notes"],["notes","Author notes"]];
-            if (editing.isBulk) {
-              parts.push(`  [BULK CHARACTER GROUP: ${editing.bulkCount || "many"} individuals]`);
-              if (editing.bulkDescription) parts.push(`  Bulk description: ${editing.bulkDescription}`);
+            const isBulkEditing = editing.isBulk;
+            const fields = isBulkEditing
+              ? [["name","Group Name"],["role","Role"],["bulkCount","Count"],["bulkDescription","Description"],["appearance","Appearance/Uniform"],["habits","Behavior/Culture"],["allegiances","Allegiances"],["tags","Tags"],["desires","Story Purpose"],["strengths","Strengths/Resources"],["flaws","Weaknesses"],["canonNotes","Notable Members"],["notes","Author Notes"]]
+              : [["name","Name"],["role","Role"],["gender","Gender"],["age","Age"],["pronouns","Pronouns"],["orientation","Orientation"],["aliases","Aliases"],["occupation","Occupation"],["height","Height"],["build","Build"],["tags","Tags"],["allegiances","Allegiances"],["appearance","Appearance"],["personality","Personality"],["backstory","Backstory"],["backstoryRevealDate","Backstory reveal date"],["desires","Desires"],["shortTermGoals","Short-term goals"],["longTermGoals","Long-term goals"],["speechPattern","Speech pattern"],["voiceSamples","Voice samples"],["habits","Habits & mannerisms"],["fears","Fears"],["flaws","Flaws"],["strengths","Strengths"],["skills","Skills"],["internalConflict","Internal conflict"],["externalConflict","External conflict"],["signatureItems","Signature items"],["secrets","Known secrets"],["hiddenSecrets","Hidden secrets"],["secretRevealDate","Secret reveal date"],["kinks","Preferences"],["arc","Arc"],["canonNotes","Canon notes"],["firstAppearanceDate","First appearance date"],["statusChangedDate","Status changed date"],["notes","Author notes"]];
+            if (isBulkEditing) {
+              parts.push(`  [BULK CHARACTER GROUP: ${editing.bulkCount || "many"} individuals — treat as a collective, not individuals]`);
+              if (editing.bulkDescription) parts.push(`  Group description: ${editing.bulkDescription}`);
             }
             const emptyFields = [];
             const filledFields = [];
@@ -2718,6 +2938,29 @@ const ContextEngine = {
       }
     }
 
+    // ─── SHARED: Literary craft context for ALL tabs ───
+    if (project.thematicArgument?.thesis) {
+      const ta = project.thematicArgument;
+      let taLine = `Thematic argument: "${ta.thesis}"`;
+      if (ta.antithesis) taLine += ` vs "${ta.antithesis}"`;
+      if (ta.synthesis) taLine += ` → "${ta.synthesis}"`;
+      parts.push(`\n${taLine}`);
+    }
+    if (project.motifs?.length > 0) {
+      const named = project.motifs.filter(m => m.name);
+      if (named.length > 0) parts.push(`Motifs: ${named.map(m => `${m.name}${m.meaning ? ` (${m.meaning})` : ""}`).join(", ")}`);
+    }
+    if (project.readerKnowledge?.length > 0) {
+      const facts = project.readerKnowledge.filter(rk => rk.fact);
+      if (facts.length > 0) parts.push(`Reader knows: ${facts.map(rk => `"${_truncateAtBoundary(rk.fact, 60)}"`).join("; ")}`);
+    }
+    // Current chapter craft settings
+    const tabCurCh = project.chapters?.[chapterIdx];
+    if (tabCurCh?.narrativeDistance) parts.push(`Narrative distance: ${tabCurCh.narrativeDistance}`);
+    if (tabCurCh?.sensoryPalette) parts.push(`Sensory palette: ${tabCurCh.sensoryPalette}`);
+    if (tabCurCh?.subtextNotes) parts.push(`Subtext: ${tabCurCh.subtextNotes}`);
+    if (tabCurCh?.tensionLevel && tabCurCh.tensionLevel !== 5) parts.push(`Tension level: ${tabCurCh.tensionLevel}/10`);
+
     return parts.filter(s => s).join("\n");
   }
 };
@@ -2729,7 +2972,19 @@ const createDefaultProject = () => ({
   contentPrefs: "", avoidList: "", writingStyle: "",
   characters: [], worldBuilding: [], plotOutline: [], relationships: [], images: [],
   continuityNotes: "",
-  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "", linkedPlotId: "", }],
+  // ─── LITERARY CRAFT FIELDS ───
+  motifs: [], // [{id, name, meaning, evolution, appearances: [{chapter, context}]}]
+  thematicArgument: { thesis: "", antithesis: "", synthesis: "", embodiedBy: {} }, // {charId: "thesis"|"antithesis"}
+  readerKnowledge: [], // [{id, fact, revealedInChapter, revealedDate, knownBy: [charIds], description}]
+  chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "", linkedPlotId: "",
+    // ─── NEW CHAPTER FIELDS ───
+    narrativeDistance: "", // "cinematic" | "close-third" | "deep-interiority" | ""
+    sensoryPalette: "", // e.g. "visual-dominant, cold blues, rain sounds, damp air"
+    chapterEndHookScore: 0, // 0-10, AI-scored
+    chapterEndHookNotes: "", // AI feedback on chapter ending
+    tensionLevel: 5, // 1-10, user or AI set
+    subtextNotes: "", // What's happening beneath the surface
+  }],
   createdAt: new Date().toISOString(),
   wordGoal: 0,
 });
@@ -2757,6 +3012,14 @@ const createDefaultCharacter = () => ({
   secrets: "",
   hiddenSecrets: "",
   secretRevealChapter: 0,
+  // ─── DATE-BASED TEMPORAL GATING (preferred over chapter numbers for non-linear stories) ───
+  firstAppearanceDate: "", // Story date when character first appears
+  backstoryRevealDate: "", // Story date when backstory is revealed
+  secretRevealDate: "", // Story date when secrets are revealed
+  statusChangedDate: "", // Story date when status changed (died, etc.)
+  // ─── VOICE CONSISTENCY ───
+  voiceScore: 0, // 0-10, AI-scored consistency
+  voiceNotes: "", // AI feedback on voice drift
   shortTermGoals: "",
   longTermGoals: "",
   internalConflict: "",
@@ -2992,7 +3255,7 @@ const Storage = {
           const usageRatio = estimate.usage / estimate.quota;
           if (usageRatio > 0.85) return "warning";
         }
-      } catch {}
+      } catch { /* silent */ }
       return true;
     } catch (e) {
       console.error("Save failed:", e);
@@ -3071,7 +3334,7 @@ const FileStorage = {
       });
       const file = await handle.getFile();
       const text = await file.text();
-      const data = JSON.parse(text);
+      let data; try { data = JSON.parse(text); } catch { data = null; }
       if (data._format === "novelforge-autosave" || data.projects) {
         _fileHandle = handle;
         return data;
@@ -3143,7 +3406,7 @@ const Tooltip = memo(({ text, children }) => {
         <div style={{
           position: "fixed", left: pos.x, top: pos.y - 6,
           transform: "translate(-50%, -100%)", zIndex: 10000,
-          padding: "7px 12px", borderRadius: 8,
+          padding: "8px 12px", borderRadius: 8,
           background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)",
           color: "var(--nf-text-dim)", fontSize: 11, lineHeight: 1.5,
           maxWidth: 280, textAlign: "center",
@@ -3167,7 +3430,7 @@ const Toast = memo(({ message, type, onDone }) => {
   return (
     <div role="alert" aria-live="polite" style={{
       position: "fixed", bottom: 20, right: 20, zIndex: 9999,
-      padding: "11px 18px", borderRadius: 3,
+      padding: "12px 18px", borderRadius: 3,
       background: "var(--nf-toast-bg)", backdropFilter: "blur(16px)",
       border: `1px solid var(--nf-toast-border)`,
       color: "var(--nf-text)", fontSize: 12, fontWeight: 500,
@@ -3195,7 +3458,7 @@ const ConfirmDialog = memo(({ message, onConfirm, onCancel, confirmLabel }) => {
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "nf-fadeIn 0.12s ease-out",
     }} onClick={onCancel} role="dialog" aria-modal="true" aria-label="Confirmation dialog">
-      <div onClick={e => e.stopPropagation()} style={{
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{
         background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 6,
         padding: "28px 32px", maxWidth: 400, width: "90%",
         boxShadow: "var(--nf-shadow-lg)",
@@ -3226,7 +3489,7 @@ const DiffReviewModal = memo(({ original, proposed, onAccept, onReject, onInsert
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "nf-fadeIn 0.12s ease-out",
     }} role="dialog" aria-modal="true" aria-label="Review generated content">
-      <div onClick={e => e.stopPropagation()} style={{
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{
         background: "var(--nf-diff-bg)", border: "1px solid var(--nf-diff-border)", borderRadius: 6,
         padding: 0, maxWidth: 920, width: "95%", maxHeight: "85vh",
         boxShadow: "var(--nf-shadow-lg)", display: "flex", flexDirection: "column", overflow: "hidden",
@@ -3236,19 +3499,19 @@ const DiffReviewModal = memo(({ original, proposed, onAccept, onReject, onInsert
           <button onClick={onReject} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
         </div>
         {/* G8: Stack panels vertically on narrow screens */}
-        <div style={{ flex: 1, overflow: "auto", display: "flex", gap: 0, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", gap: 0, flexWrap: "wrap" }}>
           {original && (
             <div style={{ flex: "1 1 300px", minWidth: 250, padding: 22, borderRight: "1px solid var(--nf-diff-border)" }}>
-              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>Original</div>
+              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>Original</div>
               <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text-dim)", whiteSpace: "pre-wrap" }}>{original}</div>
             </div>
           )}
           <div style={{ flex: "1 1 300px", minWidth: 250, padding: 22 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 12 }}>{original ? "Proposed" : "Generated Content"}</div>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>{original ? "Proposed" : "Generated Content"}</div>
             <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text)", whiteSpace: "pre-wrap" }}>{proposed}</div>
           </div>
         </div>
-        <div style={{ padding: "14px 24px", borderTop: "1px solid var(--nf-diff-border)", display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+        <div style={{ padding: "16px 24px", borderTop: "1px solid var(--nf-diff-border)", display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
           <button onClick={onReject} className="nf-btn nf-btn-ghost">Discard</button>
           {onInsertAtCursor && (
             <button onClick={onInsertAtCursor} className="nf-btn nf-btn-ghost" style={{ borderColor: "var(--nf-accent-2)" }}>
@@ -3285,7 +3548,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "nf-fadeIn 0.12s ease-out",
     }} role="dialog" aria-modal="true" aria-label="Review character updates" onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{
         background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 6,
         padding: 0, maxWidth: 700, width: "95%", maxHeight: "85vh",
         boxShadow: "var(--nf-shadow-lg)", display: "flex", flexDirection: "column", overflow: "hidden",
@@ -3298,10 +3561,10 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
           <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
         </div>
 
-        <div style={{ flex: 1, overflow: "auto", padding: "16px 24px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "16px 24px" }}>
           {pending.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ marginBottom: 26 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
                   Pending Review ({pending.length})
                 </span>
@@ -3319,7 +3582,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                   padding: "12px 16px", marginBottom: 8, background: "var(--nf-bg-raised)",
                   border: "1px solid var(--nf-border)", borderRadius: 6,
                 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
+                  <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
                     <div>
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{s.charName}</span>
                       <span style={{ fontSize: 11, color: "var(--nf-accent-2)", marginLeft: 8, fontWeight: 500 }}>{FIELD_LABELS[s.field] || s.field}</span>
@@ -3357,13 +3620,13 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
           )}
 
           {accepted.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 22 }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Applied ({accepted.length})</span>
               {accepted.map(s => (
                 <div key={s.id} style={{ fontSize: 11, color: "var(--nf-text-dim)", padding: "6px 8px", marginTop: 4, background: "var(--nf-bg-raised)", borderRadius: 6 }}>
-                  <span style={{ color: "var(--nf-success)" }}>✓</span> {s.charName} → {FIELD_LABELS[s.field] || s.field}
+                  <span key={s.id} style={{ color: "var(--nf-success)" }}>✓</span> {s.charName} → {FIELD_LABELS[s.field] || s.field}
                   {s.applied && s.applied !== s.suggested && (
-                    <span style={{ fontSize: 10, color: "var(--nf-text-muted)", marginLeft: 6 }}>(merged with existing)</span>
+                    <span key={s.id} style={{ fontSize: 10, color: "var(--nf-text-muted)", marginLeft: 6 }}>(merged with existing)</span>
                   )}
                 </div>
               ))}
@@ -3387,7 +3650,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
             const relRejected = suggestions.relSuggestions.filter(s => s.suggestionStatus === "rejected");
             return (
               <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--nf-border)" }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-accent-2)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-accent-2)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 20 }}>
                   Relationship Updates ({suggestions.relSuggestions.length})
                 </div>
                 {relPending.map(s => (
@@ -3395,7 +3658,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                     padding: "10px 14px", marginBottom: 8, background: "var(--nf-bg-raised)",
                     border: "1px solid var(--nf-border)", borderRadius: 2,
                   }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
+                    <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
                       <div>
                         <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{s.char1Name} ↔ {s.char2Name}</span>
                         <span style={{ fontSize: 10, color: "var(--nf-accent-2)", marginLeft: 8 }}>
@@ -3426,7 +3689,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                 ))}
                 {relAccepted.length > 0 && relAccepted.map(s => (
                   <div key={s.id} style={{ fontSize: 11, color: "var(--nf-text-dim)", padding: "4px 8px", marginTop: 2 }}>
-                    <span style={{ color: "var(--nf-success)" }}>✓</span> {s.char1Name} ↔ {s.char2Name} — {s.action === "create" ? "created" : s.field}
+                    <span key={s.id} style={{ color: "var(--nf-success)" }}>✓</span> {s.char1Name} ↔ {s.char2Name} — {s.action === "create" ? "created" : s.field}
                   </div>
                 ))}
                 {relRejected.length > 0 && relRejected.map(s => (
@@ -3440,7 +3703,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
 
           {pending.length === 0 && (!suggestions.relSuggestions?.length || suggestions.relSuggestions.every(s => s.suggestionStatus !== "pending")) && (
             <div style={{ textAlign: "center", padding: "20px 0" }}>
-              <div style={{ fontSize: 13, color: "var(--nf-text-dim)", marginBottom: 12 }}>
+              <div style={{ fontSize: 13, color: "var(--nf-text-dim)", marginBottom: 22 }}>
                 All suggestions reviewed — {accepted.length} applied, {rejected.length} skipped.
               </div>
               <button onClick={onClose} className="nf-btn nf-btn-primary">Done</button>
@@ -3474,12 +3737,12 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "nf-fadeIn 0.12s ease-out",
     }} role="dialog" aria-modal="true" onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{
         background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 6,
         padding: 0, maxWidth: 750, width: "95%", maxHeight: "85vh",
         boxShadow: "var(--nf-shadow-lg)", display: "flex", flexDirection: "column", overflow: "hidden",
       }}>
-        <div style={{ padding: "18px 24px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, color: "var(--nf-text)", letterSpacing: "0.01em" }}>The White Room</span>
             <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 2, letterSpacing: "0.08em" }}>Non-canon character voice testing</div>
@@ -3487,20 +3750,20 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
           <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
         </div>
 
-        <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 16, alignItems: "end", marginBottom: 16 }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 24px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 16, alignItems: "end", marginBottom: 26 }}>
             <SelectField label="Character 1" value={c1} onChange={setC1} options={charOptions} placeholder="Select..." />
             <div style={{ color: "var(--nf-accent)", fontSize: 20, paddingBottom: 12, fontWeight: 300, fontFamily: "var(--nf-font-display)" }}>×</div>
             <SelectField label="Character 2" value={c2} onChange={setC2} options={charOptions} placeholder="Select..." />
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 26 }}>
             <SelectField label="Starting Tension" value={tens} onChange={setTens}
               options={tensionOpts.map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) }))} />
             <Field label="Scenario (optional)" value={scenario} onChange={setScenario}
               placeholder="e.g. Trapped in an elevator, meeting at a funeral..." small />
           </div>
           <button onClick={() => onGenerate(c1, c2, tens, scenario)} disabled={!c1 || !c2 || c1 === c2 || isGenerating || !settings?.apiKey}
-            className="nf-btn nf-btn-primary" style={{ width: "100%", justifyContent: "center", marginBottom: 16 }}>
+            className="nf-btn nf-btn-primary" style={{ width: "100%", justifyContent: "center", marginBottom: 26 }}>
             {isGenerating ? <><Spinner /> Generating...</> : <><Icons.Wand /> Generate White Room Scene</>}
           </button>
 
@@ -3510,7 +3773,7 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
               fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text)",
               whiteSpace: "pre-wrap", maxHeight: 400, overflowY: "auto",
             }}>
-              <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10, fontFamily: "var(--nf-font-body)" }}>
+              <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 20, fontFamily: "var(--nf-font-body)" }}>
                 Non-Canon Scene — Voice Test Only
               </div>
               <div dangerouslySetInnerHTML={{ __html: renderMarkdownCached(result) }} />
@@ -3558,10 +3821,10 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
     if (yearOnly) return new Date(`${yearOnly[1]}-01-01`).getTime();
     // Try "Year X" fantasy format — map to fake timestamps for ordering
     const yearX = dateStr.match(/Year\s+(\d+)/i);
-    if (yearX) return parseInt(yearX[1]) * 365 * 24 * 3600 * 1000;
+    if (yearX) return parseInt(yearX[1], 10) * 365 * 24 * 3600 * 1000;
     // Try "XX BC" — negative timestamps
     const bcMatch = dateStr.match(/(\d+)\s*BC/i);
-    if (bcMatch) return -parseInt(bcMatch[1]) * 365 * 24 * 3600 * 1000;
+    if (bcMatch) return -parseInt(bcMatch[1], 10) * 365 * 24 * 3600 * 1000;
     return null;
   };
 
@@ -3606,7 +3869,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "nf-fadeIn 0.12s ease-out",
     }}>
-      <div onClick={e => e.stopPropagation()} style={{
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{
         background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3,
         padding: 0, maxWidth: 950, width: "95%", maxHeight: "85vh",
         boxShadow: "var(--nf-shadow-lg)", display: "flex", flexDirection: "column",
@@ -3618,7 +3881,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
           </div>
           <button onClick={onClose} className="nf-btn-icon"><Icons.X /></button>
         </div>
-        <div style={{ flex: 1, overflow: "auto", padding: "20px 24px" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "20px 24px" }}>
           {sorted.length === 0 ? (
             <div style={{ textAlign: "center", padding: 40, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add plot entries with dates to see the timeline</div>
           ) : (
@@ -3627,9 +3890,9 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                 <div key={gi} style={{ marginBottom: 24 }}>
                   {/* Year/era header */}
                   {group.key !== "Undated" && (
-                    <div style={{
+                    <div key={gi} style={{
                       fontSize: 18, fontWeight: 400, color: "var(--nf-accent)", fontFamily: "var(--nf-font-display)",
-                      marginBottom: 12, paddingBottom: 6, borderBottom: "1px solid var(--nf-border)",
+                      marginBottom: 22, paddingBottom: 6, borderBottom: "1px solid var(--nf-border)",
                       letterSpacing: "0.02em",
                     }}>{group.key}</div>
                   )}
@@ -3679,7 +3942,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                             </div>
                           )}
                           <div className="nf-card" style={{
-                            marginBottom: 12, position: "relative",
+                            marginBottom: 22, position: "relative",
                             animation: "nf-slideUp 0.2s ease-out",
                             animationDelay: `${(gi * group.entries.length + i) * 0.03}s`, animationFillMode: "both",
                           }}>
@@ -3693,12 +3956,12 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                               <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-accent)", fontFamily: "var(--nf-font-mono)" }}>Ch{p.chapter || chIdx + 1}</span>
                               <span style={{ fontSize: 14, fontWeight: 400, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)" }}>{p.title || "Untitled"}</span>
                             </div>
-                            {dateDisplay && <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)", background: "var(--nf-bg-surface)", padding: "1px 8px", borderRadius: 2 }}>{dateDisplay}</span>}
+                            {dateDisplay && <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)", background: "var(--nf-bg-surface)", padding: "2px 8px", borderRadius: 2 }}>{dateDisplay}</span>}
                           </div>
                           {p.summary && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{p.summary.slice(0, 150)}{p.summary.length > 150 ? "..." : ""}</div>}
                           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {p.sceneType && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{p.sceneType}</span>}
-                            {charNames.map(name => <span key={name} style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 2, color: "var(--nf-accent)" }}>{name}</span>)}
+                            {p.sceneType && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{p.sceneType}</span>}
+                            {charNames.map(name => <span key={name} style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 2, color: "var(--nf-accent)" }}>{name}</span>)}
                             {wordC > 0 && <span style={{ fontSize: 9, color: "var(--nf-success)" }}>✓ {wordC.toLocaleString()}w</span>}
                             {chContent && wordC === 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontStyle: "italic" }}>blank</span>}
                             {!chContent && <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontStyle: "italic" }}>no chapter yet</span>}
@@ -3711,9 +3974,9 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
 						  const imgs = [...html.matchAll(/<img\s[^>]*src="([^"]+)"/g)].map(m => m[1]);
 						  if (!imgs.length) return null;
 						  return (
-							<div style={{ display: "flex", gap: 6, marginTop: 8, overflowX: "auto" }}>
+							<div key={m.id} style={{ display: "flex", gap: 6, marginTop: 8, overflowX: "auto" }}>
 							  {imgs.map((src, ii) => (
-								<img key={ii} src={src} onClick={() => setLightbox({ images: imgs, index: ii })}
+								<img loading="lazy" key={ii} src={src} onClick={() => setLightbox({ images: imgs, index: ii })}
 								  style={{ width: 140, height: 100, objectFit: "cover", borderRadius: 2,
 									border: "1px solid var(--nf-border)", flexShrink: 0, cursor: "pointer", transition: "transform 0.15s" }}
 								  onMouseEnter={e => e.currentTarget.style.transform = "scale(1.04)"}
@@ -3739,17 +4002,17 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
           display: "flex", alignItems: "center", justifyContent: "center",
           animation: "nf-fadeIn 0.15s ease-out", cursor: "pointer",
         }} onClick={() => setLightbox(null)}>
-          <div onClick={e => e.stopPropagation()} style={{ position: "relative", maxWidth: "90vw", maxHeight: "90vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{ position: "relative", maxWidth: "90vw", maxHeight: "90vh", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <img src={lightbox.images[lightbox.index]} alt="" style={{ maxWidth: "90vw", maxHeight: "85vh", objectFit: "contain", borderRadius: 3, boxShadow: "0 0 60px rgba(0,0,0,0.5)" }} />
             {lightbox.images.length > 1 && (
               <>
                 <button onClick={() => setLightbox(prev => ({ ...prev, index: Math.max(prev.index - 1, 0) }))}
                   disabled={lightbox.index === 0}
-                  style={{ position: "absolute", left: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === 0 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  style={{ position: "absolute", left: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "var(--nf-text-inverse, #fff)", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === 0 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
                   aria-label="Previous">‹</button>
                 <button onClick={() => setLightbox(prev => ({ ...prev, index: Math.min(prev.index + 1, prev.images.length - 1) }))}
                   disabled={lightbox.index === lightbox.images.length - 1}
-                  style={{ position: "absolute", right: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "#fff", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === lightbox.images.length - 1 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
+                  style={{ position: "absolute", right: -50, top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.1)", border: "none", color: "var(--nf-text-inverse, #fff)", fontSize: 24, width: 40, height: 40, borderRadius: "50%", cursor: "pointer", opacity: lightbox.index === lightbox.images.length - 1 ? 0.2 : 0.8, transition: "opacity 0.15s", display: "flex", alignItems: "center", justifyContent: "center" }}
                   aria-label="Next">›</button>
               </>
             )}
@@ -3812,10 +4075,10 @@ const CleanViewModal = memo(({ project, startChapter, onClose }) => {
         <button onClick={onClose} className="nf-btn-icon"><Icons.X /></button>
       </div>
       {/* Reader area */}
-      <div style={{ flex: 1, overflow: "auto", display: "flex", justifyContent: "center" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", justifyContent: "center" }}>
         <div className="nf-clean-reader" style={{
           maxWidth: 680, width: "100%", padding: "48px 32px 100px",
-          fontFamily: "var(--nf-font-prose)", fontSize: 17, lineHeight: 2.0,
+          fontFamily: "var(--nf-font-prose)", fontSize: 18, lineHeight: 2.0,
           color: "var(--nf-editor-text)", letterSpacing: "0.015em",
         }} dangerouslySetInnerHTML={{ __html: contentHtml || '<p style="color:var(--nf-text-muted);font-style:italic">This chapter is empty.</p>' }} />
       </div>
@@ -4285,9 +4548,9 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.2s ease-out" }} onClick={onClose}>
       <style>{`.nf-rel-web-node{cursor:grab}.nf-rel-web-node:active{cursor:grabbing}.nf-rel-web-line{transition:opacity .15s}.nf-rel-web-hit{cursor:pointer}.nf-wl{position:absolute;bottom:14px;right:14px;background:var(--nf-bg-raised);border:1px solid var(--nf-border);border-radius:2px;padding:12px 16px;box-shadow:var(--nf-shadow);z-index:10;font-size:10px;color:var(--nf-text-muted);line-height:1.8;user-select:none;max-height:60vh;overflow-y:auto}.nf-wl-t{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;padding-bottom:5px;border-bottom:1px solid var(--nf-border);color:var(--nf-text-dim)}.nf-wl-s{margin-bottom:8px}.nf-wl-s:last-child{margin-bottom:0}.nf-wl-i{display:flex;align-items:center;gap:8px;padding:1px 0}.nf-wl-sw{width:24px;height:2px;flex-shrink:0;border-radius:1px}.nf-wl-d{width:8px;height:8px;border-radius:50%;flex-shrink:0}.nf-rel-web-tip{position:fixed;z-index:10001;pointer-events:none;background:var(--nf-dialog-bg);border:1px solid var(--nf-border);border-radius:3px;padding:12px 16px;box-shadow:var(--nf-shadow-lg);max-width:300px;animation:nf-fadeIn .12s ease-out;font-size:12px;line-height:1.6;color:var(--nf-text)}`}</style>
-      <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, width: "95vw", maxWidth: 1100, height: "88vh", maxHeight: 800, display: "flex", flexDirection: "column", boxShadow: "var(--nf-shadow-lg)", overflow: "hidden", animation: "nf-pop 0.25s ease-out" }}>
+      <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, width: "95vw", maxWidth: 1100, height: "88vh", maxHeight: 800, display: "flex", flexDirection: "column", boxShadow: "var(--nf-shadow-lg)", overflow: "hidden", textOverflow: "ellipsis", animation: "nf-pop 0.25s ease-out" }}>
         {/* Header */}
-        <div style={{ padding: "14px 22px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, background: "var(--nf-bg-raised)" }}>
+        <div style={{ padding: "16px 22px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, background: "var(--nf-bg-raised)" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
             <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, color: "var(--nf-text)", letterSpacing: "0.01em" }}>Relationship Web</span>
             <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>{chars.length} characters · {filteredRels.length} connections{locationZones.length > 0 ? ` · ${locationZones.length} locations` : ""}</span>
@@ -4468,7 +4731,7 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
           <div className="nf-wl">
             <div className="nf-wl-t">Legend</div>
             <div className="nf-wl-s">{Object.entries(TC).map(([k, c]) => (<div key={k} className="nf-wl-i"><div className="nf-wl-sw" style={{ background: c }} /><span style={{ textTransform: "capitalize" }}>{k}</span></div>))}</div>
-            <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>{[{label: "Committed", dash: ""},{label: "Dating", dash: "14 6"},{label: "Developing", dash: "6 6"},{label: "Strangers", dash: "2 8"},{label: "Enemies", dash: "8 3"}].map(s => <div key={s.label} className="nf-wl-i"><svg width="24" height="4" className="nf-wl-sw"><line x1="0" y1="2" x2="24" y2="2" stroke="var(--nf-text-muted)" strokeWidth="2" strokeDasharray={s.dash} /></svg><span>{s.label}</span></div>)}</div>
+            <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>{[{label: "Committed", dash: ""},{label: "Dating", dash: "14 6"},{label: "Developing", dash: "6 6"},{label: "Strangers", dash: "2 8"},{label: "Enemies", dash: "8 3"}].map((s, si) => <div key={si} className="nf-wl-i"><svg width="24" height="4" className="nf-wl-sw"><line x1="0" y1="2" x2="24" y2="2" stroke="var(--nf-text-muted)" strokeWidth="2" strokeDasharray={s.dash} /></svg><span>{s.label}</span></div>)}</div>
             <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>
               <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "var(--nf-accent)", boxShadow: "0 0 6px var(--nf-accent)" }} /><span>POV / Protagonist</span></div>
               <div className="nf-wl-i"><div className="nf-wl-d" style={{ background: "var(--nf-border)" }} /><span>Character</span></div>
@@ -4479,8 +4742,8 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
                 <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Locations</div>
                 {locationZones.map(zone => (
                   <div key={zone.id} className="nf-wl-i">
-                    <div style={{ width: 14, height: 10, borderRadius: "50%", flexShrink: 0, background: ZONE_COLORS[zone.colorIdx], border: `1px dashed ${ZONE_BORDER_COLORS[zone.colorIdx]}` }} />
-                    <span style={{ fontSize: 9 }}>📍 {zone.name} ({zone.memberCount})</span>
+                    <div key={zone.id} style={{ width: 14, height: 10, borderRadius: "50%", flexShrink: 0, background: ZONE_COLORS[zone.colorIdx], border: `1px dashed ${ZONE_BORDER_COLORS[zone.colorIdx]}` }} />
+                    <span key={zone.id} style={{ fontSize: 9 }}>📍 {zone.name} ({zone.memberCount})</span>
                   </div>
                 ))}
               </div>
@@ -4506,11 +4769,11 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
           </div>
         </div>
         {/* Hover tooltip */}
-        {hoveredInfo?.type === 'rel' && (() => { const {data: r, c1, c2} = hoveredInfo; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c1.name}</span><span style={{ color: tColor(r.tension), fontSize: 16 }}>↔</span><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c2.name}</span></div>{r.dynamic && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{r.dynamic}</div>}<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{r.status && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: `1px solid ${tColor(r.tension)}`, borderRadius: 3, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}{r.category && <span style={{ fontSize: 9, padding: "1px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.category}</span>}</div>{r.sharedSecrets && <div style={{ marginTop: 6, fontSize: 10, color: "var(--nf-accent)", lineHeight: 1.4 }}>🤫 Shared secret: {r.sharedSecrets.slice(0, 80)}…</div>}</div>); })()}
+        {hoveredInfo?.type === 'rel' && (() => { const {data: r, c1, c2} = hoveredInfo; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c1.name}</span><span style={{ color: tColor(r.tension), fontSize: 16 }}>↔</span><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c2.name}</span></div>{r.dynamic && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{r.dynamic}</div>}<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{r.status && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: `1px solid ${tColor(r.tension)}`, borderRadius: 3, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}{r.category && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.category}</span>}</div>{r.sharedSecrets && <div style={{ marginTop: 6, fontSize: 10, color: "var(--nf-accent)", lineHeight: 1.4 }}>🤫 Shared secret: {r.sharedSecrets.slice(0, 80)}…</div>}</div>); })()}
         {/* Org hierarchy tooltip */}
         {hoveredInfo?.type === 'org' && (() => { const link = hoveredInfo.data; const sup = charMap[link.superiorId]; const sub = charMap[link.subordinateId]; if (!sup || !sub) return null; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ fontSize: 10, color: "rgba(160,140,200,0.7)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>⛨ {link.orgName}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sup.name}</span><span style={{ fontSize: 10, color: "rgba(160,140,200,0.7)" }}>{link.superiorRole}</span></div><div style={{ fontSize: 10, color: "rgba(160,140,200,0.5)", textAlign: "center", margin: "2px 0" }}>▼ reports to</div><div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sub.name}</span><span style={{ fontSize: 10, color: "rgba(160,140,200,0.7)" }}>{link.subordinateRole}</span></div></div>); })()}
         {/* Selected node panel */}
-        {selectedNode && (() => { const ch = charMap[selectedNode]; if (!ch) return null; const nodeRels = procRels.filter(r => r.char1 === selectedNode || r.char2 === selectedNode); const nodeLocs = charLocations[selectedNode] || []; const nodeOrgRoles = charOrgRoles[selectedNode] || []; const nodeOrgLinks = orgLinks.filter(l => l.subordinateId === selectedNode || l.superiorId === selectedNode); return (<div className="nf-rel-web-tip" style={{ top: 80, left: 20, transform: "none", maxWidth: 280, pointerEvents: "auto" }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>{ch.image && <img src={ch.image} alt={ch.name} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} />}<div><div style={{ fontWeight: 700, fontSize: 13, color: "var(--nf-text)" }}>{ch.name}</div><div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{ch.role}{ch.occupation ? ` · ${ch.occupation}` : ""}</div></div></div>{ch.personality && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginBottom: 6, lineHeight: 1.4 }}>{ch.personality.slice(0, 120)}{ch.personality.length > 120 ? "…" : ""}</div>}{nodeLocs.length > 0 && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>📍 {nodeLocs.join(", ")}</div>}{nodeOrgRoles.length > 0 && <div style={{ fontSize: 10, color: "rgba(160,140,200,0.8)", marginBottom: 4 }}>⛨ {nodeOrgRoles.map(r => `${r.role} (${r.org})`).join(", ")}</div>}{ch.allegiances && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>⚔ {ch.allegiances}</div>}{nodeOrgLinks.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6, marginBottom: 4 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(160,140,200,0.6)", marginBottom: 4 }}>Org Chain</div>{nodeOrgLinks.map(l => { const isSuper = l.superiorId === selectedNode; const otherId = isSuper ? l.subordinateId : l.superiorId; const other = charMap[otherId]; return (<div key={l.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 10 }}><span style={{ color: "rgba(160,140,200,0.6)", fontSize: 8 }}>{isSuper ? "▼" : "▲"}</span><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "rgba(160,140,200,0.5)" }}>{isSuper ? l.subordinateRole : l.superiorRole}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.5 }}>{l.orgName}</span></div>); })}</div>)}{nodeRels.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Connections ({nodeRels.length})</div>{nodeRels.map(r => { const otherId = r.char1 === selectedNode ? r.char2 : r.char1; const other = charMap[otherId]; return (<div key={r.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, fontSize: 10 }}><span style={{ width: 8, height: 2, background: tColor(r.tension), borderRadius: 1, flexShrink: 0 }} /><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.7 }}>{r.category || "romantic"}</span>{r.tension && r.tension !== "none" && <span style={{ fontSize: 8, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}</div>); })}</div>)}<div style={{ fontSize: 9, color: "var(--nf-text-muted)", opacity: 0.5, marginTop: 6, fontStyle: "italic" }}>Click again to deselect</div></div>); })()}
+        {selectedNode && (() => { const ch = charMap[selectedNode]; if (!ch) return null; const nodeRels = procRels.filter(r => r.char1 === selectedNode || r.char2 === selectedNode); const nodeLocs = charLocations[selectedNode] || []; const nodeOrgRoles = charOrgRoles[selectedNode] || []; const nodeOrgLinks = orgLinks.filter(l => l.subordinateId === selectedNode || l.superiorId === selectedNode); return (<div className="nf-rel-web-tip" style={{ top: 80, left: 20, transform: "none", maxWidth: 280, pointerEvents: "auto" }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>{ch.image && <img src={ch.image} alt={ch.name} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} />}<div><div style={{ fontWeight: 700, fontSize: 13, color: "var(--nf-text)" }}>{ch.name}</div><div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{ch.role}{ch.occupation ? ` · ${ch.occupation}` : ""}</div></div></div>{ch.personality && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginBottom: 6, lineHeight: 1.4 }}>{ch.personality.slice(0, 120)}{ch.personality.length > 120 ? "…" : ""}</div>}{nodeLocs.length > 0 && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>📍 {nodeLocs.join(", ")}</div>}{nodeOrgRoles.length > 0 && <div style={{ fontSize: 10, color: "rgba(160,140,200,0.8)", marginBottom: 4 }}>⛨ {nodeOrgRoles.map(r => `${r.role} (${r.org})`).join(", ")}</div>}{ch.allegiances && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>⚔ {ch.allegiances}</div>}{nodeOrgLinks.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6, marginBottom: 4 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(160,140,200,0.6)", marginBottom: 4 }}>Org Chain</div>{nodeOrgLinks.map(l => { const isSuper = l.superiorId === selectedNode; const otherId = isSuper ? l.subordinateId : l.superiorId; const other = charMap[otherId]; return (<div key={l.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ color: "rgba(160,140,200,0.6)", fontSize: 8 }}>{isSuper ? "▼" : "▲"}</span><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "rgba(160,140,200,0.5)" }}>{isSuper ? l.subordinateRole : l.superiorRole}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.5 }}>{l.orgName}</span></div>); })}</div>)}{nodeRels.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Connections ({nodeRels.length})</div>{nodeRels.map(r => { const otherId = r.char1 === selectedNode ? r.char2 : r.char1; const other = charMap[otherId]; return (<div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ width: 8, height: 2, background: tColor(r.tension), borderRadius: 1, flexShrink: 0 }} /><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.7 }}>{r.category || "romantic"}</span>{r.tension && r.tension !== "none" && <span style={{ fontSize: 8, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}</div>); })}</div>)}<div style={{ fontSize: 9, color: "var(--nf-text-muted)", opacity: 0.5, marginTop: 6, fontStyle: "italic" }}>Click again to deselect</div></div>); })()}
       </div>
     </div>
   );
@@ -4708,7 +4971,7 @@ const _insertImageAtPoint = (editorEl, imgHtml, position = "end") => {
     }
   }
 
-  try { window.getSelection()?.removeAllRanges(); } catch {}
+  try { window.getSelection()?.removeAllRanges(); } catch { /* silent */ }
   editorEl.focus();
   return figEl;
 };
@@ -5107,7 +5370,7 @@ const _nfRestoreImagesInContent = (content, imageMap) => {
 };
 
 const _nfDeepCopyWithRestoredImages = (projects, imageMap) => {
-  return JSON.parse(JSON.stringify(projects)).map(p => ({
+  return (() => { try { return JSON.parse(JSON.stringify(projects)); } catch { /* silent */ return null; } })().map(p => ({
     ...p,
     chapters: (p.chapters || []).map(ch => ({
       ...ch,
@@ -5660,10 +5923,10 @@ const SaveIndicator = memo(({ status, fileLinked }) => {
   );
 
   return (
-    <div onClick={() => setShowDetail(d => !d)} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", padding: "0 6px", borderRadius: 3, transition: "background 0.15s" }} title={`Saved ${timeAgo || ""}${fileLinked ? " · Auto-saving to file" : " · Auto-saving to browser"}\nCtrl+S to save manually`}>
+    <div role="button" tabIndex={0} onClick={() => setShowDetail(d => !d)} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", padding: "0 6px", borderRadius: 3, transition: "background 0.15s" }} title={`Saved ${timeAgo || ""}${fileLinked ? " · Auto-saving to file" : " · Auto-saving to browser"}\nCtrl+S to save manually`}>
       <div style={{ width: 5, height: 5, borderRadius: 3, background: "var(--nf-success)", opacity: 0.6, transition: "opacity 0.3s" }} />
       {(showDetail || status === "saved") && (
-        <span style={{ fontSize: 9, color: "var(--nf-text-muted)", transition: "opacity 0.2s", whiteSpace: "nowrap" }}>
+        <span style={{ fontSize: 9, color: "var(--nf-text-muted)", transition: "opacity 0.2s", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {status === "saved" ? "Saved" : timeAgo || "Saved"}
           {fileLinked && " 📄"}
         </span>
@@ -5693,7 +5956,7 @@ const WordGoalBar = memo(({ current, goal, sessionWords }) => {
         </span>
         {sessionWords > 0 && <span style={{ fontSize: 10, color: "var(--nf-success)", fontWeight: 500 }}>+{sessionWords.toLocaleString()} this session</span>}
       </div>
-      <div style={{ height: 3, background: "var(--nf-bg-deep)", borderRadius: 2, overflow: "hidden" }}>
+      <div style={{ height: 3, background: "var(--nf-bg-deep)", borderRadius: 2, overflow: "hidden", textOverflow: "ellipsis" }}>
         <div style={{
           height: "100%", borderRadius: 2, width: `${pct}%`,
           background: done ? "var(--nf-success)" : "linear-gradient(90deg, var(--nf-accent), var(--nf-accent-2))",
@@ -5784,7 +6047,7 @@ const TabAIChat = memo(({ project, settings, tabName, tabContext, placeholder, o
       const allMessages = [
         { role: "system", content: `You are an expert fiction writing assistant. You are helping with ${tabContext}.
 
-${contextInfo}
+${contextInfo || ""}
 
 RULES:
 - Be conversational and helpful.
@@ -5793,9 +6056,9 @@ RULES:
 \`\`\`json
 { "type": "${tabName}", "data": { ... } }
 \`\`\`
-- For CHARACTER: name, role, gender, age, pronouns, orientation, aliases, occupation, title, height, build, tags, appearance, personality, backstory, backstoryRevealChapter, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, secretRevealChapter, allegiances, kinks, arc, canonNotes, firstAppearanceChapter, status, isBulk, bulkCount, bulkDescription
-- For WORLD: name, category, description, keywords, introducedInChapter, history, culturalNorms. Location: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. Rule / Law: enforcement, scope, loopholes, publicOpinion, enactedBy. Culture: values, customs, socialHierarchy, taboos, artForms, dialect. Magic System: magicSource, magicRules, magicCost, magicRarity, magicTypes, magicPerception. Technology: techFunction, techMechanism, techAvailability, techLimitations, techImpact, techCreator. History: historyDate, historyFigures, historyCauses, historyConsequences, historyLegacy. Flora / Fauna: habitat, floraAppearance, behavior, floraUses, floraRarity, floraCultural. Language: langSpeakers, langWriting, langPhrases, langGrammar, langRelated, langStatus. Religion: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies, followers. Organization: orgPurpose, orgHierarchy, frequentCharacters.
-- For PLOT: chapter, title, summary, beats, sceneType, pov, characters, locations (array of location names from world entries)
+- For CHARACTER: name, role, gender, age, pronouns, orientation, aliases, occupation, title, height, build, tags, appearance, personality, backstory, backstoryRevealChapter, backstoryRevealDate, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, secretRevealChapter, secretRevealDate, allegiances, kinks, arc, canonNotes, firstAppearanceChapter, firstAppearanceDate, status, statusChangedDate, isBulk, bulkCount, bulkDescription
+- For WORLD: name, category, description, keywords, introducedInChapter, history, culturalNorms. LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. RULE/LAW: enforcement, scope, loopholes, publicOpinion, enactedBy. CULTURE: values, customs, socialHierarchy, taboos, artForms, dialect. MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes, magicPerception. TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations, techImpact, techCreator. HISTORY: historyDate, historyFigures, historyCauses, historyConsequences, historyLegacy. FLORA/FAUNA: habitat, floraAppearance, behavior, floraUses, floraRarity, floraCultural. LANGUAGE: langSpeakers, langWriting, langPhrases, langGrammar, langRelated, langStatus. RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies, followers. ORGANIZATION: orgPurpose, orgHierarchy, frequentCharacters.
+- For PLOT: chapter, title, summary, beats, sceneType, pov, characters, locations, date, povCharacterId. CHAPTER CRAFT: narrativeDistance (cinematic/close-third/deep-interiority), sensoryPalette, subtextNotes, tensionLevel (1-10), chapterEndHookScore (0-10), chapterEndHookNotes
 - For RELATIONSHIP: char1, char2, category (romantic/family/friendship/professional/mentor/rivalry), dynamic, status, tension, tensionType, powerDynamic (equal/char1-dominant/char2-dominant/shifting), trustLevel (none/low/medium/high/absolute), chemistry, conflictSource, sharedSecrets, keyScenes, terms, taboos, isPublic, char1Perspective, char2Perspective, progression, evolutionTimeline, meetsInChapter, notes
 - Be creative, specific, genre-aware.
 - When filling in empty fields, ONLY fill fields listed as [Empty]. Do NOT overwrite existing content.
@@ -5832,7 +6095,7 @@ RULES:
           try {
             const p = JSON.parse(match[1]);
             if (typeof p === "object" && p !== null) { hasAutoFill = true; break; }
-          } catch {}
+          } catch { /* silent */ }
         }
         // Pattern 2: ``` ... ``` without language tag
         if (!hasAutoFill) {
@@ -5843,7 +6106,7 @@ RULES:
               try {
                 const p = JSON.parse(trimmed);
                 if (typeof p === "object" && p !== null) { hasAutoFill = true; break; }
-              } catch {}
+              } catch { /* silent */ }
             }
           }
         }
@@ -5864,11 +6127,11 @@ RULES:
                 if (p && typeof p === "object" && (p.type || p.data || Array.isArray(p))) {
                   hasAutoFill = true;
                 }
-              } catch {}
+              } catch { /* silent */ }
             }
           }
         }
-      } catch {}
+      } catch { /* silent */ }
       
       // Always update parent messages (survives unmount), only update local state if mounted
       setMessages(prev => [...prev, { id: uid(), role: "assistant", content, hasAutoFill }]);
@@ -5910,7 +6173,7 @@ RULES:
               if (testParse && typeof testParse === "object") {
                 jsonBlocks.push([null, candidate]);
               }
-            } catch {}
+            } catch { /* silent */ }
           }
         }
       }
@@ -5938,7 +6201,7 @@ RULES:
           } else if (typeof p === "object" && p !== null) {
             allItems.push(p);
           }
-        } catch {} // skip malformed individual blocks
+        } catch { /* silent */ } // skip malformed individual blocks
       }
 
       // Pass as single item if 1, or as array if multiple — handlers check for both
@@ -5947,7 +6210,7 @@ RULES:
       } else if (allItems.length > 1) {
         onAutoFill(allItems);
       }
-    } catch {}
+    } catch { /* silent */ }
   }, [onAutoFill, tabName]);
 
   const quickActions = useMemo(() => {
@@ -6024,8 +6287,8 @@ RULES:
         )}
         {messages.map(msg => (
           <div key={msg.id} style={{ marginBottom: 8, display: "flex", flexDirection: "column", alignItems: msg.role === "user" ? "flex-end" : "flex-start", animation: "nf-slideUp 0.15s ease-out" }}>
-            <div style={{
-              maxWidth: "95%", padding: "9px 12px", borderRadius: 6,
+            <div key={msg.id} style={{
+              maxWidth: "95%", padding: "8px 12px", borderRadius: 6,
               background: msg.isError ? "var(--nf-error-bg)" : msg.role === "user" ? "var(--nf-chat-bubble-user-bg)" : "var(--nf-chat-bubble-bg)",
               border: `1px solid ${msg.isError ? "var(--nf-error-border)" : msg.role === "user" ? "var(--nf-chat-bubble-user-border)" : "var(--nf-border)"}`,
               color: "var(--nf-text)", fontSize: 12, lineHeight: 1.7, wordBreak: "break-word",
@@ -6129,7 +6392,7 @@ const CharacterPresenceStrip = memo(({ characters, chapterContent, relationships
                 : <span className="nf-presence-initial" style={isPov ? { boxShadow: `0 0 8px ${"var(--nf-accent)"}40` } : undefined}>{(c.name || "?")[0]}</span>
               }
               {isDead && <span className="nf-presence-badge">†</span>}
-              {tensionColor && <span className="nf-presence-tension" style={{ background: tensionColor, boxShadow: `0 0 4px ${tensionColor}`, animation: "nf-glyph-char-glow 3s ease-in-out infinite" }} />}
+              {tensionColor && <span className="nf-presence-tension" style={{ background: tensionColor, animation: "nf-glyph-char-glow 3s ease-in-out infinite" }} />}
             </div>
             <span className="nf-presence-name">{(c.name || "").split(/\s+/)[0]}</span>
           </div>
@@ -6141,7 +6404,7 @@ const CharacterPresenceStrip = memo(({ characters, chapterContent, relationships
           <div className="nf-pc-head">
             <div className="nf-pc-avatar">
               {hovered.image
-                ? <img src={hovered.image} alt="" className="nf-pc-img" />
+                ? <img loading="lazy" src={hovered.image} alt="" className="nf-pc-img" />
                 : <span className="nf-pc-initial">{(hovered.name || "?")[0]}</span>
               }
             </div>
@@ -6349,7 +6612,7 @@ const ContinuityGhost = memo(({ prevChapter, prevChapterSummary, currentContent 
       {prevChapterSummary && (
         <div className="nf-ghost-memo">
           <span className="nf-ghost-memo-label">Summary</span>
-          {prevChapterSummary.slice(0, 180)}{prevChapterSummary.length > 180 ? "…" : ""}
+          {_truncateAtBoundary(prevChapterSummary, 180)}{prevChapterSummary.length > 180 ? "…" : ""}
         </div>
       )}
     </div>
@@ -6494,7 +6757,7 @@ const useEditorColorCoding = (editorRef, colorMode, characters, contentVersion) 
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
       const sel = window.getSelection(); let saved = null;
-      if (sel.rangeCount > 0 && el.contains(sel.anchorNode)) try { saved = sel.getRangeAt(0).cloneRange(); } catch {}
+      if (sel.rangeCount > 0 && el.contains(sel.anchorNode)) try { saved = sel.getRangeAt(0).cloneRange(); } catch { /* silent */ }
       const blocks = el.querySelectorAll("p");
       let lastSpeaker = null;
       blocks.forEach(block => {
@@ -6523,7 +6786,7 @@ const useEditorColorCoding = (editorRef, colorMode, characters, contentVersion) 
         if (color) block.style.setProperty("color", color, "important");
         else block.style.removeProperty("color");
       });
-      if (saved) try { sel.removeAllRanges(); sel.addRange(saved); } catch {}
+      if (saved) try { sel.removeAllRanges(); sel.addRange(saved); } catch { /* silent */ }
     }, 300);
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [colorMode, editorRef, charColors, contentVersion]);
@@ -6539,8 +6802,8 @@ const VoiceHoverPopup = memo(({ editorRef, charColors }) => {
     return () => { el.removeEventListener("mousemove", onMove); el.removeEventListener("mouseleave", () => {}); };
   }, [editorRef, charColors]);
   if (!popup) return null;
-  return createPortal(<div style={{ position: "fixed", top: popup.y, left: popup.x, zIndex: 10000, background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)", borderRadius: 8, padding: "5px 10px", display: "flex", alignItems: "center", gap: 8, boxShadow: "var(--nf-shadow)", pointerEvents: "none", animation: "nf-fadeIn 0.1s ease-out" }}>
-    {popup.info.image ? <img src={popup.info.image} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `2px solid ${popup.info.color}`, flexShrink: 0 }} /> : <div style={{ width: 26, height: 26, borderRadius: "50%", background: popup.info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#fff", fontWeight: 600, flexShrink: 0 }}>{popup.info.name[0]}</div>}
+  return createPortal(<div style={{ position: "fixed", top: popup.y, left: popup.x, zIndex: 10000, background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)", borderRadius: 8, padding: "4px 10px", display: "flex", alignItems: "center", gap: 8, boxShadow: "var(--nf-shadow)", pointerEvents: "none", animation: "nf-fadeIn 0.1s ease-out" }}>
+    {popup.info.image ? <img src={popup.info.image} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `2px solid ${popup.info.color}`, flexShrink: 0 }} /> : <div style={{ width: 26, height: 26, borderRadius: "50%", background: popup.info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--nf-text-inverse, #fff)", fontWeight: 600, flexShrink: 0 }}>{popup.info.name[0]}</div>}
     <div><div style={{ fontSize: 11, fontWeight: 600, color: popup.info.color, lineHeight: 1.2 }}>{popup.info.name}</div><div style={{ fontSize: 8, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>speaking</div></div>
   </div>, document.body);
 });
@@ -6548,8 +6811,8 @@ const VoiceHoverPopup = memo(({ editorRef, charColors }) => {
 const ColorModeBar = memo(({ colorMode, setColorMode, characters }) => {
   const charColors = useMemo(() => _charColorMap(characters), [characters]);
   if (colorMode === "off") return null;
-  return (<div style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 12px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", minHeight: 26, animation: "nf-fadeIn 0.15s ease-out" }}>
-    {colorMode === "voice" && <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, overflow: "hidden" }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span><div style={{ display: "flex", gap: 6, overflow: "hidden" }}>{Object.entries(charColors).slice(0, 8).map(([id, info]) => <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>{info.image ? <img src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, fontSize: 8, color: "#fff", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{info.name[0]}</div>}<span style={{ fontSize: 9, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span></div>)}</div></div>}
+  return (<div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", minHeight: 26, animation: "nf-fadeIn 0.15s ease-out" }}>
+    {colorMode === "voice" && <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minHeight: 0, overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span><div style={{ display: "flex", gap: 6, overflow: "hidden", textOverflow: "ellipsis" }}>{Object.entries(charColors).slice(0, 8).map(([id, info]) => <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>{info.image ? <img src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, fontSize: 8, color: "var(--nf-text-inverse, #fff)", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{info.name[0]}</div>}<span style={{ fontSize: 9, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span></div>)}</div></div>}
     {colorMode === "narrative" && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Mode</span>{Object.entries(NARRATIVE_FONT_COLORS).map(([mode, color]) => <div key={mode} style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color, fontSize: 11, fontWeight: 600 }}>A</span><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "capitalize" }}>{mode}</span></div>)}</div>}
     <button onClick={() => setColorMode("off")} className="nf-btn-icon" style={{ padding: 2, opacity: 0.5 }}><Icons.X /></button>
   </div>);
@@ -6646,15 +6909,15 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
           model: "xiaomi/mimo-v2-flash",
           messages: [
             { role: "system", content: "You are Forge-chan, a BRUTAL writing coach. Score writing against a beat/scene goal.\n\nFORMAT (exactly):\nSCORE: X/10\nThen 2-3 lines of harsh specific feedback.\n7+ = pass. Below 7 = fail, demand rewrite." },
-            { role: "user", content: `BEAT GOAL: "${title}"${desc ? `\nDetails: ${desc}` : ""}\n\nTEXT (last ${Math.min(textToScore.length, 800)} chars):\n"${textToScore.slice(-800)}"\n\n${beatText.length < 15 ? "(Warning: almost no new text for this beat)" : ""}\nScore it.` },
+            { role: "user", content: `BEAT GOAL: "${title || "untitled"}"${desc ? `\nDetails: ${desc}` : ""}\n\nTEXT (last ${Math.min(textToScore.length, 800)} chars):\n"${textToScore.slice(-800)}"\n\n${beatText.length < 15 ? "(Warning: almost no new text for this beat)" : ""}\nScore it.` },
           ],
           max_tokens: 200, temperature: 0.85,
         }),
       });
       const data = await res.json();
-      const raw = (data.choices?.[0]?.message?.content || "").trim();
+      const raw = (stripThinkingTokens(data.choices?.[0]?.message?.content || "")).trim();
       const sm = raw.match(/SCORE:\s*(\d+)/i);
-      const ns = sm ? Math.min(10, Math.max(1, parseInt(sm[1]))) : 5;
+      const ns = sm ? Math.min(10, Math.max(1, parseInt(sm[1], 10))) : 5;
       setBeatScores(prev => ({ ...prev, [currentBeatIdx]: { score: ns, feedback: raw.replace(/SCORE:\s*\d+\/?\d*\s*/i, "").trim() } }));
     } catch (e) { if (e.name !== "AbortError") console.warn("[WoW]", e); }
     setIsScoring(false);
@@ -6694,7 +6957,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
       </div>
 
       {/* Progress dots */}
-      <div style={{ display: "flex", gap: 3, padding: "5px 10px", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 3, padding: "4px 10px", alignItems: "center" }}>
         {beats.map((_, i) => {
           const bs = beatScores[i];
           const isPassed = bs?.score >= 7;
@@ -6720,7 +6983,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
         <div style={{ padding: "8px 10px 10px" }}>
           {/* Beat header */}
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--nf-accent)", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{currentBeatIdx + 1}</div>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--nf-accent)", color: "var(--nf-text-inverse, #fff)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{currentBeatIdx + 1}</div>
             <div style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--nf-text)" }}>
               {typeof currentBeat === "string" ? currentBeat : (currentBeat.title || `Beat ${currentBeatIdx + 1}`)}
             </div>
@@ -6804,7 +7067,7 @@ const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, de
     }}>
       <style>{`
         @keyframes nf-glyph-breathe {
-          0%, 100% { opacity: 0.15; r: 2.5; }
+          0%, 100% { opacity: 0.2; r: 2.5; }
           50% { opacity: 0.85; r: 3.5; }
         }
         @keyframes nf-glyph-pulse-fast {
@@ -6824,9 +7087,9 @@ const GlyphRail = memo(({ saveStatus, isGenerating, wordProgress, characters, de
           100% { r: 8; opacity: 0; }
         }
         @keyframes nf-glyph-dot-sequenced {
-          0%, 100% { opacity: 0.15; transform: scale(0.8); }
+          0%, 100% { opacity: 0.2; transform: scale(0.8); }
           30% { opacity: 0.9; transform: scale(1.2); }
-          60% { opacity: 0.15; transform: scale(0.8); }
+          60% { opacity: 0.2; transform: scale(0.8); }
         }
         @keyframes nf-glyph-stamp {
           0% { transform: scale(1.3) rotate(-2deg); opacity: 0; }
@@ -7098,13 +7361,13 @@ RULES:
 - Never mean about the WRITER, only about WRITING choices
 - Genre: ${genre} | Characters: ${charNames || "none yet"}
 - You CANNOT be replied to. Observe and comment.` },
-                { role: "user", content: `Writer just wrote:\n"${newText}"\n\nBrief unsolicited reaction.` },
+                { role: "user", content: `Writer just wrote:\n"${newText || ""}"\n\nBrief unsolicited reaction.` },
               ],
               max_tokens: 120, temperature: 1.1,
             }),
           });
           const data = await res.json();
-          const content = (data.choices?.[0]?.message?.content || "").trim();
+          const content = (stripThinkingTokens(data.choices?.[0]?.message?.content || "")).trim();
           if (content && mountedRef.current) {
             const glyph = FORGE_CHAN_REACTIONS[Math.floor(Math.random() * FORGE_CHAN_REACTIONS.length)];
             const newMood = FORGE_CHAN_MOODS[Math.floor(Math.random() * FORGE_CHAN_MOODS.length)];
@@ -7137,11 +7400,11 @@ RULES:
         @keyframes nf-fc-talk { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-1px); } }
         @keyframes nf-fc-blink { 0%,42%,46%,100% { opacity: 1; } 44% { opacity: 0; } }
         @keyframes nf-fc-mouth { 0%,100% { transform: scaleY(1); } 50% { transform: scaleY(1.3); } }
-        @keyframes nf-fc-shadow { 0%,100% { rx: 14; opacity: 0.1; } 50% { rx: 12; opacity: 0.06; } }
+        @keyframes nf-fc-shadow { 0%,100% { rx: 14; opacity: 0.2; } 50% { rx: 12; opacity: 0.06; } }
         @keyframes nf-fc-bubble { 0% { opacity: 0; transform: translateY(6px) scale(0.9); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
       `}</style>
       {/* Tamagotchi header with body */}
-      <div onClick={() => setMinimized(p => !p)} style={{ cursor: "pointer", padding: "6px 8px 2px", textAlign: "center", position: "relative" }}>
+      <div role="button" tabIndex={0} onClick={() => setMinimized(p => !p)} style={{ cursor: "pointer", padding: "6px 8px 2px", textAlign: "center", position: "relative" }}>
         <ForgeChanBody mood={mood} isThinking={isThinking} isSpeaking={isSpeaking} />
         <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--nf-text-muted)", marginTop: 2, opacity: 0.6 }}>
           forge-chan
@@ -7785,7 +8048,7 @@ const _syncCrossRefs = (oldP, newP) => {
 export default function NovelForge() {
   const [projects, setProjects] = useState([]);
   const [activeProjectId, setActiveProjectId] = useState(null);
-  const [activeTab, setActiveTab] = useState("write");
+  const [activeTab, setActiveTab] = useState(() => { try { return sessionStorage.getItem("nf-activeTab") || "write"; } catch { /* silent */ return "write"; } });
   const [settings, setSettings] = useState({
     apiKey: "", model: "anthropic/claude-sonnet-4", maxTokens: 4096,
     temperature: 0.85, systemPrompt: "",
@@ -7796,9 +8059,10 @@ export default function NovelForge() {
   const [chatInput, setChatInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false); // E5: Separate state for auto-summarize
-  const [activeChapterIdx, setActiveChapterIdx] = useState(0);
+  const [activeChapterIdx, setActiveChapterIdx] = useState(() => { try { return parseInt(sessionStorage.getItem("nf-activeChapterIdx"), 10) || 0; } catch { /* silent */ return 0; } });
   const [showProjectList, setShowProjectList] = useState(true);
   const [editingCharId, setEditingCharId] = useState(null);
+  const [showGroupForm, setShowGroupForm] = useState(false);
   const [genMode, setGenMode] = useState("continue");
   const [showMemoryPreview, setShowMemoryPreview] = useState(false);
   const [toast, setToast] = useState(null);
@@ -8051,7 +8315,7 @@ export default function NovelForge() {
         if (cachedHash) GDriveImages._hashToDriveId = cachedHash;
         const cachedPathMap = await _idb.get("novelforge:pathToDriveId");
         if (cachedPathMap) GDriveImages._pathToDriveId = cachedPathMap;
-      } catch {}
+      } catch { /* silent */ }
 
       
     } catch(e) { console.error("Load:", e); }
@@ -8109,21 +8373,68 @@ export default function NovelForge() {
   useEffect(() => { if (isLoaded && fileLinked) debouncedFileSave(); }, [projects, settings, theme, tabChatHistories, isLoaded, fileLinked, debouncedFileSave]);
   useEffect(() => () => { debouncedSaveProjects.cancel(); debouncedSaveSettings.cancel(); debouncedSaveTabChats.cancel(); debouncedFileSave.cancel(); }, [debouncedSaveProjects, debouncedSaveSettings, debouncedSaveTabChats, debouncedFileSave]);
 
-  // ─── Cmd/Ctrl+S: Force-flush all pending saves immediately ───
+  
+  // ─── Persist UI state across page refreshes ───
+  useEffect(() => { try { sessionStorage.setItem("nf-activeTab", activeTab); } catch { /* silent */ } }, [activeTab]);
+  useEffect(() => { try { sessionStorage.setItem("nf-activeChapterIdx", String(activeChapterIdx)); } catch { /* silent */ } }, [activeChapterIdx]);
+
+  // ─── Preserve scroll position per tab ───
+  const tabScrollPositions = useRef({});
+  const lastTabRef = useRef(activeTab);
+  useEffect(() => {
+    // Save scroll position of previous tab
+    const scrollEl = document.querySelector(".nf-content-scroll");
+    if (scrollEl && lastTabRef.current) {
+      tabScrollPositions.current[lastTabRef.current] = scrollEl.scrollTop;
+    }
+    // Restore scroll position of new tab
+    requestAnimationFrame(() => {
+      const el = document.querySelector(".nf-content-scroll");
+      if (el && tabScrollPositions.current[activeTab] !== undefined) {
+        el.scrollTop = tabScrollPositions.current[activeTab];
+      }
+    });
+    lastTabRef.current = activeTab;
+  }, [activeTab]);
+
+  // ─── GLOBAL KEYBOARD SHORTCUTS ───
   useEffect(() => {
     const handler = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+      const mod = e.metaKey || e.ctrlKey;
+      // Cmd+S: Force save
+      if (mod && e.key === "s") {
         e.preventDefault();
-        // Flush all debounced saves immediately
         debouncedSaveProjects.flush();
         debouncedSaveSettings.flush();
         debouncedSaveTabChats.flush();
         debouncedFileSave.flush();
       }
+      // Ctrl+PageDown: Next chapter
+      if (mod && e.key === "PageDown") {
+        e.preventDefault();
+        const curProject = projects.find(p => p.id === activeProjectId);
+        setActiveChapterIdx(prev => Math.min(prev + 1, (curProject?.chapters?.length || 1) - 1));
+        forceRepopulateEditor();
+      }
+      // Ctrl+PageUp: Previous chapter
+      if (mod && e.key === "PageUp") {
+        e.preventDefault();
+        setActiveChapterIdx(prev => Math.max(0, prev - 1));
+        forceRepopulateEditor();
+      }
+      // Escape: Close active modal/panel
+      if (e.key === "Escape") {
+        if (showRelWeb) { setShowRelWeb(false); e.preventDefault(); }
+        else if (showAiMobile) { setShowAiMobile(false); e.preventDefault(); }
+        else if (showTimeline) { setShowTimeline(false); e.preventDefault(); }
+        else if (cleanView) { setCleanView(false); e.preventDefault(); }
+        else if (focusMode) { setFocusMode(false); e.preventDefault(); }
+        else if (confirmDialog) { setConfirmDialog(null); e.preventDefault(); }
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [debouncedSaveProjects, debouncedSaveSettings, debouncedSaveTabChats, debouncedFileSave]);
+  }, [debouncedSaveProjects, debouncedSaveSettings, debouncedSaveTabChats, debouncedFileSave, projects, activeProjectId]);
 
   // G4: Flush pending saves on beforeunload to prevent data loss on sudden close
   // Use refs so the handler always reads current values without re-registering
@@ -8222,7 +8533,7 @@ export default function NovelForge() {
         body: JSON.stringify({
           model: settings.model,
           messages: [
-            { role: "system", content: `You are a fiction writing assistant. Fill empty fields with creative, genre-appropriate content.\n\n${contextInfo}\n\nRULES:\n- Return ONLY valid JSON — no markdown, no backticks, no explanation.\n- Only include fields that are currently empty.\n- Be creative and specific.\n- Make content consistent with existing filled fields.` },
+            { role: "system", content: `You are a fiction writing assistant. Fill empty fields with creative, genre-appropriate content.\n\n${contextInfo || ""}\n\nRULES:\n- Return ONLY valid JSON — no markdown, no backticks, no explanation.\n- Only include fields that are currently empty.\n- Be creative and specific.\n- Make content consistent with existing filled fields.` },
             { role: "user", content: prompt },
           ],
           max_tokens: 2500, temperature: 0.85,
@@ -8231,7 +8542,7 @@ export default function NovelForge() {
       const data = await res.json();
       let content = stripThinkingTokens(data.choices?.[0]?.message?.content || "").trim();
       content = content.replace(/^```json?\s*/i, "").replace(/\s*```$/i, "").trim();
-      const proposed = JSON.parse(content);
+      let proposed; try { proposed = JSON.parse(content); } catch { proposed = null; }
       if (typeof proposed !== "object" || proposed === null) throw new Error("Invalid response");
       const reviewFields = [];
       for (const [key, value] of Object.entries(proposed)) {
@@ -8619,7 +8930,7 @@ export default function NovelForge() {
   const callOpenRouterStream = useCallback(async (messages, opts = {}) => {
     if (!settings.apiKey) throw new Error("Set your OpenRouter API key in Settings first.");
     // E4: Abort any existing request before starting new one
-    if (abortRef.current) { try { abortRef.current.abort(); } catch {} }
+    if (abortRef.current) { try { abortRef.current.abort(); } catch { /* silent */ } }
     const controller = new AbortController();
     abortRef.current = controller;
     // E8: Wrap in retryable fetch
@@ -8848,7 +9159,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
         try {
           const delta = JSON.parse(trimmed.slice(6)).choices?.[0]?.delta?.content;
           if (delta) full += delta;
-        } catch {}
+        } catch { /* silent */ }
       }
     }
     return stripThinkingTokens(full);
@@ -9363,8 +9674,8 @@ const appendToChapter = useCallback((text) => {
       const c2Desc = `${char2.name} (${char2.role}): ${char2.personality || "no personality set"}. Voice: ${char2.speechPattern || "default"}.`;
       const scenarioText = scenario ? `\nScenario: ${scenario}` : "";
       const result = await callOpenRouter([
-        { role: "system", content: `You are writing a non-canon character voice test. Write a ~500-word interaction between these two characters in a void/"white room" setting with the specified tension. Focus on distinct dialogue voices, body language, and internal states. This is for voice testing only — it doesn't affect the story.\n\n${c1Desc}\n${c2Desc}` },
-        { role: "user", content: `Starting tension: ${tension}.${scenarioText}\n\nWrite the scene. Make their voices distinct and authentic.` },
+        { role: "system", content: `You are writing a non-canon character voice test. Write a ~500-word interaction between these two characters in a void/"white room" setting with the specified tension. Focus on distinct dialogue voices, body language, and internal states. This is for voice testing only — it doesn't affect the story.\n\n${c1Desc || "no description"}\n${c2Desc}` },
+        { role: "user", content: `Starting tension: ${tension || "none"}.${scenarioText}\n\nWrite the scene. Make their voices distinct and authentic.` },
       ], { maxTokens: 1200, temperature: 0.9 });
       setWhiteRoom(prev => ({ ...prev, result, isGenerating: false }));
     } catch (e) {
@@ -9390,11 +9701,11 @@ const appendToChapter = useCallback((text) => {
     const currentPov = mentionedChars[0];
     const flipTo = mentionedChars[1];
 
-    showToast(`Flipping perspective to ${flipTo.name}...`, "info");
+    showToast(`Flipping perspective to ${flipTo?.name || "unknown"}...`, "info");
     try {
       const result = await callOpenRouter([
-        { role: "system", content: `You are rewriting a passage from a different character's internal perspective. Preserve the same scene events but shift entirely into ${flipTo.name}'s psychological state, thoughts, and sensory experience.\n\n${flipTo.name} (${flipTo.role}): ${flipTo.personality || ""}. ${flipTo.desires ? `Desires: ${flipTo.desires}` : ""}` },
-        { role: "user", content: `Rewrite this passage entirely from ${flipTo.name}'s internal perspective (currently written from ${currentPov.name}'s perspective):\n\n${selectedText}` },
+        { role: "system", content: `You are rewriting a passage from a different character's internal perspective. Preserve the same scene events but shift entirely into ${flipTo?.name || "unknown"}'s psychological state, thoughts, and sensory experience.\n\n${flipTo?.name || "unknown"} (${flipTo.role}): ${flipTo.personality || ""}. ${flipTo.desires ? `Desires: ${flipTo.desires}` : ""}` },
+        { role: "user", content: `Rewrite this passage entirely from ${flipTo?.name || "unknown"}'s internal perspective (currently written from ${currentPov.name}'s perspective):\n\n${selectedText}` },
       ], { maxTokens: 10000, temperature: 0.8 });
       if (result) {
         setDiffReview({
@@ -9464,7 +9775,7 @@ Write a detailed summary that a writing AI can use to maintain consistency in fu
 - Unresolved threads and cliffhangers that future chapters must address
 
 Be specific with character names. Write as a factual reference, not a story recap.` },
-        { role: "user", content: `Summarize Chapter ${chNum}${chapterDate ? ` (${chapterDate})` : ""}: "${ch.title || 'Untitled'}":\n\n${sample}` },
+        { role: "user", content: `Summarize Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""}: "${ch.title || 'Untitled'}":\n\n${sample}` },
       ], { maxTokens: 10000, temperature: 0.3 });
 
       // E1: Track when summary was generated for stale detection
@@ -9531,7 +9842,7 @@ For each character who changed, output:
 
 Fields you can suggest: desires, shortTermGoals, longTermGoals, arc, status, statusChangedChapter, canonNotes, backstory, speechPattern, internalConflict, externalConflict, allegiances, secrets.
 If no updates are needed, respond "No character updates needed."` },
-            { role: "user", content: `Chapter ${chNum}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${chNum}${chapterDate ? `\nStory date: ${chapterDate}` : ""}` },
+            { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}` },
           ], { maxTokens: 10000, temperature: 0.4 });
 
           if (suggestions && !suggestions.toLowerCase().includes("no character updates needed")) {
@@ -9565,21 +9876,21 @@ If no updates are needed, respond "No character updates needed."` },
                       }
                     }
                   }
-                } catch {}
+                } catch { /* silent */ }
               }
-            } catch {}
+            } catch { /* silent */ }
 
             // FIX: Filter out any relationship field suggestions — relationships belong in the Relations tab, not character profiles
             parsedSuggestions = parsedSuggestions.filter(s => s.field !== "relationships");
 
             if (parsedSuggestions.length > 0) {
-              setCharSuggestions({ chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum}`, items: parsedSuggestions });
+              setCharSuggestions({ chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum || 1}`, items: parsedSuggestions });
               showToast(`${parsedSuggestions.length} character update suggestion${parsedSuggestions.length > 1 ? "s" : ""} ready for review`, "info");
             } else if (suggestions && suggestions.trim() && !suggestions.toLowerCase().includes("no character updates needed")) {
               // Fallback: show raw text if JSON parsing failed but AI returned content
               setChatMessages(prev => [...prev, {
                 id: uid(), role: "assistant", mode: "summarize", chapterIdx: idx,
-                content: `**Character Update Suggestions** (from Ch${chNum} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
+                content: `**Character Update Suggestions** (from Ch${chNum || 1} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
               }]);
               showToast("Character suggestions ready — check the AI panel", "info");
             }
@@ -9649,7 +9960,7 @@ Example output:
 \`\`\`
 
 If no relationship changes, respond "No relationship updates needed."` },
-              { role: "user", content: `Chapter ${chNum}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nChapter number: ${chNum}${chapterDate ? `\nStory date: ${chapterDate}` : ""}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
+              { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
             ], { maxTokens: 10000, temperature: 0.5 });
 
             if (relSuggestions && !relSuggestions.toLowerCase().includes("no relationship updates needed")) {
@@ -9690,7 +10001,7 @@ If no relationship changes, respond "No relationship updates needed."` },
                               const curNorm = currentVal.trim().toLowerCase();
                               const sugNorm = item[field].trim().toLowerCase();
                               if (!sugNorm.includes(curNorm.slice(0, Math.min(50, curNorm.length)))) {
-                                finalVal = `${currentVal.trim()}\n[Ch${chNum}]: ${item[field].trim()}`;
+                                finalVal = `${currentVal.trim()}\n[Ch${chNum || 1}]: ${item[field].trim()}`;
                               }
                             }
                             parsedRelSuggestions.push({
@@ -9717,18 +10028,18 @@ If no relationship changes, respond "No relationship updates needed."` },
                           char2Perspective: item.char2Perspective || "",
                           notes: item.notes || "",
                           meetsInChapter: chNum,
-                          evolutionTimeline: item.notes ? `Ch${chNum}: ${item.notes}` : "",
+                          evolutionTimeline: item.notes ? `Ch${chNum || 1}: ${item.notes}` : "",
                           suggestionStatus: "pending",
                         });
                       }
                     }
-                  } catch {}
+                  } catch { /* silent */ }
                 }
-              } catch {}
+              } catch { /* silent */ }
 
               if (parsedRelSuggestions.length > 0) {
                 setCharSuggestions(prev => {
-                  const existing = prev || { chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum}`, items: [] };
+                  const existing = prev || { chapterIdx: idx, chapterTitle: ch.title || `Chapter ${chNum || 1}`, items: [] };
                   return {
                     ...existing,
                     relSuggestions: [...(existing.relSuggestions || []), ...parsedRelSuggestions],
@@ -9812,7 +10123,7 @@ If no relationship changes, respond "No relationship updates needed."` },
 
             // Resolve image references back to base64
             const restoredProjects = (data.projects || []).map(p =>
-              GDriveImages.resolveImages(JSON.parse(JSON.stringify(p)))
+              GDriveImages.resolveImages((() => { try { return JSON.parse(JSON.stringify(p)); } catch { return null; } })())
             );
 
             setProjects(restoredProjects);
@@ -10026,7 +10337,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
     if (plotId === "__new__") {
       const chNum = activeChapterIdx + 1;
-      const title = activeChapter?.title || `Chapter ${chNum}`;
+      const title = activeChapter?.title || `Chapter ${chNum || 1}`;
       const newPlotId = uid();
       const newPlot = {
         id: newPlotId, chapter: chNum, title, summary: "",
@@ -10042,7 +10353,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       updateProject({
         plotOutline: [...(project?.plotOutline || []), newPlot],
       });
-      showToast(`Created plot entry for Ch${chNum}`, "success");
+      showToast(`Created plot entry for Ch${chNum || 1}`, "success");
       return;
     }
 
@@ -10131,6 +10442,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       notes: draft.notes || "",
       worldView: draft.worldView || "",
       summaryGeneratedAt: "",
+      narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "",
     };
     updateProject({ chapters, drafts: newDrafts });
     setActiveChapterIdx(targetIdx);
@@ -10184,7 +10496,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         w.id === itemId ? { ...w, _generatingPrompts: true } : w
       ),
     });
-    showToast(`Generating 4 wall prompts for "${item.name}"...`, "info");
+    showToast(`Generating 4 wall prompts for "${item?.name || "unnamed"}"...`, "info");
 
     try {
       const prompts = await generateWorldImagePrompts(item, project, callOpenRouter);
@@ -10196,7 +10508,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
               : w
           ),
         });
-        showToast(`4 wall prompts generated for "${item.name}"`, "success");
+        showToast(`4 wall prompts generated for "${item?.name || "unnamed"}"`, "success");
       } else {
         updateProject({
           worldBuilding: items.map(w =>
@@ -10236,7 +10548,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       }
 
       // FIX: Always restore images before creating the Drive copy
-      const localProjects = JSON.parse(JSON.stringify(projects));
+      let localProjects; try { localProjects = JSON.parse(JSON.stringify(projects)); } catch { localProjects = null; }
       const projectsForDrive = JSON.parse(JSON.stringify(projects)).map(p => {
         GDriveImages.resolveImages(p);
         GDriveImages.markImages(p);
@@ -10314,7 +10626,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
             // Resolve GDRIVE_IMAGE markers → base64
             // Resolve GDRIVE_IMAGE markers → base64
             const driveProjects = (data.projects || []).map(p =>
-              GDriveImages.resolveImages(JSON.parse(JSON.stringify(p)))
+              GDriveImages.resolveImages((() => { try { return JSON.parse(JSON.stringify(p)); } catch { return null; } })())
             );
 
             // FIX: Smart content merge — use Drive content if local is empty or has placeholders
@@ -10376,7 +10688,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           if (allImages.length > 0) await GDriveImages.syncUpload(allImages);
 
           // FIX: Restore images locally, strip for Drive
-          const localProjects = JSON.parse(JSON.stringify(projects));
+          let localProjects; try { localProjects = JSON.parse(JSON.stringify(projects)); } catch { localProjects = null; }
           const projectsForDrive = JSON.parse(JSON.stringify(projects)).map(p => {
             GDriveImages.resolveImages(p);
             GDriveImages.markImages(p);
@@ -11002,13 +11314,13 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           {/* Chapter images */}
           {chapterImages.length > 0 && (
             <div style={{ marginBottom: 24 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 10 }}>In Chapters ({chapterImages.length})</div>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>In Chapters ({chapterImages.length})</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
                 {chapterImages.map(img => (
                   <div key={img.id} className="nf-card" style={{ padding: 0, overflow: "hidden" }}>
-                    <img src={img.imageUrl} alt={img.alt} style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
-                    <div style={{ padding: "8px 12px" }}>
-                      <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>{img.chapterTitle}</div>
+                    <img key={img.id} src={img.imageUrl} alt={img.alt} style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
+                    <div key={img.id} style={{ padding: "8px 12px" }}>
+                      <div key={img.id} style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>{img.chapterTitle}</div>
                       {img.alt && <div style={{ fontSize: 9, color: "var(--nf-text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{img.alt}</div>}
                     </div>
                   </div>
@@ -11020,7 +11332,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           {/* Draft/generated images */}
           <div>
             {draftImages.length > 0 && chapterImages.length > 0 && (
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 10 }}>Drafts ({draftImages.length})</div>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>Drafts ({draftImages.length})</div>
             )}
             {draftImages.length === 0 && chapterImages.length === 0 && (
               <div className="nf-empty-state">Generate images from the Write tab using the Image Prompt tool</div>
@@ -11029,12 +11341,12 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16 }}>
               {draftImages.map(img => (
                 <div key={img.id} className="nf-card" style={{ padding: 0, overflow: "hidden" }}>
-                  <img src={img.imageUrl} alt={img.prompt?.slice(0, 50) || "Generated image"} style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }} />
-                  <div style={{ padding: "10px 14px" }}>
-                    <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 4 }}>
+                  <img key={img.id} src={img.imageUrl} alt={img.prompt?.slice(0, 50) || "Generated image"} style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }} />
+                  <div key={img.id} style={{ padding: "10px 14px" }}>
+                    <div key={img.id} style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 4 }}>
                       {img.chapterTitle || `Chapter ${(img.chapterIdx || 0) + 1}`} · {img.createdAt ? new Date(img.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                     </div>
-                    {img.prompt && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.4, maxHeight: 48, overflow: "hidden" }}>{img.prompt}</div>}
+                    {img.prompt && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.4, maxHeight: 48, overflow: "hidden", textOverflow: "ellipsis" }}>{img.prompt}</div>}
                     <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
                       <button onClick={() => {
                         const caption = img.chapterTitle || "Generated image";
@@ -11091,9 +11403,9 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           @keyframes nf-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.7; } }
           @keyframes nf-breathe { 0%, 100% { transform: scale(1) rotate(0deg); } 50% { transform: scale(1.05) rotate(1deg); } }
         `}</style>
-        <div style={{ width: 48, height: 48, borderRadius: 2, background: "#c4653a", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 20, fontWeight: 400, animation: "nf-breathe 2s ease-in-out infinite" }}>✦</div>
+        <div style={{ width: 48, height: 48, borderRadius: 2, background: "#c4653a", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--nf-text-inverse, #fff)", fontSize: 20, fontWeight: 400, animation: "nf-breathe 2s ease-in-out infinite" }}>✦</div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
-          <span style={{ color: "#e8e4df", fontSize: 22, fontFamily: "'Cormorant Garamond', Georgia, serif", fontWeight: 400, letterSpacing: "0.03em" }}>NovelForge</span>
+          <span style={{ color: "#e8e4df", fontSize: 24, fontFamily: "'Cormorant Garamond', Georgia, serif", fontWeight: 400, letterSpacing: "0.03em" }}>NovelForge</span>
           <span style={{ color: "#7a756e", fontSize: 11, fontFamily: "'DM Sans', sans-serif", letterSpacing: "0.08em", textTransform: "uppercase" }}>Preparing your workspace...</span>
         </div>
         <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
@@ -11109,7 +11421,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
   const renderProjectList = () => (
     <div className={`nf-sidebar ${showProjectList ? "nf-sidebar-open" : "nf-sidebar-closed"}`}>
       <div className="nf-sidebar-header">
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 24 }}>
           <div className="nf-logo-mark">✦</div>
           <span className="nf-logo-text">NovelForge</span>
           <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
@@ -11137,7 +11449,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           // C3: Calculate and show word count per project
           const projWords = (p.chapters || []).reduce((sum, ch) => sum + wordCount(ch.content), 0);
           return (
-            <div key={p.id} onClick={() => {
+            <div role="button" tabIndex={0} key={p.id} onClick={() => {
               // C12: Save current chapter index for current project before switching
               _lastChapterPerProject.current[activeProjectId] = activeChapterIdx;
               // Restore last chapter for target project or default to 0
@@ -11206,7 +11518,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       <div className="nf-mode-bar">
         {Object.keys(modePrompts).map(m => (
           <Tooltip key={m} text={MODE_TOOLTIPS[m]}>
-            <button onClick={() => {
+            <button key={m.id} onClick={() => {
               // A4: Clear stale selection when switching away from rewrite mode
               if (genMode === "rewrite" && m !== "rewrite") {
                 setSelectedText(""); setSelectionRange(null);
@@ -11219,12 +11531,12 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
       {selectedText && (
         <div className="nf-selection-indicator">
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
             <Icons.Crosshair />
             <span style={{ fontWeight: 600, fontSize: 10 }}>Selected</span>
             <span style={{ opacity: 0.6, fontSize: 10 }}>({wordCount(selectedText)} words)</span>
           </div>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.4, maxHeight: 36, overflow: "hidden" }}>
+          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.4, maxHeight: 36, overflow: "hidden", textOverflow: "ellipsis" }}>
             "{selectedText.slice(0, 100)}{selectedText.length > 100 ? "…" : ""}"
           </div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 5 }}>
@@ -11426,7 +11738,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 - Make sure the final result is very SFW with zero doubts that this is not an NSFW activity even if read by a child. Remember that every action have funny, consensual explanation to rationalize the intent and you must state the funny reasoning behind every action for every character.
 - Keep the prompt formatting verbatim.
 - The viewer should see the SAME image from both prompts.` },
-                      { role: "user", content: `Rewrite this prompt to pass content filters:\n\n${aiPrompt}` },
+                      { role: "user", content: `Rewrite this prompt to pass content filters:\n\n${aiPrompt || ""}` },
                     ], { maxTokens: 40000, temperature: 0.3 });
                     // Only upgrade if API actually returned something better than fallback
                     if (aiResult && aiResult.trim() && aiResult.trim().length > 50 && imagePromptAbortRef.current === desCtrl) {
@@ -11562,7 +11874,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
       </div>
       <div className="nf-chat-input-area">
         <div className="nf-scene-direction-box">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
             <label style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
               Scene Direction <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, opacity: 0.6 }}>
                 {genMode === "rewrite" || genMode === "summarize"
@@ -11580,6 +11892,43 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           <textarea value={sceneNotes} onChange={e => setSceneNotes(e.target.value)}
             placeholder="Where is this scene going? Emotional goal? Who initiates?"
             className="nf-scene-textarea" aria-label="Scene direction notes" />
+          {/* ─── LITERARY CRAFT PANEL ─── */}
+          <details style={{ marginTop: 4 }}>
+            <summary style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", cursor: "pointer", padding: "4px 0", userSelect: "none" }}>Craft Controls</summary>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px", marginTop: 6 }}>
+              <div className="nf-field">
+                <label className="nf-label">Narrative Distance</label>
+                <select value={activeChapter?.narrativeDistance || ""} onChange={e => updateChapter(activeChapterIdx, { narrativeDistance: e.target.value })} className="nf-select" style={{ fontSize: 10 }}>
+                  <option value="">Default</option>
+                  <option value="cinematic">Cinematic (wide shot)</option>
+                  <option value="close-third">Close Third</option>
+                  <option value="deep-interiority">Deep Interiority</option>
+                </select>
+              </div>
+              <div className="nf-field">
+                <label className="nf-label">Tension Level</label>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input type="range" min="1" max="10" value={activeChapter?.tensionLevel || 5} onChange={e => updateChapter(activeChapterIdx, { tensionLevel: parseInt(e.target.value, 10) })} style={{ flex: 1, accentColor: "var(--nf-accent)" }} />
+                  <span style={{ fontSize: 10, fontFamily: "var(--nf-font-mono)", color: "var(--nf-text-muted)", minWidth: 16, textAlign: "center" }}>{activeChapter?.tensionLevel || 5}</span>
+                </div>
+              </div>
+              <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
+                <label className="nf-label">Sensory Palette</label>
+                <input value={activeChapter?.sensoryPalette || ""} onChange={e => updateChapter(activeChapterIdx, { sensoryPalette: e.target.value })} className="nf-input" placeholder="e.g. Visual-dominant, cold blues, rain, damp stone" style={{ fontSize: 10 }} />
+              </div>
+              <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
+                <label className="nf-label">Subtext</label>
+                <input value={activeChapter?.subtextNotes || ""} onChange={e => updateChapter(activeChapterIdx, { subtextNotes: e.target.value })} className="nf-input" placeholder="What's really happening beneath the surface?" style={{ fontSize: 10 }} />
+              </div>
+              {activeChapter?.chapterEndHookScore > 0 && (
+                <div style={{ gridColumn: "1 / -1", fontSize: 10, color: "var(--nf-text-muted)", padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
+                  <span style={{ fontWeight: 600 }}>Chapter-end hook: </span>
+                  <span style={{ color: activeChapter.chapterEndHookScore >= 7 ? "var(--nf-success)" : activeChapter.chapterEndHookScore >= 4 ? "var(--nf-accent-2)" : "var(--nf-accent)" }}>{activeChapter.chapterEndHookScore}/10</span>
+                  {activeChapter.chapterEndHookNotes && <span> — {activeChapter.chapterEndHookNotes}</span>}
+                </div>
+              )}
+            </div>
+          </details>
 		  {activeChapter?.worldView && (
 		    <div style={{ marginTop: 6, padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
 			  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -11628,12 +11977,13 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             <span className="nf-section-label">Chapters</span>
             <button onClick={() => {
               const chNum = (project?.chapters?.length || 0) + 1;
-              const title = `Chapter ${chNum}`;
+              const title = `Chapter ${chNum || 1}`;
               const newChId = uid();
               const chs = [...(project?.chapters || []), {
                 id: newChId, title, content: "", summary: "", notes: "",
                 sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "",
                 linkedPlotId: "",
+                narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "",
               }];
             
               const existingPlot = (project?.plotOutline || []).find(pl => (pl.chapter || 0) === chNum);
@@ -11664,7 +12014,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           <div className="nf-chapter-list">
             {project?.chapters?.map((ch, i) => (
               <div key={ch.id || i}>
-                <div onClick={() => {
+                <div role="button" tabIndex={0} key={i} onClick={() => {
                   if (viewingDraftId) { handleCloseDraft(); }
                   if (i !== activeChapterIdx) { pushUndo(); syncEditorContent(); setActiveChapterIdx(i); forceRepopulateEditor(); setSelectedText(""); setSelectionRange(null); }
                 }}
@@ -11673,7 +12023,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   onDragEnd={e => { e.currentTarget.style.opacity = "1"; setDragOverIdx(null); }}
                   onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverIdx(i); }}
                   onDragLeave={() => setDragOverIdx(null)}
-                  onDrop={e => { e.preventDefault(); setDragOverIdx(null); const from = parseInt(e.dataTransfer.getData("text/plain")); if (!isNaN(from) && from !== i) moveChapter(from, i); }}
+                  onDrop={e => { e.preventDefault(); setDragOverIdx(null); const from = parseInt(e.dataTransfer.getData("text/plain", 10)); if (!isNaN(from) && from !== i) moveChapter(from, i); }}
                   className={`nf-chapter-item ${i === activeChapterIdx ? "active" : ""}`}
                   style={dragOverIdx === i ? { borderTop: "2px solid var(--nf-accent-2)", paddingTop: 7 } : undefined}>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -11724,8 +12074,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 {/* Drafts for this chapter — shown inline when sidebar drafts section is open */}
                 {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).map(draft => (
                   <div key={draft.id} style={{
-                    padding: "5px 10px 5px 28px", fontSize: 10, color: "var(--nf-text-muted)",
-                    borderLeft: "2px solid var(--nf-accent)", marginLeft: 14, marginBottom: 1,
+                    padding: "4px 10px 5px 28px", fontSize: 10, color: "var(--nf-text-muted)",
+                    borderLeft: "2px solid var(--nf-accent)", marginLeft: 14, marginBottom: 2,
                     background: "var(--nf-accent-glow)", borderRadius: "0 2px 2px 0",
                     lineHeight: 1.4,
                   }}>
@@ -11740,11 +12090,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     </div>
                     <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
                       <button onClick={(e) => { e.stopPropagation(); handleRestoreDraft(draft.id); }}
-                        className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                        className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
                         ↩ Restore
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); handleDeleteDraft(draft.id); }}
-                        className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px" }}>
+                        className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px" }}>
                         ✕
                       </button>
                     </div>
@@ -11755,12 +12105,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             {/* Drafts for chapters that no longer exist (position out of range) */}
             {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? 0) >= (project?.chapters?.length || 0)).map(draft => (
               <div key={draft.id} style={{
-                padding: "5px 10px", fontSize: 10, color: "var(--nf-text-muted)",
-                borderLeft: "2px solid var(--nf-accent-2)", marginLeft: 14, marginBottom: 1,
+                padding: "4px 10px", fontSize: 10, color: "var(--nf-text-muted)",
+                borderLeft: "2px solid var(--nf-accent-2)", marginLeft: 14, marginBottom: 2,
                 background: "var(--nf-bg-surface)", borderRadius: "0 2px 2px 0",
               }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
+                  <span title={draft.title} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                     ↳ {draft.title} <span style={{ opacity: 0.5 }}>(no chapter)</span>
                   </span>
                   <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>{wordCount(draft.content)}w</span>
@@ -11773,16 +12123,17 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       summary: draft.summary || "", sceneNotes: draft.sceneNotes || "",
                       pov: draft.pov || "", notes: draft.notes || "",
                       worldView: draft.worldView || "", summaryGeneratedAt: "",
+                      narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "",
                     };
                     const chapters = [...(project?.chapters || []), newCh];
                     updateProject({ chapters, drafts: (project?.drafts || []).filter(d => d.id !== draft.id) });
                     setActiveChapterIdx(chapters.length - 1);
                     forceRepopulateEditor();
                     showToast(`"${draft.title}" restored as new chapter`, "success");
-                  }} className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                  }} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
                     ↩ Add as Ch{(project?.chapters?.length || 0) + 1}
                   </button>
-                  <button onClick={() => handleDeleteDraft(draft.id)} className="nf-btn-micro" style={{ fontSize: 8, padding: "1px 5px" }}>
+                  <button onClick={() => handleDeleteDraft(draft.id)} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px" }}>
                     ✕
                   </button>
                 </div>
@@ -11820,7 +12171,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   <div style={{ fontSize: 9, color: "var(--nf-accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>
                     Viewing Draft — Ch{(draft.originalIndex ?? activeChapterIdx) + 1}
                   </div>
-                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div title={draft.title} style={{ fontSize: 14, fontWeight: 500, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {draft.title}
                   </div>
                   {draft.deactivatedAt && (
@@ -11910,7 +12261,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                         color: linkedPlot ? "var(--nf-success)" : undefined,
                         fontSize: 10,
                         padding: "4px 10px",
-                        whiteSpace: "nowrap",
+                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                         fontWeight: 600,
                       }}
                     >
@@ -11960,7 +12311,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                           </div>
                           {linkedPlot.sceneType && (
                             <span style={{
-                              fontSize: 9, padding: "1px 6px",
+                              fontSize: 9, padding: "2px 6px",
                               background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)",
                               borderRadius: 3, color: "var(--nf-text-muted)", marginTop: 3, display: "inline-block",
                             }}>{linkedPlot.sceneType}</span>
@@ -12055,7 +12406,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             })()}
           </div>
           <SaveIndicator status={saveStatus} fileLinked={fileLinked} />
-          <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words` : ""}</span>
+          <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words · ${Math.max(1, Math.ceil(currentChapterWords / 250))}m read` : ""}</span>
           <div className="nf-header-actions">
             <select value={activeChapter?.pov || ""} onChange={e => updateChapter(activeChapterIdx, { pov: e.target.value })}
               aria-label="Chapter POV"
@@ -12257,14 +12608,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               </button>
             </Tooltip>
             {isMobile && settings.apiKey && (
-              <button onClick={() => setShowAiMobile(true)} className="nf-btn-icon-sm" style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }} aria-label="Open AI assistant"><Icons.Zap /> AI</button>
+              <button onClick={() => setShowAiMobile(prev => prev === "write" ? false : "write")} className="nf-btn-icon-sm" style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }} aria-label="Open AI assistant"><Icons.Zap /> AI</button>
             )}
             {project?.chapters?.length > 1 ? (
               <button onClick={() => setConfirmDialog({
                 message: `Delete "${activeChapter?.title}"?`,
                 onConfirm: () => {
                   const chs = project.chapters.filter((_, i) => i !== activeChapterIdx);
-                  updateProject({ chapters: chs.length ? chs : [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "" }] });
+                  updateProject({ chapters: chs.length ? chs : [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "" }] });
                   setActiveChapterIdx(Math.min(activeChapterIdx, Math.max(0, chs.length - 1)));
                   forceRepopulateEditor(); setConfirmDialog(null); showToast("Deleted", "success");
                 },
@@ -12440,7 +12791,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 				// Determine drop position
 				let range = null;
 				if (document.caretRangeFromPoint) {
-					try { range = document.caretRangeFromPoint(e.clientX, e.clientY); } catch {}
+					try { range = document.caretRangeFromPoint(e.clientX, e.clientY); } catch { /* silent */ }
 				}
 				if (range && el.contains(range.startContainer) && range.startContainer !== el) {
 					// Insert images at drop point
@@ -12484,11 +12835,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           {imagePromptData && (
             <div style={{
               borderTop: "2px solid var(--nf-accent)", background: "var(--nf-bg-raised)",
-              padding: "14px 20px", animation: "nf-slideUp 0.15s ease-out", flexShrink: 0,
+              padding: "16px 20px", animation: "nf-slideUp 0.15s ease-out", flexShrink: 0,
               maxHeight: "50vh", overflowY: "auto",
             }}>
               {/* Header */}
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)" }}>Image Prompt</div>
                   <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 1 }}>
@@ -12518,7 +12869,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 
               {/* Prompt area */}
               {imagePromptData.isGenerating ? (
-                <div style={{ padding: "30px 16px", textAlign: "center", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 3 }}>
+                <div style={{ padding: "32px 16px", textAlign: "center", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 3 }}>
                   <Spinner />
                   <div style={{ marginTop: 8, fontSize: 11, color: "var(--nf-text-muted)" }}>Building image prompt...</div>
                 </div>
@@ -12601,7 +12952,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       const position = (() => {
                         try {
                           if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) return savedImageCursorRef.current;
-                        } catch {} return "cursor";
+                        } catch { /* silent */ } return "cursor";
                       })();
                       _insertImageAtPoint(el, imgHtml, position);
                       syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
@@ -12627,9 +12978,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 <div style={{ marginTop: 10 }}>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     {imageGenStatus.images.map((img, idx) => (
-                      <div key={idx} style={{ border: "1px solid var(--nf-border)", borderRadius: 3, overflow: "hidden", background: "var(--nf-bg-deep)" }}>
-                        <div style={{ padding: "4px 8px", background: "var(--nf-bg-surface)", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <span style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{img.label}</span>
+                      <div key={idx} style={{ border: "1px solid var(--nf-border)", borderRadius: 3, overflow: "hidden", textOverflow: "ellipsis", background: "var(--nf-bg-deep)" }}>
+                        <div key={idx} style={{ padding: "4px 8px", background: "var(--nf-bg-surface)", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span key={idx} style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{img.label}</span>
                           {img.status === "generating" && <Spinner />}
                           {img.status === "error" && <span style={{ fontSize: 9, color: "var(--nf-accent)" }}>Failed</span>}
                         </div>
@@ -12644,7 +12995,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                 const position = (() => {
                                   try {
                                     if (savedImageCursorRef.current && el.contains(savedImageCursorRef.current.startContainer)) return savedImageCursorRef.current;
-                                  } catch {} return "end";
+                                  } catch { /* silent */ } return "end";
                                 })();
                                 _insertImageAtPoint(el, _buildImgFigure(img.imageUrl, caption + ` (${img.label})`), position);
                                 syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
@@ -12686,7 +13037,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 		  {!isMobile && !focusMode && renderAiPanel()}
         </div>
       </div>
-      {isMobile && showAiMobile && renderAiPanel(true)}
+      {isMobile && showAiMobile === "write" && renderAiPanel(true)}
     </div>
   );
 
@@ -12698,20 +13049,39 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
         <div className="nf-chapter-sidebar">
           <div className="nf-chapter-sidebar-header">
             <span className="nf-section-label">Characters ({chars.length})</span>
-            <button onClick={() => { const nc = createDefaultCharacter(); updateProject({ characters: [...chars, nc] }); setEditingCharId(nc.id); }}
-              className="nf-btn-icon-sm" aria-label="Add character"><Icons.Plus /> Character</button>
-            <button onClick={() => {
-              const name = prompt("Group name (e.g. 'Police Officers', 'Palace Guards'):");
-              if (!name) return;
-              const count = parseInt(prompt("How many individuals? (e.g. 150)") || "10") || 10;
-              const desc = prompt("Brief description (e.g. 'Beat cops at the 15th precinct, mostly jaded veterans'):") || "";
-              const nc = createBulkCharacterGroup(name, count, desc);
-              updateProject({ characters: [...chars, nc] }); setEditingCharId(nc.id);
-            }} className="nf-btn-icon-sm" aria-label="Add bulk group" style={{ color: "var(--nf-accent-2)", borderColor: "var(--nf-accent-2)" }}><Icons.Users /> Group</button>
+            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+              <button onClick={() => { const nc = createDefaultCharacter(); updateProject({ characters: [...chars, nc] }); setEditingCharId(nc.id); }}
+                className="nf-btn-icon-sm" aria-label="Add character"><Icons.Plus /></button>
+              <button onClick={() => setShowGroupForm(prev => !prev)}
+                className="nf-btn-icon-sm" aria-label="Add bulk group" title="Add bulk character group" style={{ color: "var(--nf-accent-2)", borderColor: "var(--nf-accent-2)" }}><Icons.Users /></button>
+            </div>
           </div>
+          {showGroupForm && (
+            <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)" }}>
+              <div style={{ fontSize: 10, fontWeight: 600, color: "var(--nf-accent-2)", marginBottom: 6 }}>New Character Group</div>
+              <input id="nf-group-name" placeholder="Group name (e.g. Palace Guards)" className="nf-input" style={{ fontSize: 11, marginBottom: 4 }} />
+              <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+                <input id="nf-group-count" type="number" min="1" defaultValue="10" placeholder="Count" className="nf-input" style={{ fontSize: 11, width: 60 }} />
+                <input id="nf-group-desc" placeholder="Brief description..." className="nf-input" style={{ fontSize: 11, flex: 1 }} />
+              </div>
+              <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                <button onClick={() => setShowGroupForm(false)} className="nf-btn-micro">Cancel</button>
+                <button onClick={() => {
+                  const name = document.getElementById("nf-group-name")?.value?.trim();
+                  if (!name) return;
+                  const count = parseInt(document.getElementById("nf-group-count")?.value, 10) || 10;
+                  const desc = document.getElementById("nf-group-desc")?.value?.trim() || "";
+                  const nc = createBulkCharacterGroup(name, count, desc);
+                  updateProject({ characters: [...chars, nc] });
+                  setEditingCharId(nc.id);
+                  setShowGroupForm(false);
+                }} className="nf-btn-micro" style={{ background: "var(--nf-accent-2)", color: "#fff", borderColor: "var(--nf-accent-2)" }}>Create Group</button>
+              </div>
+            </div>
+          )}
           <div className="nf-chapter-list" style={{ padding: 6 }}>
             {chars.map(c => (
-              <div key={c.id} onClick={() => setEditingCharId(c.id)}
+              <div role="button" tabIndex={0} key={c.id} onClick={() => setEditingCharId(c.id)}
                 className={`nf-polaroid ${c.id === editingCharId ? "active" : ""}`}
                 style={{
                   marginBottom: 8, padding: "6px 6px 10px",
@@ -12734,15 +13104,15 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       <span style={{ fontSize: 8, color: "var(--nf-text-muted)" }}>{c.bulkCount || "?"}×</span>
                     </div>
                   ) : (
-                    <span style={{ fontSize: 20, opacity: 0.15, color: "var(--nf-text-muted)" }}>
+                    <span style={{ fontSize: 20, opacity: 0.2, color: "var(--nf-text-muted)" }}>
                       {c.name ? c.name[0].toUpperCase() : "?"}
                     </span>
                   )}
                   {/* Status indicator */}
                   {c.status && c.status !== "alive" && (
                     <div style={{
-                      position: "absolute", bottom: 3, right: 3, fontSize: 8, padding: "1px 5px",
-                      background: "rgba(0,0,0,0.7)", color: "#fff", borderRadius: 2,
+                      position: "absolute", bottom: 3, right: 3, fontSize: 8, padding: "2px 5px",
+                      background: "rgba(0,0,0,0.7)", color: "var(--nf-text-inverse, #fff)", borderRadius: 2,
                       textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600,
                     }}>{c.status}</div>
                   )}
@@ -12784,7 +13154,6 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   ) : (
                     <div style={{ fontSize: 10, color: "var(--nf-success)", marginTop: 2 }}>✓ All key fields populated</div>
                   );
-                })()}
                 })()}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
@@ -12830,7 +13199,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   {editingChar.image ? (
                     <img src={editingChar.image} alt={editingChar.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                   ) : (
-                    <span style={{ fontSize: 36, opacity: 0.1, color: "var(--nf-text-muted)" }}>
+                    <span style={{ fontSize: 28, opacity: 0.2, color: "var(--nf-text-muted)" }}>
                       {editingChar.name ? editingChar.name[0].toUpperCase() : "?"}
                     </span>
                   )}
@@ -12860,7 +13229,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           model: "google/gemini-3.1-flash-image-preview",
                           messages: [{ role: "user", content: prompt }],
                           modalities: ["image", "text"],
-                          max_tokens: 4096,
+                          temperature: 0.8, max_tokens: 4096,
                         }),
                       });
                       const data = await res.json();
@@ -12877,7 +13246,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       } else {
                         showToast("No image returned — try again", "error");
                       }
-                    } catch (e) { showToast(`Portrait failed: ${e.message}`, "error"); }
+                    } catch (e) { showToast(`Portrait failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
                   }} className="nf-btn-micro" disabled={!settings.apiKey}>
                     <Icons.Wand /> Generate AI Portrait
                   </button>
@@ -12909,6 +13278,40 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             </div>
 
             {/* D4: Section — Identity */}
+            {editingChar.isBulk ? (
+              /* ═══ BULK GROUP FORM — simplified fields ═══ */
+              <>
+                <div className="nf-char-section">
+                  <div className="nf-char-section-label">Group Identity</div>
+                  <DebouncedField label="Group Name" value={editingChar.name} onChange={v => updateCharById(editingCharId, "name", v)} placeholder="e.g. Palace Guards, Villagers, The Council" />
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 12px" }}>
+                    <SelectField label="Role in Story" value={editingChar.role} onChange={v => updateCharById(editingCharId, "role", v)} options={ROLE_OPTIONS} />
+                    <Field label="Number of Individuals" value={editingChar.bulkCount} onChange={v => updateCharById(editingCharId, "bulkCount", parseInt(v, 10) || 0)} type="number" />
+                  </div>
+                  <DebouncedField label="Group Description" value={editingChar.bulkDescription} onChange={v => { updateCharById(editingCharId, "bulkDescription", v); updateCharById(editingCharId, "personality", v); }} multiline placeholder="Who are they? What's their collective identity, attitude, and function in the story?" />
+                </div>
+                <div className="nf-char-section">
+                  <div className="nf-char-section-label">Group Details</div>
+                  <DebouncedField label="Appearance / Uniform" value={editingChar.appearance} onChange={v => updateCharById(editingCharId, "appearance", v)} multiline placeholder="Shared visual identity — uniforms, markings, typical build, how to tell them apart..." />
+                  <DebouncedField label="Behavior & Culture" value={editingChar.habits} onChange={v => updateCharById(editingCharId, "habits", v)} multiline placeholder="Shared habits, rituals, code of conduct, internal hierarchy..." />
+                  <DebouncedField label="Allegiances" value={editingChar.allegiances} onChange={v => updateCharById(editingCharId, "allegiances", v)} placeholder="Who do they serve? What faction?" />
+                  <DebouncedField label="Tags / Keywords" value={editingChar.tags} onChange={v => updateCharById(editingCharId, "tags", v)} placeholder="e.g. military, corrupt, loyal, feared" small />
+                </div>
+                <div className="nf-char-section">
+                  <div className="nf-char-section-label">Story Function</div>
+                  <DebouncedField label="Purpose in Story" value={editingChar.desires} onChange={v => updateCharById(editingCharId, "desires", v)} multiline placeholder="Why does this group exist in the narrative? What do they enable or obstruct?" />
+                  <DebouncedField label="Strengths / Resources" value={editingChar.strengths} onChange={v => updateCharById(editingCharId, "strengths", v)} multiline placeholder="What makes this group dangerous, useful, or powerful?" />
+                  <DebouncedField label="Weaknesses / Limitations" value={editingChar.flaws} onChange={v => updateCharById(editingCharId, "flaws", v)} multiline placeholder="What are their blind spots, divisions, or vulnerabilities?" />
+                  <DebouncedField label="Notable Members" value={editingChar.canonNotes} onChange={v => updateCharById(editingCharId, "canonNotes", v)} multiline placeholder="Name any standout individuals within the group — the captain, the rebel, the rookie..." />
+                </div>
+                <div className="nf-char-section">
+                  <div className="nf-char-section-label">Author Notes</div>
+                  <DebouncedField label="Notes" value={editingChar.notes} onChange={v => updateCharById(editingCharId, "notes", v)} multiline placeholder="Anything else about this group..." />
+                </div>
+              </>
+            ) : (
+            /* ═══ INDIVIDUAL CHARACTER FORM ═══ */
+            <>
             <div className="nf-char-section">
               <div className="nf-char-section-label">Identity</div>
               <DebouncedField label="Name" value={editingChar.name} onChange={v => updateCharById(editingCharId, "name", v)} placeholder="Full name" />
@@ -12937,11 +13340,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <div className="nf-field" style={{ flex: 1 }}>
                       <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Occupation / Title
-                        {orgPositions.length > 0 && <span style={{ fontSize: 8, padding: "1px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from org</span>}
+                        {orgPositions.length > 0 && <span style={{ fontSize: 8, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from org</span>}
                       </label>
                       {orgPositions.length > 0 ? (
                         <div>
-                          <div style={{ fontSize: 11, color: "var(--nf-accent-2)", padding: "5px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 4, fontWeight: 500 }}>
+                          <div style={{ fontSize: 11, color: "var(--nf-accent-2)", padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 4, fontWeight: 500 }}>
                             {derivedOccupation}
                           </div>
                           <DebouncedField value={editingChar.occupation || ""} onChange={v => updateCharById(editingCharId, "occupation", v)} placeholder="Additional title (optional, overrides for AI)" small />
@@ -12952,17 +13355,17 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     </div>
                   );
                 })()}
-                <Field label="First Appears (Chapter #)" value={editingChar.firstAppearanceChapter || ""} onChange={v => updateCharById(editingCharId, "firstAppearanceChapter", parseInt(v) || 0)} placeholder={(() => {
+                <Field label="First Appears (Chapter #)" value={editingChar.firstAppearanceChapter || ""} onChange={v => updateCharById(editingCharId, "firstAppearanceChapter", parseInt(v, 10) || 0)} placeholder={(() => {
                   // Auto-suggest from plot outline
                   const plotAppearances = (project?.plotOutline || []).filter(pl => Array.isArray(pl.characters) && pl.characters.includes(editingCharId)).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
                   return plotAppearances.length > 0 ? `From plot: Ch${plotAppearances[0].chapter || "?"}` : "0 = from start";
-                })()} type="number" />
+                })()} type="number" min="0" />
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px 12px" }}>
                 <SelectField label="Status" value={editingChar.status || "alive"} onChange={v => updateCharById(editingCharId, "status", v)} options={CHARACTER_STATUS_OPTIONS} />
                 <Field label="Height" value={editingChar.height || ""} onChange={v => updateCharById(editingCharId, "height", v)} placeholder="e.g. 5'10, 178cm" />
                 {editingChar.status && editingChar.status !== "alive" ? (
-                  <Field label="Status Changed (Ch#)" value={editingChar.statusChangedChapter || ""} onChange={v => updateCharById(editingCharId, "statusChangedChapter", parseInt(v) || 0)} placeholder="Chapter #" type="number" />
+                  <Field label="Status Changed (Ch#)" value={editingChar.statusChangedChapter || ""} onChange={v => updateCharById(editingCharId, "statusChangedChapter", parseInt(v, 10) || 0)} placeholder="Chapter #" type="number" min="0" />
                 ) : (
                   <SelectField label="Build" value={editingChar.build || ""} onChange={v => updateCharById(editingCharId, "build", v)} options={BUILD_OPTIONS} placeholder="Select..." />
                 )}
@@ -12985,9 +13388,9 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <div className="nf-field" style={{ flex: 1 }}>
                       <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Allegiances / Factions
-                        {derived && <span style={{ fontSize: 8, padding: "1px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from orgs</span>}
+                        {derived && <span style={{ fontSize: 8, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from orgs</span>}
                       </label>
-                      {derived && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", padding: "3px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 3 }}>{derived}</div>}
+                      {derived && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 4 }}>{derived}</div>}
                       <DebouncedField value={editingChar.allegiances || ""} onChange={v => updateCharById(editingCharId, "allegiances", v)} placeholder={derived ? "Additional allegiances..." : "e.g. Order of the Phoenix, Team Alpha"} small />
                     </div>
                   );
@@ -13054,7 +13457,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <div className="nf-char-section">
               <div className="nf-char-section-label">Story & Backstory</div>
               <DebouncedField label="Backstory" value={editingChar.backstory} onChange={v => updateCharById(editingCharId, "backstory", v)} multiline placeholder="Formative experiences, wounds, what shaped them..." />
-              <Field label="Backstory Reveal (Ch#)" value={editingChar.backstoryRevealChapter || ""} onChange={v => updateCharById(editingCharId, "backstoryRevealChapter", parseInt(v) || 0)} placeholder="0 = always visible to AI" type="number" small />
+              <Field label="Backstory Reveal (Ch#)" value={editingChar.backstoryRevealChapter || ""} onChange={v => updateCharById(editingCharId, "backstoryRevealChapter", parseInt(v, 10) || 0)} placeholder="0 = always visible to AI" type="number" min="0" small />
               <DebouncedField label="Character Arc" value={editingChar.arc} onChange={v => updateCharById(editingCharId, "arc", v)} multiline placeholder="Full trajectory: who they start as → who they become..." small />
               <DebouncedField label="Signature Items / Possessions" value={editingChar.signatureItems || ""} onChange={v => updateCharById(editingCharId, "signatureItems", v)} multiline placeholder="A locket with a photo, enchanted blade, battered notebook, vintage motorcycle..." small />
               {/* Secrets — two tiers */}
@@ -13062,7 +13465,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Secrets</div>
                 <DebouncedField label="Known Secrets (reader knows, sent to AI)" value={editingChar.secrets || ""} onChange={v => updateCharById(editingCharId, "secrets", v)} multiline placeholder="Secrets the reader/AI should know — hidden heritage, double identity, forbidden power..." small />
                 <DebouncedField label="Hidden Secrets (NOT sent to AI until reveal)" value={editingChar.hiddenSecrets || ""} onChange={v => updateCharById(editingCharId, "hiddenSecrets", v)} multiline placeholder="Plot twists — keep hidden from AI context until the reveal chapter..." small />
-                <Field label="Secret Reveal (Ch#)" value={editingChar.secretRevealChapter || ""} onChange={v => updateCharById(editingCharId, "secretRevealChapter", parseInt(v) || 0)} placeholder="0 = never auto-reveal" type="number" small />
+                <Field label="Secret Reveal (Ch#)" value={editingChar.secretRevealChapter || ""} onChange={v => updateCharById(editingCharId, "secretRevealChapter", parseInt(v, 10) || 0)} placeholder="0 = never auto-reveal" type="number" min="0" small />
                 {/* Auto-derived: shared secrets from relationships */}
                 {(() => {
                   const relSecrets = [];
@@ -13129,13 +13532,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <div className="nf-char-section-label" style={{ marginTop: 16 }}>Connections</div>
               <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
                 {/* LOCATIONS — toggle directly from character tab */}
-                <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 22 }}>
                   <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                     📍 Locations — toggle where {editingChar.name || "this character"} is found
                   </div>
                   {(() => {
                     const locationEntries = (project?.worldBuilding || []).filter(w => w.name && (w.category === "Location" || !w.category));
-                    if (locationEntries.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No locations yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("world")}>World</span> tab</div>;
+                    if (locationEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No locations yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("world")}>World</span> tab</div>;
                     return (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {locationEntries.map(loc => {
@@ -13146,7 +13549,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               const updated = isAssigned ? freqChars.filter(cid => cid !== editingCharId) : [...freqChars, editingCharId];
                               updateProject({ worldBuilding: (project?.worldBuilding || []).map(w => w.id === loc.id ? { ...w, frequentCharacters: updated } : w) });
                             }} style={{
-                              padding: "3px 10px", borderRadius: 6, fontSize: 10, fontWeight: isAssigned ? 600 : 400, cursor: "pointer",
+                              padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: isAssigned ? 600 : 400, cursor: "pointer",
                               background: isAssigned ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                               border: `1px solid ${isAssigned ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                               color: isAssigned ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
@@ -13162,7 +13565,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 </div>
 
                 {/* RELATIONSHIPS — view + quick-add from character tab */}
-                <div style={{ marginBottom: 12 }}>
+                <div style={{ marginBottom: 22 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                     <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>
                       ↔ Relationships
@@ -13208,20 +13611,20 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           const otherId = r.char1 === editingCharId ? r.char2 : r.char1;
                           const other = allChars.find(c => c.id === otherId);
                           return (
-                            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 4,
+                            <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 4,
                               background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)" }}>
                               {other?.image && <img src={other.image} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />}
                               <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)", cursor: "pointer" }} onClick={() => setEditingCharId(otherId)}>{other?.name || "?"}</span>
                               <select value={r.status || "developing"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, status: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 95 }}>
-                                {RELATIONSHIP_STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 95 }}>
+                                {RELATIONSHIP_STATUS_OPTIONS.map(o => <option value={o.value}>{o.label}</option>)}
                               </select>
                               <select value={r.tension || "medium"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, tension: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: `1px solid ${tensionColors[r.tension] || "var(--nf-border)"}`, borderRadius: 2, color: tensionColors[r.tension] || "var(--nf-text-muted)", cursor: "pointer", fontWeight: 600, maxWidth: 80 }}>
+                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: `1px solid ${tensionColors[r.tension] || "var(--nf-border)"}`, borderRadius: 2, color: tensionColors[r.tension] || "var(--nf-text-muted)", cursor: "pointer", fontWeight: 600, maxWidth: 80 }}>
                                 {TENSION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                               </select>
                               <select value={r.category || "romantic"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, category: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "1px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 80 }}>
+                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 80 }}>
                                 {RELATIONSHIP_CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                               </select>
                               <button onClick={() => { setActiveTab("relationships"); setExpandedRelIds(prev => new Set([...prev, r.id])); }}
@@ -13248,14 +13651,14 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     });
                   });
                   return charOrgs.length > 0 ? (
-                    <div style={{ marginBottom: 10 }}>
+                    <div style={{ marginBottom: 20 }}>
                       <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                         ⛨ Organizations ({charOrgs.length})
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {charOrgs.map((o, i) => (
                           <span key={i} onClick={() => { setActiveTab("world"); setExpandedWorldIds(prev => new Set([...prev, o.orgId])); }}
-                            style={{ padding: "3px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
+                            style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
                               background: "rgba(160,140,200,0.08)", border: "1px solid rgba(160,140,200,0.3)",
                               color: "rgba(160,140,200,0.8)", fontWeight: 500 }}>
                             ⛨ {o.position || "Member"} — {o.orgName}
@@ -13273,7 +13676,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   </div>
                   {(() => {
                     const plotEntries = (project?.plotOutline || []).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
-                    if (plotEntries.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No plot entries yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("plot")}>Plot</span> tab</div>;
+                    if (plotEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No plot entries yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("plot")}>Plot</span> tab</div>;
                     return (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {plotEntries.map(pl => {
@@ -13300,6 +13703,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 </div>
               </div>
             </div>
+            </>)}
           </>) : (<div className="nf-empty-state">Select or create a character</div>)}
         </div>
         {!isMobile && settings.apiKey && (
@@ -13322,7 +13726,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <span style={{ fontSize: 13, fontWeight: 600, color: "var(--nf-text)" }}>AI — Characters</span>
                     <button className="nf-btn-icon" onClick={() => setShowAiMobile(false)}><Icons.X /></button>
                   </div>
-                  <div style={{ flex: 1, overflow: "hidden" }}>
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                     <TabAIChat project={project} settings={settings} tabName="characters"
                       tabContext="characters — create, flesh out, or brainstorm character details"
                       placeholder='Try: "Generate a character"'
@@ -13397,17 +13801,17 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             return (
               <div key={item.id} className="nf-card" style={{ cursor: isExpanded ? undefined : "pointer", opacity: isHiddenFromAI ? 0.55 : 1 }}>
                 {/* D6: Collapsed summary view */}
-                <div onClick={() => !isExpanded && toggleWorldExpand(item.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div role="button" tabIndex={0} onClick={() => !isExpanded && toggleWorldExpand(item.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <button onClick={(e) => { e.stopPropagation(); toggleWorldExpand(item.id); }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0 }} aria-label={isExpanded ? "Collapse" : "Expand"}>
                     {isExpanded ? <Icons.ChevDown /> : <Icons.ChevRight />}
                   </button>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{item.name || <span style={{ opacity: 0.4, fontStyle: "italic" }}>Unnamed entry</span>}</span>
-                      {item.category && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.category}</span>}
-                      {isHiddenFromAI && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 2, background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", color: "var(--nf-accent)", fontWeight: 600 }}>Hidden until Ch{item.introducedInChapter}</span>}
+                      {item.category && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.category}</span>}
+                      {isHiddenFromAI && <span style={{ fontSize: 8, padding: "2px 5px", borderRadius: 2, background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", color: "var(--nf-accent)", fontWeight: 600 }}>Hidden until Ch{item.introducedInChapter}</span>}
                     </div>
-                    {!isExpanded && item.description && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.description.slice(0, 100)}</div>}
+                    {!isExpanded && item.description && <div title={item.name} style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.description.slice(0, 100)}</div>}
                   </div>
                   {!isExpanded && (
                     <button onClick={(e) => { e.stopPropagation(); updateProject({ worldBuilding: items.filter(it => it.id !== item.id) }); }} className="nf-btn-icon" aria-label="Delete entry"><Icons.Trash /></button>
@@ -13423,7 +13827,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           {/* D7: Cleaner type categories */}
                           <SelectField label="Type" value={item.category || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, category: v } : it) })}
                             options={["Location","Rule / Law","Culture","Organization","Magic System","Technology","History","Flora / Fauna","Language","Religion","Other"]} placeholder="Select..." />
-                          <Field label="Intro Ch#" value={item.introducedInChapter || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, introducedInChapter: parseInt(v) || 0 } : it) })} placeholder="0=any" type="number" small />
+                          <Field label="Intro Ch#" value={item.introducedInChapter || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, introducedInChapter: parseInt(v, 10) || 0 } : it) })} placeholder="0=any" type="number" min="0" small />
                         </div>
                         <DebouncedField label="Description" value={item.description} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, description: v } : it) })} multiline placeholder="Detailed description..." />
                         <Field label="Keywords (for AI detection)" value={item.keywords || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, keywords: v } : it) })} placeholder="Comma-separated: court, vampires, shadows, ruling council" small />
@@ -13464,11 +13868,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                 const freqChars = Array.isArray(item.frequentCharacters) ? item.frequentCharacters : [];
                                 const isSelected = freqChars.includes(c.id);
                                 return (
-                                  <button key={c.id} type="button" onClick={() => {
+                                  <button type="button" onClick={() => {
                                     const updated = isSelected ? freqChars.filter(cid => cid !== c.id) : [...freqChars, c.id];
                                     updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, frequentCharacters: updated } : it) });
                                   }} style={{
-                                    padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
+                                    padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
                                     background: isSelected ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                                     border: `1px solid ${isSelected ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                                     color: isSelected ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
@@ -13489,8 +13893,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                 const ch = (project?.characters || []).find(c => c.id === cid);
                                 if (!ch) return null;
                                 return (
-                                  <div key={cid} onClick={() => { setEditingCharId(cid); setActiveTab("characters"); }}
-                                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px 3px 3px",
+                                  <div role="button" tabIndex={0} key={cid} onClick={() => { setEditingCharId(cid); setActiveTab("characters"); }}
+                                    style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 8px 3px 3px",
                                       borderRadius: 20, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)",
                                       cursor: "pointer", transition: "all 0.15s", fontSize: 10 }}
                                     title={`${ch.name} (${ch.role}) — click to edit`}>
@@ -13512,11 +13916,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                         {item.category === "Organization" && (
                           <div style={{ marginTop: 12, padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
                             {/* ─── Org Logo + Group Photo (TOP) ─── */}
-                            <div style={{ display: "flex", gap: 12, marginBottom: 10 }}>
+                            <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
                               {/* Logo */}
                               <div style={{ flexShrink: 0, textAlign: "center" }}>
                                 <div style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Logo</div>
-                                <div style={{ width: 56, height: 56, borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px ${item.orgLogo ? "solid" : "dashed"} var(--nf-border)`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", cursor: "pointer", position: "relative" }}
+                                <div style={{ width: 56, height: 56, borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px ${item.orgLogo ? "solid" : "dashed"} var(--nf-border)`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", textOverflow: "ellipsis", cursor: "pointer", position: "relative" }}
                                   onClick={async () => {
                                     if (!settings.apiKey || !item.name) { showToast("Name the org and set API key first", "error"); return; }
                                     showToast("Generating logo...", "info");
@@ -13524,29 +13928,29 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
                                         method: "POST",
                                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
-                                        body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: `Create a simple, clean logo/emblem/crest for an organization called "${item.name}". ${item.orgPurpose ? `Purpose: ${item.orgPurpose}. ` : ""}Style: minimalist Japandi aesthetic, clean lines, muted earth tones, on a plain dark background. Square format, icon-only, no text.` }], modalities: ["image", "text"], max_tokens: 4096 }),
+                                        body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: `Create a simple, clean logo/emblem/crest for an organization called "${item?.name || "unnamed"}". ${item.orgPurpose ? `Purpose: ${item.orgPurpose}. ` : ""}Style: minimalist Japandi aesthetic, clean lines, muted earth tones, on a plain dark background. Square format, icon-only, no text.` }], modalities: ["image", "text"], temperature: 0.8, max_tokens: 4096 }),
                                       });
                                       const data = await res.json();
                                       const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
                                       if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: img } : it) }); showToast("Logo generated", "success"); }
                                       else showToast("No image returned", "error");
-                                    } catch (e) { showToast(`Failed: ${e.message}`, "error"); }
+                                    } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
                                   }}>
                                   {item.orgLogo ? (
                                     <img src={item.orgLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
                                   ) : (
                                     <span style={{ fontSize: 10, color: "var(--nf-text-muted)", opacity: 0.4 }}>✦</span>
                                   )}
-                                  {item.orgLogo && <button onClick={(e) => { e.stopPropagation(); updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: "" } : it) }); }} style={{ position: "absolute", top: 1, right: 1, background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", borderRadius: 2, padding: "0 3px", fontSize: 9, cursor: "pointer", lineHeight: 1.4 }}>×</button>}
+                                  {item.orgLogo && <button onClick={(e) => { e.stopPropagation(); updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: "" } : it) }); }} style={{ position: "absolute", top: 1, right: 1, background: "rgba(0,0,0,0.6)", border: "none", color: "var(--nf-text-inverse, #fff)", borderRadius: 2, padding: "0 3px", fontSize: 9, cursor: "pointer", lineHeight: 1.4 }}>×</button>}
                                 </div>
                               </div>
                               {/* Group Photo (moved to top) */}
                               {Array.isArray(item.orgHierarchy) && item.orgHierarchy.some(p => p.charId) && (
                                 <div style={{ flex: 1 }}>
                                   {item.orgGroupPhoto ? (
-                                    <div style={{ position: "relative", borderRadius: 3, overflow: "hidden" }}>
-                                      <img src={item.orgGroupPhoto} alt={`${item.name} group`} style={{ width: "100%", maxHeight: 120, objectFit: "cover", borderRadius: 3, border: "1px solid var(--nf-border)" }} />
-                                      <button onClick={() => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: "" } : it) })} style={{ position: "absolute", top: 3, right: 3, background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", borderRadius: 2, padding: "1px 4px", fontSize: 9, cursor: "pointer" }}>×</button>
+                                    <div style={{ position: "relative", borderRadius: 3, overflow: "hidden", textOverflow: "ellipsis" }}>
+                                      <img src={item.orgGroupPhoto} alt={`${item?.name || "unnamed"} group`} style={{ width: "100%", maxHeight: 120, objectFit: "cover", borderRadius: 3, border: "1px solid var(--nf-border)" }} />
+                                      <button onClick={() => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: "" } : it) })} style={{ position: "absolute", top: 3, right: 3, background: "rgba(0,0,0,0.6)", border: "none", color: "var(--nf-text-inverse, #fff)", borderRadius: 2, padding: "2px 4px", fontSize: 9, cursor: "pointer" }}>×</button>
                                     </div>
                                   ) : (
                                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
@@ -13557,21 +13961,21 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                           const members = item.orgHierarchy.filter(p => p.charId).map(p => { const ch = (project?.characters || []).find(c => c.id === p.charId); if (!ch || ch.isBulk) return null; return { name: ch.name, role: p.name, appearance: ch.appearance || "", lookAlike: ch.lookAlike || "", gender: ch.gender || "", build: ch.build || "" }; }).filter(Boolean);
                                           if (!members.length) { showToast("No non-bulk members", "error"); return; }
                                           const memberDescs = members.map(m => `- ${m.name} (${m.role}): ${m.appearance || "no desc"}${m.lookAlike ? ` [looks like ${m.lookAlike}]` : ""}`).join("\n");
-                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: settings.model, messages: [{ role: "system", content: "Create a COMPLETE image generation prompt for a formal group portrait. Every person fully described. Output ONLY the prompt." }, { role: "user", content: `Group photo for "${item.name}".\nMembers:\n${memberDescs}\n\nFormal group portrait, higher ranks center/front, appropriate setting.` }], max_tokens: 1500, temperature: 0.8 }) });
+                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: settings.model, messages: [{ role: "system", content: "Create a COMPLETE image generation prompt for a formal group portrait. Every person fully described. Output ONLY the prompt." }, { role: "user", content: `Group photo for "${item?.name || "unnamed"}".\nMembers:\n${memberDescs}\n\nFormal group portrait, higher ranks center/front, appropriate setting.` }], max_tokens: 1500, temperature: 0.8 }) });
                                           const data = await res.json();
                                           const prompt = stripThinkingTokens(data.choices?.[0]?.message?.content || "").trim();
                                           if (prompt) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhotoPrompt: prompt } : it) }); showToast("Prompt ready — click Render", "success"); }
-                                        } catch (e) { showToast(`Failed: ${e.message}`, "error"); }
+                                        } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
                                       }} className="nf-btn-micro" style={{ fontSize: 9 }}><Icons.Wand /> {item.orgGroupPhotoPrompt ? "Regen Prompt" : "Group Photo"}</button>
                                       {item.orgGroupPhotoPrompt && <button onClick={async () => {
                                         showToast("Rendering...", "info");
                                         try {
-                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: item.orgGroupPhotoPrompt }], modalities: ["image", "text"], max_tokens: 4096 }) });
+                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: item.orgGroupPhotoPrompt }], modalities: ["image", "text"], temperature: 0.8, max_tokens: 4096 }) });
                                           const data = await res.json();
                                           const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
                                           if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: img } : it) }); showToast("Photo rendered", "success"); }
                                           else showToast("No image", "error");
-                                        } catch (e) { showToast(`Failed: ${e.message}`, "error"); }
+                                        } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
                                       }} className="nf-btn-micro" style={{ fontSize: 9, borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}><Icons.Sparkle /> Render</button>}
                                       {item.orgGroupPhotoPrompt && <button onClick={() => { navigator.clipboard.writeText(item.orgGroupPhotoPrompt); showToast("Copied", "success"); }} className="nf-btn-micro" style={{ fontSize: 9 }}><Icons.Copy /></button>}
                                     </div>
@@ -13598,7 +14002,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                     const members = Array.isArray(item.orgMembers) ? item.orgMembers : [];
                                     const isSelected = members.includes(c.id);
                                     return (
-                                      <button key={c.id} type="button" onClick={() => {
+                                      <button type="button" onClick={() => {
                                         const updated = isSelected ? members.filter(cid => cid !== c.id) : [...members, c.id];
                                         updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgMembers: updated } : it) });
                                       }} style={{
@@ -13619,7 +14023,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                             {/* Hierarchy tree — proper top-down family tree */}
                             {Array.isArray(item.orgHierarchy) && item.orgHierarchy.length > 0 && (
                               <div style={{ marginTop: 8 }}>
-                                <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 10 }}>Positions & Ranks</div>
+                                <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 20 }}>Positions & Ranks</div>
                                 <style>{`
                                   .nf-org-tree { --line: var(--nf-border); }
                                   .nf-org-tree ul { display: flex; justify-content: center; padding-top: 20px; position: relative; margin: 0; padding-left: 0; list-style: none; }
@@ -13666,8 +14070,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                               {linkedChar ? (linkedChar.name || "?")[0] : "?"}
                                             </div>
                                           )}
-                                          <div style={{ overflow: "hidden" }}>
-                                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pos.name || "Untitled"}</div>
+                                          <div style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+                                            <div title={pos.name} style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pos.name || "Untitled"}</div>
                                             <div style={{ fontSize: 9, color: linkedChar ? depthColor : "var(--nf-text-muted)", fontWeight: 500 }}>{linkedChar ? linkedChar.name : "vacant"}</div>
                                           </div>
                                         </div>
@@ -13755,7 +14159,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                 const connections = Array.isArray(item.connectedTo) ? item.connectedTo : [];
                                 const isConn = connections.includes(other.id);
                                 return (
-                                  <button key={other.id} type="button" onClick={() => {
+                                  <button type="button" onClick={() => {
                                     const updated = isConn ? connections.filter(cid => cid !== other.id) : [...connections, other.id];
                                     updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, connectedTo: updated } : it) });
                                   }} style={{
@@ -13818,13 +14222,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                       overflow: "hidden",
                                     }}>
                                       <div style={{ position: "relative" }}>
-                                        <img src={refs[wallKey]} alt={WALL_LABELS[idx]}
+                                        <img loading="lazy" src={refs[wallKey]} alt={WALL_LABELS[idx]}
                                           style={{ width: "100%", aspectRatio: "4/3", objectFit: "cover", display: "block" }} />
                                         <div style={{
                                           position: "absolute", bottom: 0, left: 0, right: 0,
                                           background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
                                           padding: "12px 8px 6px",
-                                          fontSize: 9, color: "#fff", fontWeight: 600,
+                                          fontSize: 9, color: "var(--nf-text-inverse, #fff)", fontWeight: 600,
                                           letterSpacing: "0.06em",
                                         }}>
                                           ✓ {WALL_LABELS[idx]}
@@ -13902,7 +14306,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                                   model: "google/gemini-3.1-flash-image-preview",
                                                   messages: [{ role: "user", content: prompts[wallKey] }],
                                                   modalities: ["image", "text"],
-                                                  max_tokens: 4096,
+                                                  temperature: 0.8, max_tokens: 4096,
                                                 }),
                                               });
                                               const data = await res.json();
@@ -13926,7 +14330,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                               } else {
                                                 showToast("No image returned — try again", "error");
                                               }
-                                            } catch (e) { showToast(`Render failed: ${e.message}`, "error"); }
+                                            } catch (e) { showToast(`Render failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
                                           }} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 6px", borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }} disabled={!settings.apiKey}>
                                             <Icons.Sparkle /> Render
                                           </button>
@@ -14027,7 +14431,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <span style={{ fontSize: 13, fontWeight: 600, color: "var(--nf-text)" }}>AI — World</span>
                     <button className="nf-btn-icon" onClick={() => setShowAiMobile(false)}><Icons.X /></button>
                   </div>
-                  <div style={{ flex: 1, overflow: "hidden" }}>
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                     <TabAIChat project={project} settings={settings} tabName="world"
                       tabContext="world-building — create locations, rules, cultures, magic systems"
                       onAutoFill={handleWorldAutoFill} chapterIdx={activeChapterIdx}
@@ -14072,7 +14476,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 // FIX 7: Also create matching chapter if it doesn't exist
                 const chapterExists = (project?.chapters?.length || 0) >= nextChNum;
                 const chapterUpdate = chapterExists ? {} : {
-                  chapters: [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", linkedPlotId: newPlot.id }],
+                  chapters: [...(project?.chapters || []), { id: uid(), title, content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "", linkedPlotId: newPlot.id }],
                 };
                 updateProject({ plotOutline: [...(project?.plotOutline || []), newPlot], ...chapterUpdate });
                 setExpandedPlotIds(prev => new Set([...prev, newPlot.id]));
@@ -14089,7 +14493,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             return (
             <div key={p.id} className="nf-card" style={{ cursor: isPlotExpanded ? undefined : "pointer" }}>
               {/* Collapsed header */}
-              <div onClick={() => !isPlotExpanded && togglePlotExpand(p.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div role="button" tabIndex={0} onClick={() => !isPlotExpanded && togglePlotExpand(p.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <button onClick={(e) => { e.stopPropagation(); togglePlotExpand(p.id); }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0 }} aria-label={isPlotExpanded ? "Collapse" : "Expand"}>
                   {isPlotExpanded ? <Icons.ChevDown /> : <Icons.ChevRight />}
                 </button>
@@ -14101,7 +14505,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{p.title || <span style={{ opacity: 0.4, fontStyle: "italic" }}>Untitled</span>}</span>
-                    {p.sceneType && p.sceneType !== "narrative" && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{p.sceneType}</span>}
+                    {p.sceneType && p.sceneType !== "narrative" && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{p.sceneType}</span>}
                     {beatsCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{beatsCount} beat{beatsCount !== 1 ? "s" : ""}</span>}
                     {charCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{charCount} char{charCount !== 1 ? "s" : ""}</span>}
                     {p.date && <span style={{ fontSize: 9, color: "var(--nf-accent-2)" }}>{p.date}</span>}
@@ -14110,10 +14514,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 </div>
                 {!isPlotExpanded && (
                   <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
-                    <button onClick={(e) => { e.stopPropagation(); if (i > 0) { const prev = sortedOutline[i - 1]; updateProject({ plotOutline: outline.map(pl => { if (pl.id === p.id) return { ...pl, chapter: prev.chapter || i }; if (pl.id === prev.id) return { ...pl, chapter: p.chapter || i + 1 }; return pl; }) }); } }} disabled={i === 0} className="nf-btn-icon" style={{ padding: 1, opacity: i === 0 ? 0.2 : 1 }} aria-label="Move up">
+                    <button onClick={(e) => { e.stopPropagation(); if (i > 0) { const prev = sortedOutline[i - 1]; updateProject({ plotOutline: outline.map(pl => { if (pl.id === p.id) return { ...pl, chapter: prev.chapter || i }; if (pl.id === prev.id) return { ...pl, chapter: p.chapter || i + 1 }; return pl; }) }); } }} disabled={i === 0} className="nf-btn-icon" style={{ padding: 4, opacity: i === 0 ? 0.2 : 1 }} aria-label="Move up">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg>
                     </button>
-                    <button onClick={(e) => { e.stopPropagation(); updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) }); }} className="nf-btn-icon" style={{ padding: 1 }} aria-label="Delete plot entry"><Icons.Trash /></button>
+                    <button onClick={(e) => { e.stopPropagation(); updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) }); }} className="nf-btn-icon" style={{ padding: 4 }} aria-label="Delete plot entry"><Icons.Trash /></button>
                   </div>
                 )}
               </div>
@@ -14125,12 +14529,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   <div style={{ display: "grid", gridTemplateColumns: "60px 1fr 120px", gap: "8px 12px", marginBottom: 8 }}>
                     {/* FIX 5.2/5.3: Validate chapter number — warn on duplicates */}
                     <DebouncedField label="Ch#" value={p.chapter || i + 1} onChange={v => {
-                      const num = parseInt(v) || 1;
+                      const num = parseInt(v, 10) || 1;
                       const clamped = Math.max(1, num);
                       const isDupe = outline.some(pl => pl.id !== p.id && (pl.chapter || 0) === clamped);
                       if (isDupe) showToast(`Warning: Chapter ${clamped} already has a plot entry`, "error");
                       updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, chapter: clamped } : pl) });
-                    }} type="number" small />
+                    }} type="number" min="0" small />
                     <DebouncedField label="Title" value={p.title} onChange={v => {
                       updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, title: v } : pl) });
                       const chIdx = (p.chapter || i + 1) - 1;
@@ -14185,10 +14589,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 				    )}
 				    {(Array.isArray(p.beats) ? p.beats : []).map((beat, bi) => (
 					  <div key={beat.id || bi} style={{ display: "flex", gap: 6, alignItems: "start", marginBottom: 4, padding: "6px 8px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 3 }}>
-					    <div style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingTop: 4 }}>
-						  <span style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, border: "1px solid var(--nf-border)", fontFamily: "var(--nf-font-mono)", letterSpacing: "0.08em" }}>B{bi + 1}</span>
-						  <button onClick={() => { if (bi === 0) return; const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; [b2[bi-1], b2[bi]] = [b2[bi], b2[bi-1]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi === 0} className="nf-btn-icon" style={{ padding: 0, opacity: bi === 0 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg></button>
-						  <button onClick={() => { const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; if (bi >= b2.length - 1) return; [b2[bi], b2[bi+1]] = [b2[bi+1], b2[bi]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1} className="nf-btn-icon" style={{ padding: 0, opacity: bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg></button>
+					    <div key={bi} style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingTop: 4 }}>
+						  <span key={bi} style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, border: "1px solid var(--nf-border)", fontFamily: "var(--nf-font-mono)", letterSpacing: "0.08em" }}>B{bi + 1}</span>
+						  <button key={bi} onClick={() => { if (bi === 0) return; const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; [b2[bi-1], b2[bi]] = [b2[bi], b2[bi-1]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi === 0} className="nf-btn-icon" style={{ padding: 0, opacity: bi === 0 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg></button>
+						  <button key={bi} onClick={() => { const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; if (bi >= b2.length - 1) return; [b2[bi], b2[bi+1]] = [b2[bi+1], b2[bi]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1} className="nf-btn-icon" style={{ padding: 0, opacity: bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg></button>
 					    </div>
 					    <div style={{ flex: 1 }}>
 						  <DebouncedField value={beat.title || ""} onChange={v => { const cb = Array.isArray(p.beats) ? [...p.beats] : []; cb[bi] = { ...cb[bi], title: v }; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: cb } : pl) }); }} placeholder="Beat title..." small />
@@ -14207,11 +14611,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           const charIds = Array.isArray(p.characters) ? p.characters : [];
                           const isSelected = charIds.includes(c.id);
                           return (
-                            <button key={c.id} type="button" onClick={() => {
+                            <button type="button" onClick={() => {
                               const updated = isSelected ? charIds.filter(cid => cid !== c.id) : [...charIds, c.id];
                               updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, characters: updated } : pl) });
                             }} style={{
-                              padding: "3px 10px 3px 4px", borderRadius: 20, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
+                              padding: "4px 10px 3px 4px", borderRadius: 20, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
                               background: isSelected ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                               border: `1px solid ${isSelected ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                               color: isSelected ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
@@ -14244,7 +14648,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                 const updated = isSelected ? locIds.filter(lid => lid !== loc.id) : [...locIds, loc.id];
                                 updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, locations: updated } : pl) });
                               }} style={{
-                                padding: "3px 10px", borderRadius: 6, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
+                                padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: isSelected ? 600 : 400, cursor: "pointer",
                                 background: isSelected ? "var(--nf-accent-glow)" : "var(--nf-bg-surface)",
                                 border: `1px solid ${isSelected ? "var(--nf-accent)" : "var(--nf-border)"}`,
                                 color: isSelected ? "var(--nf-accent)" : "var(--nf-text-muted)",
@@ -14320,7 +14724,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       if (pl.id === prev.id) return { ...pl, chapter: curChNum };
                       return pl;
                     }) });
-                  }} disabled={i === 0} className="nf-btn-icon" style={{ padding: 1, opacity: i === 0 ? 0.2 : 1 }} aria-label="Move up">
+                  }} disabled={i === 0} className="nf-btn-icon" style={{ padding: 4, opacity: i === 0 ? 0.2 : 1 }} aria-label="Move up">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg>
                   </button>
                   <button onClick={() => {
@@ -14333,10 +14737,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       if (pl.id === next.id) return { ...pl, chapter: curChNum };
                       return pl;
                     }) });
-                  }} disabled={i === sortedOutline.length - 1} className="nf-btn-icon" style={{ padding: 1, opacity: i === sortedOutline.length - 1 ? 0.2 : 1 }} aria-label="Move down">
+                  }} disabled={i === sortedOutline.length - 1} className="nf-btn-icon" style={{ padding: 4, opacity: i === sortedOutline.length - 1 ? 0.2 : 1 }} aria-label="Move down">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg>
                   </button>
-                  <button onClick={() => updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) })} className="nf-btn-icon" style={{ padding: 1 }} aria-label="Delete plot entry"><Icons.Trash /></button>
+                  <button onClick={() => updateProject({ plotOutline: outline.filter(pl => pl.id !== p.id) })} className="nf-btn-icon" style={{ padding: 4 }} aria-label="Delete plot entry"><Icons.Trash /></button>
                 </div>
               </div>
               </div>
@@ -14363,7 +14767,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <span style={{ fontSize: 13, fontWeight: 600, color: "var(--nf-text)" }}>AI — Plot</span>
                     <button className="nf-btn-icon" onClick={() => setShowAiMobile(false)}><Icons.X /></button>
                   </div>
-                  <div style={{ flex: 1, overflow: "hidden" }}>
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                     <TabAIChat project={project} settings={settings} tabName="plot"
                       tabContext="plot outline — plan chapters, structure arcs, develop beats"
                       onAutoFill={handlePlotAutoFill} chapterIdx={activeChapterIdx}
@@ -14438,7 +14842,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             return (
               <div key={r.id} className="nf-card" style={{ borderColor: isSelfRel ? "var(--nf-error-border)" : undefined }}>
                 {/* D11: Collapsed summary view */}
-                <div onClick={() => !isExpanded && toggleRelExpand(r.id)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: isExpanded ? "default" : "pointer" }}>
+                <div role="button" tabIndex={0} onClick={() => !isExpanded && toggleRelExpand(r.id)} style={{ display: "flex", alignItems: "center", gap: 10, cursor: isExpanded ? "default" : "pointer" }}>
                   <button onClick={(e) => { e.stopPropagation(); toggleRelExpand(r.id); }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0 }} aria-label={isExpanded ? "Collapse" : "Expand"}>
                     {isExpanded ? <Icons.ChevDown /> : <Icons.ChevRight />}
                   </button>
@@ -14449,11 +14853,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       <span style={{ color: "var(--nf-accent)", fontSize: 14 }}>↔</span>
                       {(() => { const c2 = allChars.find(c => c.id === r.char2); return c2?.image ? <img src={c2.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} /> : null; })()}
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{c2Name || "?"}</span>
-                      {r.status && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)" }}>{r.status}</span>}
-                      {r.category && r.category !== "romantic" && <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{r.category}</span>}
+                      {r.status && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)" }}>{r.status}</span>}
+                      {r.category && r.category !== "romantic" && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{r.category}</span>}
                       {/* D12: Tension color indicator */}
                       {r.tension && r.tension !== "none" && (
-                        <span style={{ fontSize: 9, padding: "1px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px solid ${tColor}`, color: tColor, fontWeight: 700 }}>
+                        <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px solid ${tColor}`, color: tColor, fontWeight: 700 }}>
                           {r.tension === "explosive" ? "⚡" : r.tension === "high" ? "🔥" : ""} {r.tension}
                         </span>
                       )}
@@ -14498,7 +14902,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       const c1Dead = c1?.status === "dead", c2Dead = c2?.status === "dead";
                       if (!sharedLocs.length && !sharedOrgs.length && !sharedChapters.length && !c1Dead && !c2Dead) return null;
                       return (
-                        <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginBottom: 10, fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.7 }}>
+                        <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginBottom: 20, fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.7 }}>
                           <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Auto-derived context</div>
                           {(c1Dead || c2Dead) && <div style={{ color: "var(--nf-accent)", fontWeight: 600 }}>⚠ {c1Dead && c1 ? `${c1.name} is dead` : ""}{c1Dead && c2Dead ? " & " : ""}{c2Dead && c2 ? `${c2.name} is dead` : ""} — relationship is historical</div>}
                           {sharedLocs.length > 0 && <div>📍 Shared locations: <span style={{ color: "var(--nf-accent-2)", fontWeight: 500 }}>{sharedLocs.join(", ")}</span></div>}
@@ -14591,7 +14995,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       </div>
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                      <Field label="First Meet (Ch#)" value={r.meetsInChapter || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, meetsInChapter: parseInt(v) || 0 } : re) })} placeholder="0 = already met" type="number" small />
+                      <Field label="First Meet (Ch#)" value={r.meetsInChapter || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, meetsInChapter: parseInt(v, 10) || 0 } : re) })} placeholder="0 = already met" type="number" min="0" small />
                       <Field label="Notes" value={r.notes} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, notes: v } : re) })} multiline placeholder="History, turning points..." small />
                     </div>
                     <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
@@ -14622,7 +15026,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <span style={{ fontSize: 13, fontWeight: 600, color: "var(--nf-text)" }}>AI — Relationships</span>
                     <button className="nf-btn-icon" onClick={() => setShowAiMobile(false)}><Icons.X /></button>
                   </div>
-                  <div style={{ flex: 1, overflow: "hidden" }}>
+                  <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                     <TabAIChat project={project} settings={settings} tabName="relationships"
                       tabContext="relationship dynamics — develop chemistry, tension arcs"
                       onAutoFill={handleRelAutoFill} chapterIdx={activeChapterIdx}
@@ -14676,14 +15080,14 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <p className="nf-hint" style={{ marginBottom: 24 }}>Smart context payload — only relevant characters, world entries, and relationships are sent to the AI based on what appears in your current chapter.</p>
         
         {/* H1: Mode selector for preview */}
-        <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ marginBottom: 26, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>Previewing mode:</span>
           <span style={{ fontSize: 12, color: "var(--nf-accent-2)", fontWeight: 700, textTransform: "capitalize" }}>{selectedMode}</span>
           <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>(switch modes in the Write tab to preview different contexts)</span>
         </div>
 
         {/* F1: Prominent total payload with usage bar */}
-        <div className="nf-card" style={{ marginBottom: 16, padding: 20 }}>
+        <div className="nf-card" style={{ marginBottom: 26, padding: 20 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
             <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Context Usage</span>
             <span style={{ fontSize: 24, fontWeight: 500, color: usagePct > 80 ? "var(--nf-accent)" : usagePct > 50 ? "var(--nf-accent-2)" : "var(--nf-success)", fontFamily: "var(--nf-font-display)" }}>
@@ -14698,27 +15102,27 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
         {/* F2: Dynamic threshold warning */}
         {tokenEstimate > warningThreshold && (
-          <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 8, fontSize: 12, color: "var(--nf-text-dim)", lineHeight: 1.6 }}>
+          <div style={{ padding: "10px 14px", marginBottom: 26, background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 8, fontSize: 12, color: "var(--nf-text-dim)", lineHeight: 1.6 }}>
             ⚠ Context payload ({tokenEstimate.toLocaleString()} tokens) exceeds {Math.round(warningThreshold / 1000)}k — {usagePct}% of your model's {(modelCtx / 1000).toFixed(0)}k context window. Summarize older chapters to reduce usage.
           </div>
         )}
 
         {/* F3: Unsummarized chapter urgency */}
         {unsummarizedCount > 0 && (
-          <div style={{ padding: "10px 14px", marginBottom: 16, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 8, fontSize: 12, color: "var(--nf-text)", lineHeight: 1.6 }}>
+          <div style={{ padding: "10px 14px", marginBottom: 26, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 8, fontSize: 12, color: "var(--nf-text)", lineHeight: 1.6 }}>
             <strong>{unsummarizedCount} chapter{unsummarizedCount > 1 ? "s" : ""} unsummarized</strong> — the AI reads raw chapter text for these, using significantly more tokens. Summarize them below to improve both performance and continuity.
           </div>
         )}
 
         {/* F6: Detected entities for current chapter */}
         {(detectedCharIds.size > 0 || detectedWorldIds.size > 0) && (
-          <div className="nf-card" style={{ marginBottom: 16 }}>
+          <div className="nf-card" style={{ marginBottom: 26 }}>
             <div className="nf-card-title" style={{ fontSize: 12, marginBottom: 8 }}>Detected in Current Chapter</div>
             {detectedCharIds.size > 0 && (
               <div style={{ marginBottom: 6 }}>
                 <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Characters (full detail): </span>
                 {(project?.characters || []).filter(c => detectedCharIds.has(c.id)).map(c => (
-                  <span key={c.id} style={{ fontSize: 11, padding: "1px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-success-bg)", border: "1px solid var(--nf-success)", color: "var(--nf-success)", fontWeight: 600, display: "inline-block" }}>{c.name}</span>
+                  <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-success-bg)", border: "1px solid var(--nf-success)", color: "var(--nf-success)", fontWeight: 600, display: "inline-block" }}>{c.name}</span>
                 ))}
               </div>
             )}
@@ -14749,7 +15153,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ marginBottom: 6 }}>
                   <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Nearby at location (compact): </span>
                   {(project?.characters || []).filter(c => ambientIds.has(c.id)).map(c => (
-                    <span key={c.id} style={{ fontSize: 11, padding: "1px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px dashed var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 400, display: "inline-block", fontStyle: "italic" }}>{c.name}</span>
+                    <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px dashed var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 400, display: "inline-block", fontStyle: "italic" }}>{c.name}</span>
                   ))}
                   <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2, fontStyle: "italic" }}>
                     These characters frequent the current location — sent as compact summaries (name + role + one-line personality only)
@@ -14761,7 +15165,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <div>
                 <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>World entries: </span>
                 {(project?.worldBuilding || []).filter(w => detectedWorldIds.has(w.id)).map(w => (
-                  <span key={w.id} style={{ fontSize: 11, padding: "1px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, display: "inline-block" }}>{w.name}</span>
+                  <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, display: "inline-block" }}>{w.name}</span>
                 ))}
               </div>
             )}
@@ -14776,7 +15180,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ marginTop: 6 }}>
                   <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Plot locations: </span>
                   {locNames.map((n, i) => (
-                    <span key={i} style={{ fontSize: 11, padding: "1px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 500, display: "inline-block" }}>📍 {n}</span>
+                    <span key={i} style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 500, display: "inline-block" }}>📍 {n}</span>
                   ))}
                 </div>
               );
@@ -14798,8 +15202,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             { label: "Total Characters", value: project?.characters?.length || 0 },
           ].map((s, i) => (
             <div key={i} className={`nf-stat-card ${s.warn ? "nf-stat-warn" : ""}`}>
-              <div className="nf-stat-value">{s.value}</div>
-              <div className="nf-stat-label">{s.label}</div>
+              <div key={i} className="nf-stat-value">{s.value}</div>
+              <div key={i} className="nf-stat-label">{s.label}</div>
             </div>
           ))}
         </div>
@@ -14810,7 +15214,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
         <div style={{ marginTop: 20 }}>
           <span className="nf-section-label" style={{ display: "block", marginBottom: 8 }}>Chapter Summaries</span>
-          <p className="nf-hint" style={{ marginBottom: 12 }}>Summaries improve continuity. The AI reads these instead of raw text for prior chapters.</p>
+          <p className="nf-hint" style={{ marginBottom: 22 }}>Summaries improve continuity. The AI reads these instead of raw text for prior chapters.</p>
           {project?.chapters?.map((ch, i) => {
             // E1: Detect potentially stale summaries
             const isStale = ch.summary && ch.summaryGeneratedAt && ch.content && new Date(ch.summaryGeneratedAt) < new Date(Date.now() - 86400000);
@@ -14876,7 +15280,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <label className="nf-label">OpenRouter API Key</label>
           <div style={{ display: "flex", gap: 6 }}>
             <input value={settings.apiKey} onChange={e => setSettings(prev => ({ ...prev, apiKey: e.target.value }))}
-              placeholder="sk-or-..." type={showApiKey ? "text" : "password"} className="nf-input" style={{ flex: 1 }}
+              placeholder="Sk-or-..." type={showApiKey ? "text" : "password"} className="nf-input" style={{ flex: 1 }}
               autoComplete="off" />
             <button onClick={() => setShowApiKey(!showApiKey)} className="nf-btn-icon" style={{ padding: "0 6px" }} aria-label={showApiKey ? "Hide key" : "Show key"}>
               {showApiKey ? <Icons.EyeOff /> : <Icons.Eye />}
@@ -14894,11 +15298,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <label className="nf-label">Max Tokens</label>
             <input value={settings.maxTokens} onChange={e => {
               const v = e.target.value;
-              const n = parseInt(v);
+              const n = parseInt(v, 10);
               setSettings(prev => ({ ...prev, maxTokens: v === "" ? "" : (isNaN(n) ? prev.maxTokens : n) }));
             }}
-              onBlur={e => setSettings(prev => ({ ...prev, maxTokens: clamp(parseInt(e.target.value) || 4096, 256, 16384) }))}
-              className="nf-input" type="number" />
+              onBlur={e => setSettings(prev => ({ ...prev, maxTokens: clamp(parseInt(e.target.value, 10) || 4096, 256, 16384) }))}
+              className="nf-input" type="number" min="0" />
             <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2 }}>256–16,384</div>
           </div>
           {/* E2: Cleaner temperature handling */}
@@ -14911,17 +15315,17 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               if (!isNaN(n)) setSettings(prev => ({ ...prev, temperature: n }));
             }}
               onBlur={e => setSettings(prev => ({ ...prev, temperature: clamp(parseFloat(e.target.value) || 0.85, 0, 2) }))}
-              className="nf-input" type="number" step="0.05" min="0" max="2" />
+              className="nf-input" type="number" min="0" step="0.05" min="0" max="2" />
           </div>
           {/* E5: Editable context window */}
           <div className="nf-field">
             <label className="nf-label">Context Window</label>
             <input value={settings.modelContextWindow || ""} onChange={e => {
-              const n = parseInt(e.target.value);
+              const n = parseInt(e.target.value, 10);
               if (!isNaN(n) && n > 0) setSettings(prev => ({ ...prev, modelContextWindow: n }));
             }}
-              onBlur={e => setSettings(prev => ({ ...prev, modelContextWindow: clamp(parseInt(e.target.value) || 128000, 4000, 2000000) }))}
-              className="nf-input" type="number" />
+              onBlur={e => setSettings(prev => ({ ...prev, modelContextWindow: clamp(parseInt(e.target.value, 10) || 128000, 4000, 2000000) }))}
+              className="nf-input" type="number" min="0" />
             <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2 }}>Auto-set from model</div>
           </div>
         </div>
@@ -14934,7 +15338,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               setSettings(prev => ({ ...prev, frequencyPenalty: v === "" || v.endsWith(".") ? v : (isNaN(n) ? prev.frequencyPenalty : n) }));
             }}
               onBlur={e => setSettings(prev => ({ ...prev, frequencyPenalty: clamp(parseFloat(e.target.value) || 0.1, 0, 2) }))}
-              className="nf-input" type="number" step="0.05" min="0" max="2" />
+              className="nf-input" type="number" min="0" step="0.05" min="0" max="2" />
           </div>
           <div className="nf-field">
             <label className="nf-label">Presence Penalty</label>
@@ -14944,7 +15348,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               setSettings(prev => ({ ...prev, presencePenalty: v === "" || v.endsWith(".") ? v : (isNaN(n) ? prev.presencePenalty : n) }));
             }}
               onBlur={e => setSettings(prev => ({ ...prev, presencePenalty: clamp(parseFloat(e.target.value) || 0.15, 0, 2) }))}
-              className="nf-input" type="number" step="0.05" min="0" max="2" />
+              className="nf-input" type="number" min="0" step="0.05" min="0" max="2" />
           </div>
         </div>
         <Field label="Custom System Prompt" value={settings.systemPrompt} onChange={v => setSettings(prev => ({ ...prev, systemPrompt: v }))} multiline placeholder="e.g. 'Always use British English', 'Write in present tense'..." />
@@ -14965,7 +15369,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <div className="nf-field">
           <label className="nf-label">Heat Level: {project?.heatLevel || 3}/5</label>
           <input type="range" min="1" max="5" value={project?.heatLevel || 3}
-            onChange={e => updateProject({ heatLevel: parseInt(e.target.value) })} className="nf-range"
+            onChange={e => updateProject({ heatLevel: parseInt(e.target.value, 10) })} className="nf-range"
             aria-valuetext={["Fade to black","Suggestive","Moderate","Explicit","Graphic"][(project?.heatLevel || 3) - 1]} />
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4 }}>
             <span>Fade to black</span><span>Suggestive</span><span>Moderate</span><span>Explicit</span><span>Graphic</span>
@@ -14974,21 +15378,75 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <Field label="Writing Style" value={project?.writingStyle} onChange={v => updateProject({ writingStyle: v })} multiline placeholder="Your voice, pacing, sentence style..." small />
         <Field label="Content Preferences" value={project?.contentPrefs} onChange={v => updateProject({ contentPrefs: v })} multiline placeholder="What to lean into..." small />
         <Field label="Hard Limits" value={project?.avoidList} onChange={v => updateProject({ avoidList: v })} multiline placeholder="Never include..." small />
+        {/* ─── LITERARY CRAFT SETTINGS ─── */}
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent-2)", cursor: "pointer", padding: "4px 0" }}>Literary Craft</summary>
+          <div style={{ marginTop: 8 }}>
+            <div className="nf-field">
+              <label className="nf-label">Thematic Argument — Thesis</label>
+              <input value={project?.thematicArgument?.thesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), thesis: e.target.value } })} className="nf-input" placeholder="What this novel argues FOR" style={{ fontSize: 10 }} />
+            </div>
+            <div className="nf-field">
+              <label className="nf-label">Thematic Argument — Antithesis</label>
+              <input value={project?.thematicArgument?.antithesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), antithesis: e.target.value } })} className="nf-input" placeholder="The opposing viewpoint" style={{ fontSize: 10 }} />
+            </div>
+            <div className="nf-field">
+              <label className="nf-label">Thematic Argument — Synthesis</label>
+              <input value={project?.thematicArgument?.synthesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), synthesis: e.target.value } })} className="nf-input" placeholder="Where the novel lands — the resolution" style={{ fontSize: 10 }} />
+            </div>
+            {/* ─── MOTIFS ─── */}
+            <div className="nf-field">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label className="nf-label" style={{ marginBottom: 0 }}>Motifs & Symbols</label>
+                <button onClick={() => updateProject({ motifs: [...(project?.motifs || []), { id: uid(), name: "", meaning: "", evolution: "", appearances: [] }] })} className="nf-btn-micro"><Icons.Plus /> Add</button>
+              </div>
+              {(project?.motifs || []).map((m, mi) => (
+                <div key={m.id || mi} style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "start" }}>
+                  <input value={m.name || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], name: e.target.value }; updateProject({ motifs }); }} className="nf-input" placeholder="Symbol name" style={{ fontSize: 10, flex: 1 }} />
+                  <input value={m.meaning || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], meaning: e.target.value }; updateProject({ motifs }); }} className="nf-input" placeholder="Meaning" style={{ fontSize: 10, flex: 1 }} />
+                  <button onClick={() => updateProject({ motifs: (project?.motifs || []).filter((_, i) => i !== mi) })} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0, opacity: 0.4 }}><Icons.X /></button>
+                </div>
+              ))}
+            </div>
+            {/* ─── READER KNOWLEDGE ─── */}
+            <div className="nf-field">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <label className="nf-label" style={{ marginBottom: 0 }}>Reader Knowledge State</label>
+                <button onClick={() => updateProject({ readerKnowledge: [...(project?.readerKnowledge || []), { id: uid(), fact: "", revealedInChapter: 0, revealedDate: "", knownBy: [], description: "" }] })} className="nf-btn-micro"><Icons.Plus /> Add</button>
+              </div>
+              {(project?.readerKnowledge || []).map((rk, ri) => (
+                <div key={rk.id || ri} style={{ marginTop: 4, padding: "6px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
+                    <input value={rk.fact || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], fact: e.target.value }; updateProject({ readerKnowledge: rks }); }} className="nf-input" placeholder="What the reader knows" style={{ fontSize: 10, flex: 1 }} />
+                    <input value={rk.revealedInChapter || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], revealedInChapter: parseInt(e.target.value, 10) || 0 }; updateProject({ readerKnowledge: rks }); }} className="nf-input" placeholder="Reveal Ch#" type="number" min="0" style={{ fontSize: 10, width: 60 }} />
+                    <button onClick={() => updateProject({ readerKnowledge: (project?.readerKnowledge || []).filter((_, i) => i !== ri) })} className="nf-btn-icon" style={{ padding: 2, opacity: 0.4 }}><Icons.X /></button>
+                  </div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                    {(project?.characters || []).filter(c => c.name).map(c => {
+                      const isKnown = (rk.knownBy || []).includes(c.id);
+                      return <button key={c.id} type="button" onClick={() => { const rks = [...(project?.readerKnowledge || [])]; const kb = isKnown ? (rk.knownBy || []).filter(id => id !== c.id) : [...(rk.knownBy || []), c.id]; rks[ri] = { ...rks[ri], knownBy: kb }; updateProject({ readerKnowledge: rks }); }} style={{ fontSize: 8, padding: "1px 6px", borderRadius: 12, border: `1px solid ${isKnown ? "var(--nf-accent-2)" : "var(--nf-border)"}`, background: isKnown ? "var(--nf-accent-glow-2)" : "transparent", color: isKnown ? "var(--nf-accent-2)" : "var(--nf-text-muted)", cursor: "pointer" }}>{isKnown ? "✓ " : ""}{c.name.split(/\s+/)[0]}</button>;
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </details>
         <div className="nf-field">
           <label className="nf-label">Word Goal</label>
-          <input value={project?.wordGoal || ""} onChange={e => updateProject({ wordGoal: parseInt(e.target.value) || 0 })}
-            placeholder="e.g. 80000" className="nf-input" type="number" />
+          <input value={project?.wordGoal || ""} onChange={e => updateProject({ wordGoal: parseInt(e.target.value, 10) || 0 })}
+            placeholder="e.g. 80000" className="nf-input" type="number" min="0" />
         </div>
       </div>
 
             {/* Google Drive Sync */}
       <div className="nf-card">
         <h3 className="nf-card-title">☁ Google Drive Sync</h3>
-        <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 12, lineHeight: 1.6 }}>
+        <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 22, lineHeight: 1.6 }}>
           Auto-sync projects AND images to Google Drive for full cloud backup and cross-device access.
           Images are compressed before upload to keep syncs fast.
         </p>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 22 }}>
           <div style={{ width: 8, height: 8, borderRadius: 4, background: gdriveConnected ? "var(--nf-success)" : "var(--nf-text-muted)" }} />
           <span style={{ fontSize: 11, color: "var(--nf-text-dim)", fontWeight: 500 }}>
             {gdriveConnected ? "Connected" : "Not connected"}
@@ -14999,7 +15457,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <div className="nf-field">
             <label className="nf-label">Google OAuth Client ID</label>
             <input value={gdriveClientId} onChange={e => setGdriveClientId(e.target.value)}
-              placeholder="xxxxx.apps.googleusercontent.com" className="nf-input" style={{ fontSize: 12 }} />
+              placeholder="Xxxxx.apps.googleusercontent.com" className="nf-input" style={{ fontSize: 12 }} />
             <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, lineHeight: 1.5 }}>
               Get one at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style={{ color: "var(--nf-accent)", textDecoration: "underline" }}>Google Cloud Console</a> → Create OAuth 2.0 Client ID (Web application) → Add <code style={{ background: "var(--nf-bg-surface)", padding: "0 4px", borderRadius: 2 }}>{window.location.origin}</code> as an authorized JavaScript origin.
             </div>
@@ -15026,7 +15484,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>Periodically save to Google Drive</div>
               </div>
               <button onClick={() => setGdriveAutoSync(!gdriveAutoSync)} style={{
-                width: 40, height: 22, borderRadius: 11, border: "none", cursor: "pointer",
+                width: 40, height: 22, borderRadius: 12, border: "none", cursor: "pointer",
                 background: gdriveAutoSync ? "var(--nf-accent)" : "var(--nf-border)",
                 position: "relative", transition: "background 0.2s",
               }} role="switch" aria-checked={gdriveAutoSync}>
@@ -15040,7 +15498,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             {gdriveAutoSync && (
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <label style={{ fontSize: 11, color: "var(--nf-text-dim)" }}>Every</label>
-                <select value={gdriveSyncInterval} onChange={e => setGdriveSyncInterval(parseInt(e.target.value))}
+                <select value={gdriveSyncInterval} onChange={e => setGdriveSyncInterval(parseInt(e.target.value, 10))}
                   className="nf-select" style={{ width: 80, padding: "4px 8px", fontSize: 11 }}>
                   <option value={1}>1 min</option><option value={2}>2 min</option><option value={5}>5 min</option>
                   <option value={10}>10 min</option><option value={15}>15 min</option><option value={30}>30 min</option>
@@ -15052,7 +15510,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
       </div>
 	  <div className="nf-card">
         <h3 className="nf-card-title">Auto-Save to File</h3>
-        <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 12, lineHeight: 1.6 }}>
+        <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 22, lineHeight: 1.6 }}>
           Link a JSON file on your computer. All changes auto-save to this file continuously — no more relying only on browser storage.
         </p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -15107,7 +15565,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
       {project && (
         <div className="nf-card" style={{ borderColor: "var(--nf-error-border)" }}>
           <h3 className="nf-card-title" style={{ color: "var(--nf-accent)" }}>Danger Zone</h3>
-          <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 12, lineHeight: 1.5 }}>
+          <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 22, lineHeight: 1.5 }}>
             Type <strong style={{ color: "var(--nf-text)" }}>{project.title}</strong> to confirm deletion:
           </p>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -15131,7 +15589,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             }} className="nf-btn nf-btn-danger"><Icons.Trash /> Delete Project</button>
           </div>
 		  <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--nf-border)" }}>
-            <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+            <p style={{ fontSize: 12, color: "var(--nf-text-muted)", marginBottom: 20, lineHeight: 1.5 }}>
               Clear <strong>all app data</strong> — projects, settings, Google Drive connection, cached images. Use when sharing this device or starting fresh. This cannot be undone.
             </p>
             <button onClick={() => setFlushConfirm(true)} className="nf-btn nf-btn-danger" style={{ borderColor: "var(--nf-accent)" }}>
@@ -15152,7 +15610,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <div style={{ fontStyle: "italic", marginTop: 2 }}>with an unreasonable amount of help from Claude</div>
           <div style={{ fontStyle: "italic", fontSize: 8, opacity: 0.6, marginTop: 1 }}>(who mass-produced 16,000+ lines and mass-forgot what half of them do)</div>
         </div>
-        <div style={{ fontSize: 7, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.6, marginTop: 10, opacity: 0.5, letterSpacing: "0.02em" }}>
+        <div style={{ fontSize: 8, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.6, marginTop: 10, opacity: 0.5, letterSpacing: "0.02em" }}>
           © {new Date().getFullYear()} @arvtk. All rights reserved. This software and its source code, design, architecture, and all associated intellectual property are the exclusive property of the developer. Unauthorized reproduction, distribution, modification, reverse engineering, or commercial use — in whole or in part — is strictly prohibited without prior written consent. All AI-generated code contributions were produced under the direction and creative control of the developer and are incorporated as works made for hire. Novel content, characters, and creative works produced using this tool remain the sole property of their respective authors. This software is provided "as is" without warranty of any kind, express or implied.
         </div>
       </div>
@@ -15185,13 +15643,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           @keyframes nf-clack { 0% { transform: scale(1); } 30% { transform: scale(0.97); } 60% { transform: scale(1.01); } 100% { transform: scale(1); } }
           /* ─── 100+ GLYPH ANIMATIONS & MICRO-INTERACTIONS ─── */
           /* G1-G10: Breathing and pulsing glyphs */
-          @keyframes nf-glyph-breathe { 0%, 100% { opacity: 0.15; transform: scale(0.9); } 50% { opacity: 0.85; transform: scale(1.1); } }
+          @keyframes nf-glyph-breathe { 0%, 100% { opacity: 0.2; transform: scale(0.9); } 50% { opacity: 0.85; transform: scale(1.1); } }
           @keyframes nf-glyph-breathe-slow { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.6; } }
           @keyframes nf-glyph-pulse { 0%, 100% { opacity: 0.3; box-shadow: 0 0 0 0 currentColor; } 50% { opacity: 1; box-shadow: 0 0 8px 2px currentColor; } }
           @keyframes nf-glyph-heartbeat { 0%, 100% { transform: scale(1); } 14% { transform: scale(1.15); } 28% { transform: scale(1); } 42% { transform: scale(1.1); } 70% { transform: scale(1); } }
           @keyframes nf-glyph-idle { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 0.7; } }
           @keyframes nf-glyph-shimmer { 0% { opacity: 0.3; } 50% { opacity: 0.9; } 100% { opacity: 0.3; } }
-          @keyframes nf-glyph-twinkle { 0%, 100% { opacity: 0.1; transform: scale(0.8) rotate(0deg); } 50% { opacity: 1; transform: scale(1.2) rotate(180deg); } }
+          @keyframes nf-glyph-twinkle { 0%, 100% { opacity: 0.2; transform: scale(0.8) rotate(0deg); } 50% { opacity: 1; transform: scale(1.2) rotate(180deg); } }
           @keyframes nf-glyph-orbit { 0% { transform: rotate(0deg) translateX(4px) rotate(0deg); } 100% { transform: rotate(360deg) translateX(4px) rotate(-360deg); } }
           @keyframes nf-glyph-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
           @keyframes nf-glyph-wobble { 0%, 100% { transform: rotate(0deg); } 25% { transform: rotate(3deg); } 75% { transform: rotate(-3deg); } }
@@ -15219,7 +15677,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-hint { position: relative; padding-left: 14px; }
           .nf-hint::before { content: '⊹'; position: absolute; left: 0; top: 0; color: var(--nf-accent-2); opacity: 0.3; animation: nf-glyph-twinkle 6s infinite; }
           .nf-empty-state { position: relative; text-align: center; }
-          .nf-empty-state::before { content: '✧'; display: block; font-size: 24px; color: var(--nf-accent); opacity: 0.12; margin-bottom: 10px; animation: nf-glyph-float 3.5s ease-in-out infinite; }
+          .nf-empty-state::before { content: '✧'; display: block; font-size: 24px; color: var(--nf-accent); opacity: 0.25; margin-bottom: 10px; animation: nf-glyph-float 3.5s ease-in-out infinite; }
           .nf-empty-state::after { content: '◇'; display: block; font-size: 10px; color: var(--nf-accent-2); opacity: 0.08; margin-top: 10px; animation: nf-glyph-breathe-slow 5s infinite; }
           /* G51-G60: Card ambient life */
           .nf-card::after { content: ''; position: absolute; top: 0; right: 0; width: 0; height: 0; border-top: 12px solid var(--nf-bg-hover); border-left: 12px solid transparent; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
@@ -15265,8 +15723,6 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-presence-chip:hover { transform: translateY(-2px) scale(1.05); }
           .nf-presence-chip.nf-pov .nf-presence-img, .nf-presence-chip.nf-pov .nf-presence-initial { border: 1.5px solid var(--nf-accent); }
           /* G201-G220: Save indicator and status */
-          @keyframes nf-save-ripple { 0% { box-shadow: 0 0 0 0 var(--nf-success); opacity: 0.6; } 100% { box-shadow: 0 0 0 8px transparent; opacity: 0; } }
-          @keyframes nf-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
           .nf-shimmer { background: linear-gradient(90deg, var(--nf-bg-surface) 25%, var(--nf-bg-hover) 50%, var(--nf-bg-surface) 75%); background-size: 200% 100%; animation: nf-shimmer 1.5s infinite; }
           /* G221-G240: Welcome screen */
           .nf-welcome-icon { animation: nf-glyph-breathe-slow 4s ease-in-out infinite, nf-glyph-wobble 8s ease-in-out infinite; font-size: 48px; color: var(--nf-accent); opacity: 0.3; }
@@ -15278,10 +15734,6 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-card, .nf-btn, .nf-btn-micro, .nf-btn-icon-sm, .nf-input, .nf-select, .nf-textarea { transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1); }
           *:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; border-radius: 2px; }
           @keyframes nf-shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-2px); } 40% { transform: translateX(2px); } 60% { transform: translateX(-1px); } 80% { transform: translateX(1px); } }
-          @keyframes nf-wiggle { 0% { transform: rotate(0deg); } 25% { transform: rotate(-1deg); } 75% { transform: rotate(1deg); } 100% { transform: rotate(0deg); } }
-          @keyframes nf-pop { 0% { transform: scale(0.95); opacity: 0; } 50% { transform: scale(1.02); } 100% { transform: scale(1); opacity: 1; } }
-          @keyframes nf-stamp { 0% { transform: scale(1.3) rotate(-3deg); opacity: 0; } 60% { transform: scale(0.98) rotate(0.5deg); } 100% { transform: scale(1) rotate(0deg); opacity: 1; } }
-          @keyframes nf-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
           .nf-clack { animation: nf-clack 0.3s ease-out; }
           .nf-shake { animation: nf-shake 0.3s ease-out; }
           .nf-cursor-blink { animation: nf-blink 0.8s step-end infinite; color: var(--nf-accent); margin-left: 1px; }
@@ -15303,16 +15755,16 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-sidebar-open { width: 250px; min-width: 250px; }
           .nf-sidebar-closed { width: 0; min-width: 0; border-right: none; }
           .nf-sidebar-header { padding: 18px 16px 14px; border-bottom: 1px solid var(--nf-border); }
-          .nf-sidebar-list { flex: 1; overflow-y: auto; padding: 6px; }
+          .nf-sidebar-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
           .nf-logo-mark { width: 32px; height: 32px; border-radius: 2px; background: var(--nf-accent); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 14px; font-weight: 500; letter-spacing: -0.02em; }
           .nf-logo-text { font-family: var(--nf-font-display); font-size: 24px; font-weight: 400; color: var(--nf-text); letter-spacing: 0.02em; }
-          .nf-project-item { padding: 10px 12px; border-radius: 2px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; transition: all 0.15s; }
+          .nf-project-item { padding: 10px 12px; border-radius: 2px; cursor: pointer; margin-bottom: 2px; border: 1px solid transparent; transition: color 0.15s, border-color 0.15s, background 0.15s; }
           .nf-project-item:hover { background: var(--nf-bg-hover); transform: translateX(3px); }
           .nf-project-item.active { background: var(--nf-bg-surface); border-color: var(--nf-accent); border-left: 2px solid var(--nf-accent); }
           .nf-project-title { font-size: 13px; font-weight: 500; color: var(--nf-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; font-family: var(--nf-font-display); }
           .nf-project-meta { font-size: 10px; color: var(--nf-text-muted); }
           
-          .nf-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 15px; border-radius: 3px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-dim); transition: all 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); letter-spacing: 0.02em; }
+          .nf-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 15px; border-radius: 3px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-dim); transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); letter-spacing: 0.02em; }
           .nf-btn:hover { background: var(--nf-bg-hover); border-color: var(--nf-accent); }
           .nf-btn:active { transform: scale(0.96); transition-duration: 0.06s; }
           .nf-btn:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
@@ -15328,13 +15780,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-btn-icon:hover { color: var(--nf-text); }
           .nf-btn-icon:active { transform: scale(0.88); transition-duration: 0.06s; }
           .nf-btn-icon:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; border-radius: 2px; }
-          .nf-btn-icon-sm { background: none; border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text-dim); cursor: pointer; padding: 4px 10px; font-size: 11px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; transition: all 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); }
+          .nf-btn-icon-sm { background: none; border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text-dim); cursor: pointer; padding: 4px 10px; font-size: 11px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); }
           .nf-btn-icon-sm:hover { border-color: var(--nf-accent); background: var(--nf-bg-hover); }
           .nf-btn-icon-sm:active { transform: scale(0.95); transition-duration: 0.06s; }
           .nf-btn-icon-sm:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
           .nf-btn-icon-sm:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
           .nf-btn-icon-danger:hover { border-color: var(--nf-accent); color: var(--nf-accent); }
-          .nf-btn-micro { background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 3px; color: var(--nf-text-dim); cursor: pointer; padding: 3px 8px; font-size: 10px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px; transition: all 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); }
+          .nf-btn-micro { background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 3px; color: var(--nf-text-dim); cursor: pointer; padding: 3px 8px; font-size: 10px; font-weight: 500; display: inline-flex; align-items: center; gap: 3px; transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); }
           .nf-btn-micro:hover { border-color: var(--nf-accent); }
           .nf-btn-micro:active { transform: scale(0.95); transition-duration: 0.06s; }
           .nf-btn-micro:disabled { opacity: 0.3; cursor: default; }
@@ -15342,11 +15794,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
           
           /* Physical card interactions — Japandi paper feel */
-          .nf-card { margin-bottom: 14px; padding: 16px; background: var(--nf-bg-raised); border-radius: 2px; border: 1px solid var(--nf-border); transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, border-color 0.2s; position: relative; }
+          .nf-card { word-break: break-word; margin-bottom: 14px; padding: 16px; background: var(--nf-bg-raised); border-radius: 2px; border: 1px solid var(--nf-border); transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, border-color 0.2s; position: relative; }
           .nf-card:hover { transform: rotate(-0.2deg) translateY(-1px); box-shadow: var(--nf-shadow); }
           .nf-card:active { transform: scale(0.995); transition-duration: 0.1s; }
-          .nf-card-title { font-size: 14px; font-family: var(--nf-font-display); font-weight: 500; color: var(--nf-text); margin-bottom: 12px; letter-spacing: 0.01em; }
+          .nf-card-title { font-size: 14px; word-break: break-word; font-family: var(--nf-font-display); font-weight: 500; color: var(--nf-text); margin-bottom: 12px; letter-spacing: 0.01em; }
           .nf-polaroid { background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: 2px; padding: 8px 8px 16px; transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.3s, border-color 0.2s; cursor: pointer; }
+          .nf-polaroid { will-change: transform; }
           .nf-polaroid:hover { transform: rotate(-1deg) translateY(-2px); box-shadow: var(--nf-shadow-lg); }
           .nf-polaroid:active { transform: scale(0.97) rotate(0deg); transition-duration: 0.1s; }
           .nf-polaroid.active { border-color: var(--nf-accent); }
@@ -15356,7 +15809,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-input { width: 100%; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.2s, background 0.2s; }
           .nf-input:hover { border-color: var(--nf-text-muted); }
           .nf-input:focus { border-color: var(--nf-border-focus); background: var(--nf-bg); }
-          .nf-textarea { width: 100%; min-height: 76px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; line-height: 1.6; resize: vertical; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.2s, background 0.2s; }
+          .nf-textarea { width: 100%; min-height: 76px; max-height: 400px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; line-height: 1.6; resize: vertical; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.2s, background 0.2s; }
           .nf-textarea:hover { border-color: var(--nf-text-muted); }
           .nf-textarea:focus { border-color: var(--nf-border-focus); background: var(--nf-bg); }
           .nf-textarea-sm { min-height: 56px; }
@@ -15365,7 +15818,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-select:focus { border-color: var(--nf-border-focus); }
           .nf-range { width: 100%; accent-color: var(--nf-accent); }
           .nf-hint { color: var(--nf-text-muted); font-size: 11px; margin-bottom: 20px; line-height: 1.6; }
-          .nf-char-section { margin-bottom: 20px; padding: 16px; background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: var(--nf-radius); transition: border-color 0.3s; }
+          .nf-char-section { margin-bottom: 20px; word-break: break-word; padding: 16px; background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: var(--nf-radius); transition: border-color 0.3s; }
           .nf-char-section:focus-within { border-color: var(--nf-border-focus); }
           .nf-char-section-label { font-size: 10px; font-weight: 700; color: var(--nf-accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--nf-border); font-family: var(--nf-font-body); }
           
@@ -15380,12 +15833,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-tab-label { }
           .nf-tab-title { font-size: 11px; color: var(--nf-text-muted); font-style: italic; font-family: var(--nf-font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; flex-shrink: 0; }
           
-          .nf-write-layout { display: flex; flex: 1; overflow: hidden; position: relative; }
+          .nf-write-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; position: relative; }
           .nf-chapter-sidebar { width: 190px; min-width: 190px; border-right: 1px solid var(--nf-border); display: flex; flex-direction: column; background: var(--nf-bg-raised); }
           .nf-chapter-sidebar-header { padding: 10px 12px; border-bottom: 1px solid var(--nf-border); display: flex; justify-content: space-between; align-items: center; }
           .nf-section-label { font-size: 11px; font-weight: 700; color: var(--nf-text-dim); text-transform: uppercase; letter-spacing: 0.1em; }
-          .nf-chapter-list { flex: 1; overflow-y: auto; padding: 4px; }
-          .nf-chapter-item { padding: 9px 10px; border-radius: var(--nf-radius-sm); cursor: pointer; margin-bottom: 2px; border-left: 3px solid transparent; transition: all 0.2s cubic-bezier(0.4,0,0.2,1); }
+          .nf-chapter-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
+          .nf-chapter-item { padding: 9px 10px; border-radius: var(--nf-radius-sm); cursor: pointer; margin-bottom: 2px; border-left: 3px solid transparent; transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); }
           .nf-chapter-item:hover { background: var(--nf-bg-hover); }
           .nf-chapter-item:active { transform: scale(0.97); transition-duration: 0.08s; }
           .nf-chapter-item.active { background: var(--nf-bg-surface); border-left-color: var(--nf-accent); }
@@ -15411,7 +15864,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-toolbar-btn {
             background: transparent; border: none; color: var(--nf-text-dim); cursor: pointer;
             padding: 4px 6px; border-radius: 4px; display: flex; align-items: center; justify-content: center;
-            transition: all 0.12s cubic-bezier(0.4,0,0.2,1); min-width: 26px; height: 26px; position: relative;
+            transition: color 0.12s, background 0.12s, transform 0.12s cubic-bezier(0.4,0,0.2,1); min-width: 26px; height: 26px; position: relative;
           }
           .nf-toolbar-btn:hover { background: var(--nf-toolbar-btn-hover); color: var(--nf-text); }
           .nf-toolbar-btn:active { transform: scale(0.88); transition-duration: 0.06s; }
@@ -15465,7 +15918,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-pov .nf-presence-name { color: var(--nf-accent); font-weight: 700; }
           .nf-dead .nf-presence-img { filter: grayscale(0.8); }
           /* Hover card */
-          .nf-presence-card { position: fixed; z-index: 10001; transform: translateX(-50%); width: 320px; max-height: 400px; overflow-y: auto; background: var(--nf-dialog-bg); border: 1px solid var(--nf-border); border-radius: 6px; box-shadow: var(--nf-shadow-lg); animation: nf-fadeIn 0.12s ease-out; scrollbar-width: thin; scrollbar-color: var(--nf-scrollbar-thumb) transparent; }
+          .nf-presence-card { position: fixed; word-break: break-word; z-index: 10001; transform: translateX(-50%); width: 320px; max-height: 400px; overflow-y: auto; background: var(--nf-dialog-bg); border: 1px solid var(--nf-border); border-radius: 6px; box-shadow: var(--nf-shadow-lg); animation: nf-fadeIn 0.12s ease-out; scrollbar-width: thin; scrollbar-color: var(--nf-scrollbar-thumb) transparent; }
           .nf-pc-head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 10px; }
           .nf-pc-avatar { flex-shrink: 0; }
           .nf-pc-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; border: 2px solid var(--nf-border); display: block; }
@@ -15490,10 +15943,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           /* ─── 3. Beat Progress Rail ─── */
           .nf-beat-rail { display: flex; flex-direction: column; align-items: center; width: 18px; flex-shrink: 0; padding: 20px 0 20px; }
           .nf-beat-seg { display: flex; flex-direction: column; align-items: center; flex: 1; min-height: 18px; }
-          .nf-beat-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--nf-border); transition: all 0.3s ease; flex-shrink: 0; z-index: 1; opacity: 0.4; }
+          .nf-beat-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--nf-border); transition: color 0.3s, background 0.3s, transform 0.3s ease; flex-shrink: 0; z-index: 1; opacity: 0.4; }
           .nf-beat-seg.done .nf-beat-dot { background: var(--nf-accent-2); opacity: 0.8; }
           .nf-beat-seg.now .nf-beat-dot { background: var(--nf-accent); opacity: 1; transform: scale(1.6); box-shadow: 0 0 6px rgba(196,101,58,0.25); }
-          .nf-beat-line { width: 1px; flex: 1; min-height: 6px; background: var(--nf-border); opacity: 0.2; transition: all 0.3s; }
+          .nf-beat-line { width: 1px; flex: 1; min-height: 6px; background: var(--nf-border); opacity: 0.2; transition: color 0.3s, background 0.3s, transform 0.3s; }
           .nf-beat-seg.done .nf-beat-line { background: var(--nf-accent-2); opacity: 0.4; }
           .nf-beat-seg.now .nf-beat-line { background: var(--nf-accent-2); opacity: 0.25; }
           
@@ -15550,11 +16003,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-ai-mobile-overlay { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; background: var(--nf-bg); animation: nf-fadeIn 0.15s ease-out; }
           .nf-tab-ai-panel { width: 340px; min-width: 300px; border-left: 1px solid var(--nf-border); display: flex; flex-direction: column; background: var(--nf-bg); flex-shrink: 0; }
           .nf-mode-bar { padding: 6px 8px; border-bottom: 1px solid var(--nf-border); display: flex; flex-wrap: wrap; gap: 3px; justify-content: center; }
-          .nf-mode-btn { padding: 4px 9px; border-radius: 20px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-muted); text-transform: capitalize; transition: all 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); white-space: nowrap; }
+          .nf-mode-btn { padding: 4px 9px; border-radius: 20px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-muted); text-transform: capitalize; transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); white-space: nowrap; }
           .nf-mode-btn:hover { border-color: var(--nf-accent); color: var(--nf-text-dim); }
           .nf-mode-btn:active { transform: scale(0.94); transition-duration: 0.06s; }
           .nf-mode-btn.active { border-color: var(--nf-accent); color: var(--nf-accent); background: var(--nf-accent-glow); }
-          .nf-chat-messages { flex: 1; overflow-y: auto; padding: 10px; scroll-behavior: smooth; }
+          .nf-chat-messages { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; scroll-behavior: smooth; }
           .nf-chat-empty { text-align: center; padding: 36px 18px; color: var(--nf-text-muted); font-size: 12px; line-height: 1.7; }
           @keyframes nf-msg-enter { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
           .nf-chat-msg { margin-bottom: 10px; display: flex; flex-direction: column; align-items: flex-start; animation: nf-msg-enter 0.25s ease-out; }
@@ -15581,16 +16034,16 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           }
           .nf-chat-textarea { flex: 1; min-height: 40px; max-height: 110px; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: 6px; color: var(--nf-text); font-size: 13px; resize: vertical; outline: none; font-family: var(--nf-font-body); line-height: 1.5; width: 100%; transition: border-color 0.2s; }
           .nf-chat-textarea:focus { border-color: var(--nf-border-focus); }
-          .nf-send-btn { align-self: flex-end; padding: 9px 12px; background: var(--nf-accent); border: none; border-radius: 6px; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.15s cubic-bezier(0.4,0,0.2,1); }
+          .nf-send-btn { align-self: flex-end; padding: 9px 12px; background: var(--nf-accent); border: none; border-radius: 6px; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: color 0.15s, border-color 0.15s, background 0.15s cubic-bezier(0.4,0,0.2,1); }
           .nf-send-btn:hover { opacity: 0.9; }
           .nf-send-btn:active { transform: scale(0.92); transition-duration: 0.06s; }
           .nf-send-btn:disabled { opacity: 0.3; cursor: default; background: var(--nf-bg-surface); }
           
-          .nf-content-scroll { flex: 1; overflow-y: auto; padding: 28px 36px; scroll-behavior: smooth; }
+          .nf-content-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 36px; scroll-behavior: smooth; }
           .nf-page-title { font-family: var(--nf-font-display); font-size: 28px; font-weight: 400; color: var(--nf-text); margin: 0 0 20px; letter-spacing: 0.01em; }
-          .nf-card-title { font-size: 14px; color: var(--nf-text); margin: 0 0 14px; font-weight: 500; font-family: var(--nf-font-display); }
+          .nf-card-title { font-size: 14px; word-break: break-word; color: var(--nf-text); margin: 0 0 14px; font-weight: 500; font-family: var(--nf-font-display); }
           .nf-empty-state { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--nf-text-muted); font-size: 15px; font-family: var(--nf-font-display); font-style: italic; animation: nf-float 3s ease-in-out infinite; }
-          .nf-plot-number { width: 46px; height: 46px; border-radius: 2px; background: var(--nf-bg-surface); display: flex; align-items: center; justify-content: center; color: var(--nf-accent); font-weight: 400; font-size: 18px; font-family: var(--nf-font-display); flex-shrink: 0; transition: all 0.2s cubic-bezier(0.34,1.56,0.64,1); cursor: pointer; }
+          .nf-plot-number { width: 46px; height: 46px; border-radius: 2px; background: var(--nf-bg-surface); display: flex; align-items: center; justify-content: center; color: var(--nf-accent); font-weight: 400; font-size: 18px; font-family: var(--nf-font-display); flex-shrink: 0; transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.34,1.56,0.64,1); cursor: pointer; }
           .nf-plot-number:hover { transform: scale(1.06); }
           .nf-plot-number:active { transform: scale(0.95); transition-duration: 0.06s; }
           .nf-stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
@@ -15601,7 +16054,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-stat-label { font-size: 10px; color: var(--nf-text-muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.08em; }
           .nf-context-preview { margin-top: 12px; padding: 16px; background: var(--nf-bg-deep); border-radius: var(--nf-radius); border: 1px solid var(--nf-border); color: var(--nf-text-muted); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; max-height: 500px; overflow-y: auto; font-family: var(--nf-font-mono); }
           .nf-welcome { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 14px; }
-          .nf-welcome-icon { font-size: 36px; opacity: 0.15; animation: nf-float 4s ease-in-out infinite; }
+          .nf-welcome-icon { font-size: 36px; opacity: 0.2; animation: nf-float 4s ease-in-out infinite; }
           .nf-welcome-text { font-size: 17px; color: var(--nf-text-muted); font-family: var(--nf-font-display); font-style: italic; letter-spacing: 0.02em; animation: nf-fadeIn 0.6s ease-out; }
           
           @media (max-width: 1100px) {
@@ -15640,7 +16093,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-card { padding: 12px; margin-bottom: 10px; }
             .nf-card:hover { transform: none; box-shadow: none; }
             .nf-polaroid { padding: 4px 4px 10px; }
-            .nf-polaroid:hover { transform: none; box-shadow: none; }
+            .nf-polaroid { will-change: transform; }
+          .nf-polaroid:hover { transform: none; box-shadow: none; }
             .nf-char-section { padding: 12px; margin-bottom: 14px; }
             /* M11-15: Form fields - larger touch targets */
             .nf-input { padding: 10px 12px; font-size: 14px; min-height: 40px; }
@@ -15694,11 +16148,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-org-tree ul { flex-wrap: nowrap; }
             .nf-org-tree li { min-width: 140px; }
             /* M71-75: Mobile floating AI button */
-            .nf-mobile-ai-fab { position: fixed; bottom: 16px; right: 16px; z-index: 90; width: 48px; height: 48px; border-radius: 50%; background: var(--nf-accent); color: #fff; border: none; box-shadow: 0 4px 16px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.2s; -webkit-tap-highlight-color: transparent; }
+            .nf-mobile-ai-fab { position: fixed; bottom: max(16px, env(safe-area-inset-bottom, 16px)); right: max(16px, env(safe-area-inset-right, 16px)); z-index: 90; width: 48px; height: 48px; border-radius: 50%; background: var(--nf-accent); color: #fff; border: none; box-shadow: 0 4px 16px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: transform 0.2s; -webkit-tap-highlight-color: transparent; }
             .nf-mobile-ai-fab:active { transform: scale(0.92); }
             .nf-mobile-ai-fab svg { width: 22px; height: 22px; }
             /* M76-80: Mobile AI panel as bottom sheet */
-            .nf-mobile-ai-sheet { position: fixed; bottom: 0; left: 0; right: 0; z-index: 200; height: 75vh; background: var(--nf-dialog-bg); border-top: 1px solid var(--nf-border); border-radius: 12px 12px 0 0; box-shadow: 0 -8px 32px rgba(0,0,0,0.3); display: flex; flex-direction: column; animation: nf-slideUp 0.25s ease-out; }
+            .nf-mobile-ai-sheet { position: fixed; bottom: 0; left: 0; right: 0; padding-bottom: env(safe-area-inset-bottom, 0px); z-index: 200; height: 75vh; background: var(--nf-dialog-bg); border-top: 1px solid var(--nf-border); border-radius: 12px 12px 0 0; box-shadow: 0 -8px 32px rgba(0,0,0,0.3); display: flex; flex-direction: column; animation: nf-slideUp 0.25s ease-out; }
+            .nf-mobile-ai-sheet .nf-tab-ai-panel { display: flex !important; width: 100% !important; min-width: 0 !important; border-left: none !important; flex: 1; min-height: 0; }
             .nf-mobile-ai-sheet-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--nf-border); flex-shrink: 0; }
             .nf-mobile-ai-sheet-header::before { content: ''; width: 36px; height: 4px; background: var(--nf-border); border-radius: 2px; position: absolute; top: 6px; left: 50%; transform: translateX(-50%); }
             @keyframes nf-slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
@@ -15718,105 +16173,110 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           }
           @media (max-width: 480px) {
             /* ═══════════════════════════════════════════
-               iPHONE 14 PRO OPTIMIZED (393×852 logical px)
-               Design: full-width content, collapsible sidebars,
-               bottom-reachable actions, addictive micro-interactions
+               MOBILE-FIRST DESIGN (iPhone 14 Pro / 393px)
+               Principle: spacious, thumb-friendly, focused
             ═══════════════════════════════════════════ */
-            /* Tab bar — icon-only, centered, compact */
+            /* Tab bar — bottom-anchored feel, icon-only */
             .nf-tab-label { display: none; }
-            .nf-tab-btn { padding: 10px 10px; min-width: 44px; justify-content: center; }
-            .nf-tab-btn svg { width: 16px; height: 16px; }
-            .nf-tab-bar { justify-content: center; gap: 0; min-height: 44px; }
-            /* Chapter sidebar — narrow but usable */
-            .nf-chapter-sidebar { width: 72px; min-width: 72px; }
-            .nf-chapter-sidebar-header { padding: 6px 6px; flex-direction: column; gap: 4px; }
-            .nf-chapter-sidebar-header .nf-section-label { font-size: 8px; }
-            .nf-chapter-sidebar-header .nf-btn-icon-sm { padding: 4px; font-size: 0; min-height: 28px; width: 28px; justify-content: center; }
-            .nf-chapter-item { padding: 8px 6px; min-height: 40px; }
-            .nf-chapter-item-title { font-size: 9px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+            .nf-tab-btn { padding: 10px 12px; min-width: 44px; justify-content: center; }
+            .nf-tab-btn svg { width: 18px; height: 18px; }
+            .nf-tab-bar { justify-content: center; gap: 2px; min-height: 48px; }
+            .nf-tab-scroll-area { justify-content: center; }
+            /* Chapter sidebar — narrow, icon-centric */
+            .nf-chapter-sidebar { width: 64px; min-width: 64px; }
+            .nf-chapter-sidebar-header { padding: 6px; flex-direction: column; gap: 4px; align-items: center; }
+            .nf-chapter-sidebar-header .nf-section-label { font-size: 8px; text-align: center; }
+            .nf-chapter-sidebar-header .nf-btn-icon-sm { padding: 6px; font-size: 0; min-height: 32px; width: 32px; justify-content: center; }
+            .nf-chapter-item { padding: 8px 4px; min-height: 44px; }
+            .nf-chapter-item-title { font-size: 9px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: center; }
             .nf-chapter-item-meta { display: none; }
-            /* Editor — full width, comfortable reading */
-            .nf-editor-contenteditable { padding: 16px 14px; font-size: 15px; max-width: 100%; line-height: 1.8; }
-            .nf-chapter-header { padding: 6px 10px; gap: 6px; }
-            .nf-chapter-title-input { font-size: 15px; min-width: 60px; }
+            /* Editor — comfortable prose reading */
+            .nf-editor-contenteditable { padding: 20px 16px; font-size: 16px; max-width: 100%; line-height: 1.85; }
+            .nf-chapter-header { padding: 8px 12px; gap: 6px; }
+            .nf-chapter-title-input { font-size: 16px; min-width: 60px; }
             .nf-header-actions { gap: 2px; }
-            .nf-header-actions .nf-btn-icon-sm { padding: 4px 6px; font-size: 9px; min-height: 30px; }
+            .nf-header-actions .nf-btn-icon-sm { padding: 6px; font-size: 0; min-height: 32px; width: 32px; justify-content: center; }
             .nf-word-count { font-size: 9px; }
-            /* Toolbar — horizontal scroll, no wrap */
-            .nf-rich-toolbar { padding: 2px 6px; min-height: 36px; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; gap: 0; }
-            .nf-toolbar-btn { min-width: 36px; height: 36px; padding: 8px; flex-shrink: 0; }
-            .nf-toolbar-sep { margin: 0 1px; }
-            /* Content scroll — edge-to-edge */
-            .nf-content-scroll { padding: 14px 12px; }
-            .nf-page-title { font-size: 18px; margin-bottom: 10px; }
-            /* Cards — compact, no hover effects */
-            .nf-card { padding: 10px; margin-bottom: 8px; }
+            /* Toolbar — clean horizontal scroll */
+            .nf-rich-toolbar { padding: 4px 8px; min-height: 40px; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; gap: 2px; scrollbar-width: none; }
+            .nf-rich-toolbar::-webkit-scrollbar { display: none; }
+            .nf-toolbar-btn { min-width: 40px; height: 40px; padding: 10px; flex-shrink: 0; border-radius: 6px; }
+            .nf-toolbar-btn:active { background: var(--nf-accent-glow); }
+            .nf-toolbar-sep { margin: 0 2px; }
+            /* Content — generous breathing room */
+            .nf-content-scroll { padding: 16px 14px; }
+            .nf-page-title { font-size: 20px; margin-bottom: 12px; }
+            /* Cards — clean, spacious */
+            .nf-card { padding: 12px; margin-bottom: 10px; border-radius: 6px; }
             .nf-card:hover { transform: none; box-shadow: none; }
-            .nf-card:active { transform: scale(0.98); }
-            .nf-char-section { padding: 10px; margin-bottom: 10px; }
-            .nf-polaroid { padding: 3px 3px 8px; }
+            .nf-card:active { transform: scale(0.985); transition-duration: 0.06s; }
+            .nf-char-section { padding: 12px; margin-bottom: 10px; border-radius: 6px; }
+            /* Polaroid — compact but touchable */
+            .nf-polaroid { padding: 4px 4px 8px; }
             .nf-polaroid:hover { transform: none; box-shadow: none; }
-            .nf-polaroid:active { transform: scale(0.96); }
-            /* Form fields — full width, proper touch targets */
-            .nf-input { min-height: 42px; font-size: 15px; padding: 10px 12px; border-radius: 6px; }
-            .nf-select { min-height: 42px; font-size: 14px; padding: 10px; border-radius: 6px; }
-            .nf-textarea { min-height: 60px; font-size: 15px; padding: 10px 12px; border-radius: 6px; }
-            .nf-label { font-size: 9px; margin-bottom: 3px; }
-            .nf-field { margin-bottom: 6px; }
-            /* Buttons — thumb-friendly */
-            .nf-btn { min-height: 42px; padding: 10px 16px; font-size: 13px; border-radius: 6px; }
-            .nf-btn-icon { min-width: 40px; min-height: 40px; padding: 10px; }
-            .nf-btn-icon-sm { min-height: 34px; padding: 6px 10px; font-size: 11px; border-radius: 6px; }
-            .nf-btn-micro { min-height: 30px; padding: 5px 10px; font-size: 10px; border-radius: 4px; }
-            /* Grids — single column */
+            .nf-polaroid:active { transform: scale(0.95); transition-duration: 0.06s; }
+            /* Form fields — iOS-safe sizing (16px prevents zoom) */
+            .nf-input { min-height: 44px; font-size: 16px; padding: 10px 12px; border-radius: 8px; }
+            .nf-select { min-height: 44px; font-size: 16px; padding: 10px; border-radius: 8px; }
+            .nf-textarea { min-height: 60px; font-size: 16px; padding: 10px 12px; border-radius: 8px; }
+            .nf-label { font-size: 10px; margin-bottom: 4px; }
+            .nf-field { margin-bottom: 8px; }
+            /* Buttons — large, satisfying press */
+            .nf-btn { min-height: 44px; padding: 10px 16px; font-size: 14px; border-radius: 8px; }
+            .nf-btn:active { transform: scale(0.96); transition-duration: 0.06s; }
+            .nf-btn-icon { min-width: 44px; min-height: 44px; padding: 10px; }
+            .nf-btn-icon-sm { min-height: 36px; padding: 8px 12px; font-size: 11px; border-radius: 6px; }
+            .nf-btn-micro { min-height: 32px; padding: 6px 12px; font-size: 11px; border-radius: 6px; }
+            /* Grids — responsive, not forced 1-col */
             .nf-stats-grid { grid-template-columns: 1fr; }
-            [style*="gridTemplateColumns"] { grid-template-columns: 1fr !important; }
-            /* Plot numbers */
-            .nf-plot-number { width: 32px; height: 32px; font-size: 12px; }
-            /* Presence strip — scrollable, compact */
-            .nf-presence-strip { height: 36px; padding: 0 6px; }
-            .nf-presence-img, .nf-presence-initial { width: 22px; height: 22px; font-size: 9px; }
-            .nf-presence-avatar-wrap { width: 22px; height: 22px; }
-            .nf-presence-name { font-size: 8px; max-width: 28px; }
+            /* Plot */
+            .nf-plot-number { width: 36px; height: 36px; font-size: 13px; }
+            /* Presence strip */
+            .nf-presence-strip { height: 40px; padding: 0 8px; }
+            .nf-presence-img, .nf-presence-initial { width: 24px; height: 24px; font-size: 10px; }
+            .nf-presence-avatar-wrap { width: 24px; height: 24px; }
+            .nf-presence-name { font-size: 8px; max-width: 32px; }
             /* Mode bar */
-            .nf-mode-bar { padding: 4px 6px; gap: 2px; }
-            .nf-mode-btn { padding: 5px 8px; font-size: 9px; min-height: 28px; }
-            /* Chat */
-            .nf-chat-textarea { min-height: 36px; font-size: 14px; border-radius: 8px; }
-            .nf-send-btn { padding: 8px 10px; border-radius: 8px; }
-            .nf-chat-bubble { font-size: 13px; padding: 8px 12px; border-radius: 12px 12px 12px 3px; }
-            .nf-chat-bubble-user { border-radius: 12px 12px 3px 12px; }
-            /* Mobile AI FAB — larger, more prominent */
+            .nf-mode-bar { padding: 4px 8px; gap: 4px; }
+            .nf-mode-btn { padding: 6px 10px; font-size: 10px; min-height: 32px; }
+            /* Chat — spacious */
+            .nf-chat-textarea { min-height: 40px; font-size: 16px; border-radius: 10px; padding: 10px 14px; }
+            .nf-send-btn { padding: 10px 12px; border-radius: 10px; min-width: 44px; min-height: 44px; }
+            .nf-chat-bubble { font-size: 14px; padding: 10px 14px; border-radius: 14px 14px 14px 4px; }
+            .nf-chat-bubble-user { border-radius: 14px 14px 4px 14px; }
+            /* Mobile AI FAB */
             .nf-mobile-ai-fab { width: 52px; height: 52px; bottom: 20px; right: 14px; }
-            .nf-mobile-ai-fab svg { width: 24px; height: 24px; }
+            .nf-mobile-ai-fab svg { width: 22px; height: 22px; }
+            .nf-mobile-ai-fab:active { transform: scale(0.9); transition-duration: 0.06s; }
             /* Bottom sheet */
             .nf-mobile-ai-sheet { height: 80vh; border-radius: 16px 16px 0 0; }
-            .nf-mobile-ai-sheet-header { padding: 12px 16px; }
-            /* Toast above FAB */
-            .nf-toast { bottom: 80px; max-width: 85vw; font-size: 12px; border-radius: 8px; }
+            .nf-mobile-ai-sheet-header { padding: 14px 16px; }
+            /* Toast */
+            .nf-toast { bottom: max(80px, calc(80px + env(safe-area-inset-bottom, 0px))); max-width: 85vw; font-size: 13px; border-radius: 10px; }
             /* Empty state */
-            .nf-empty-state { font-size: 13px; height: 150px; }
+            .nf-empty-state { font-size: 14px; height: 150px; }
             .nf-empty-state::before { font-size: 28px; }
-            /* Org tree */
-            .nf-org-tree li { min-width: 160px; }
             /* Scene direction */
-            .nf-scene-textarea { font-size: 14px; min-height: 44px; border-radius: 6px; }
-            /* Hint */
-            .nf-hint { font-size: 11px; margin-bottom: 10px; }
+            .nf-scene-textarea { font-size: 16px; min-height: 48px; border-radius: 8px; }
             /* Ghost */
-            .nf-ghost { padding: 8px 14px; }
-            .nf-ghost-prose { font-size: 13px; }
+            .nf-ghost { padding: 10px 14px; border-radius: 8px; }
+            .nf-ghost-prose { font-size: 14px; }
             /* Focus mode */
-            .nf-focus-mode .nf-editor-contenteditable { padding: 16px 14px; font-size: 16px; }
-            .nf-focus-exit-btn { top: 8px; right: 8px; padding: 8px 14px; border-radius: 8px; opacity: 0.5; }
-            /* Modals — full screen */
-            .nf-rel-web-tip { max-width: 90vw !important; }
+            .nf-focus-mode .nf-editor-contenteditable { padding: 20px 16px; font-size: 17px; }
+            .nf-focus-exit-btn { top: 10px; right: 10px; padding: 10px 16px; border-radius: 10px; opacity: 0.5; }
             /* Sidebar overlay */
-            .nf-sidebar-open { width: 80vw; max-width: 300px; }
-            /* Beat rail hidden */
+            .nf-sidebar-open { width: 85vw; max-width: 320px; }
+            /* Beat rail + glyph rail hidden */
             .nf-beat-rail { display: none; }
-            /* Glyph rail hidden on mobile */
             .nf-glyph-rail { display: none; }
+            /* Org tree */
+            .nf-org-tree li { min-width: 140px; }
+            /* Craft controls details */
+            details summary { font-size: 10px; padding: 6px 0; }
+            /* Modals */
+            .nf-rel-web-tip { max-width: 90vw !important; }
+            /* Hint */
+            .nf-hint { font-size: 12px; margin-bottom: 10px; }
           }
           @media (max-width: 360px) {
             .nf-chapter-sidebar { width: 56px; min-width: 56px; }
@@ -15880,6 +16340,56 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-tab-bar { padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right)); }
           /* AD18: Smooth sidebar transition */
           .nf-sidebar { transition: width 0.25s cubic-bezier(0.4,0,0.2,1), min-width 0.25s cubic-bezier(0.4,0,0.2,1); }
+          
+          
+          
+          
+          /* ─── FOCUS VISIBLE — keyboard accessibility ─── */
+          .nf-chapter-item:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: -2px; }
+          .nf-polaroid:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
+          .nf-mode-btn:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
+          .nf-card:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
+          .nf-input:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: -2px; }
+          .nf-textarea:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: -2px; }
+          .nf-select:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: -2px; }
+          .nf-chat-textarea:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: -2px; }
+          [role="button"]:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; border-radius: 2px; }
+
+          /* ─── CONSISTENT DISABLED STATES ─── */
+          button:disabled, .nf-btn:disabled, .nf-btn-micro:disabled, .nf-btn-icon-sm:disabled {
+            opacity: 0.35 !important;
+            cursor: not-allowed !important;
+            pointer-events: none;
+          }
+
+          /* ─── ACCESSIBILITY: Reduced motion ─── */
+          @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+              animation-duration: 0.01ms !important;
+              animation-iteration-count: 1 !important;
+              transition-duration: 0.01ms !important;
+            }
+            .nf-editor-contenteditable { scroll-behavior: auto !important; }
+            .nf-content-scroll { scroll-behavior: auto !important; }
+            .nf-chat-messages { scroll-behavior: auto !important; }
+          }
+
+          /* ─── TOUCH DEVICE: Disable hover transforms ─── */
+          @media (hover: none) {
+            .nf-card:hover { transform: none !important; box-shadow: none !important; }
+            .nf-polaroid:hover { transform: none !important; box-shadow: none !important; }
+            .nf-btn-icon:hover { transform: none !important; }
+            .nf-toolbar-btn:hover { transform: none !important; }
+            .nf-mode-btn:hover { transform: none !important; }
+            .nf-plot-number:hover { transform: none !important; }
+            .nf-chapter-item:hover { transform: none !important; }
+            .nf-tab-btn:hover { transform: none !important; }
+            .nf-btn:hover { transform: none !important; }
+            .nf-btn-micro:hover { transform: none !important; }
+            .nf-btn-icon-sm:hover { transform: none !important; }
+            .nf-send-btn:hover { transform: none !important; }
+          }
+
           /* G12: Print stylesheet — show only editor content */
           @media print {
             .nf-root { display: block; height: auto; overflow: visible; }
@@ -16062,12 +16572,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         {confirmDialog && <ConfirmDialog message={confirmDialog.message} onConfirm={confirmDialog.onConfirm} onCancel={() => setConfirmDialog(null)} confirmLabel={confirmDialog.confirmLabel} />}
 		{flushConfirm && (
           <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.12s ease-out" }} onClick={() => setFlushConfirm(false)}>
-            <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 3, padding: "28px 32px", maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)" }}>
-              <h3 style={{ fontSize: 17, fontFamily: "var(--nf-font-display)", color: "var(--nf-accent)", marginBottom: 14, fontWeight: 500 }}>Flush All App Data</h3>
-              <p style={{ fontSize: 13, color: "var(--nf-text-dim)", lineHeight: 1.7, marginBottom: 10 }}>
+            <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 3, padding: "28px 32px", maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)" }}>
+              <h3 style={{ fontSize: 18, fontFamily: "var(--nf-font-display)", color: "var(--nf-accent)", marginBottom: 24, fontWeight: 500 }}>Flush All App Data</h3>
+              <p style={{ fontSize: 13, color: "var(--nf-text-dim)", lineHeight: 1.7, marginBottom: 20 }}>
                 This will permanently delete:
               </p>
-              <ul style={{ fontSize: 12, color: "var(--nf-text-muted)", lineHeight: 1.8, paddingLeft: 20, marginBottom: 16 }}>
+              <ul style={{ fontSize: 12, color: "var(--nf-text-muted)", lineHeight: 1.8, paddingLeft: 20, marginBottom: 26 }}>
                 <li>All projects and chapters</li>
                 <li>All characters, world entries, plot outlines, relationships</li>
                 <li>API key and all settings</li>
@@ -16089,20 +16599,20 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         {/* Universal Fill Review Modal */}
         {fillReview && (
           <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.12s ease-out" }} onClick={() => setFillReview(null)}>
-            <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: "20px 24px", maxWidth: 640, width: "95%", maxHeight: "80vh", overflow: "auto", boxShadow: "var(--nf-shadow-lg)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: "20px 24px", maxWidth: 640, width: "95%", maxHeight: "80vh", overflow: "auto", boxShadow: "var(--nf-shadow-lg)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 26 }}>
                 <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 18, fontWeight: 400, color: "var(--nf-text)" }}>Review AI Suggestions</span>
                 <button onClick={() => setFillReview(null)} className="nf-btn-icon"><Icons.X /></button>
               </div>
-              <p style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 14 }}>
+              <p style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 24 }}>
                 Check each field below. <span style={{ color: "var(--nf-accent)" }}>Orange</span> fields would modify existing content.
                 Uncheck any you don't want, then click Apply.
               </p>
               {fillReview.fields.map(f => (
-                <div key={f.key} style={{ marginBottom: 10, padding: "8px 10px", background: f.isModification ? "var(--nf-error-bg)" : "var(--nf-bg-raised)", border: `1px solid ${f.isModification ? "var(--nf-error-border)" : "var(--nf-border)"}`, borderRadius: 2 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <div key={f.key} style={{ marginBottom: 20, padding: "8px 10px", background: f.isModification ? "var(--nf-error-bg)" : "var(--nf-bg-raised)", border: `1px solid ${f.isModification ? "var(--nf-error-border)" : "var(--nf-border)"}`, borderRadius: 2 }}>
+                  <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                     <input type="checkbox" defaultChecked={!f.isModification} id={`fill-${f.key}`} style={{ accentColor: "var(--nf-accent)" }} />
-                    <label htmlFor={`fill-${f.key}`} style={{ fontSize: 10, fontWeight: 700, color: f.isModification ? "var(--nf-accent)" : "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", cursor: "pointer" }}>
+                    <label key={f.id} htmlFor={`fill-${f.key}`} style={{ fontSize: 10, fontWeight: 700, color: f.isModification ? "var(--nf-accent)" : "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", cursor: "pointer" }}>
                       {f.label} {f.isModification && "⚠ WILL MODIFY"}
                     </label>
                   </div>
@@ -16169,9 +16679,9 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         )}
 		{pdfExportMode === "menu" && (
           <div style={{ position: "fixed", inset: 0, zIndex: 9998, background: "rgba(0,0,0,0.5)", backdropFilter: "blur(4px)", display: "flex", alignItems: "center", justifyContent: "center", animation: "nf-fadeIn 0.12s ease-out" }} onClick={() => setPdfExportMode(null)}>
-            <div onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: 28, maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)", animation: "nf-pop 0.2s ease-out" }}>
+            <div role="button" tabIndex={0} onClick={e => e.stopPropagation()} style={{ background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 3, padding: 28, maxWidth: 420, width: "90%", boxShadow: "var(--nf-shadow-lg)", animation: "nf-pop 0.2s ease-out" }}>
               <div style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, marginBottom: 6, color: "var(--nf-text)", letterSpacing: "0.02em" }}>Export PDF</div>
-              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 18, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 28, lineHeight: 1.5 }}>
                 <strong style={{ color: "var(--nf-accent)" }}>Draft</strong> — includes characters, world, plot, relationships alongside chapters<br/>
                 <strong style={{ color: "var(--nf-text-dim)" }}>Publish</strong> — clean book with title page, table of contents, justified prose
               </div>

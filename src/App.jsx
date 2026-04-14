@@ -2520,7 +2520,7 @@ const ContextEngine = {
             if (surroundingBefore || surroundingAfter) {
               let ctx = `\n<rewrite_surrounding_context>`;
               if (surroundingBefore) ctx += `\n[Text before selection]: ...${surroundingBefore}`;
-              ctx += `\n[SELECTED TEXT TO REWRITE]: ${selectedText}`;
+              ctx += `\n[SELECTED TEXT TO REWRITE]: ${selectedText || ""}`;
               if (surroundingAfter) ctx += `\n[Text after selection]: ${surroundingAfter}...`;
               ctx += `\n</rewrite_surrounding_context>`;
               sections.push(ctx);
@@ -5493,7 +5493,7 @@ Derive the exterior appearance from context:
 - Weather/atmosphere clues from the scene: ${locationClues.join("; ") || "analyze the selected text"}
 
 Scene context for exterior details:
-"${selectedText}"
+"${selectedText || ""}"
 
 Generate a realistic New York City exterior that would logically surround this type of interior space.`;
   } else {
@@ -5501,7 +5501,7 @@ Generate a realistic New York City exterior that would logically surround this t
     backdropSection = `No pre-built location matches this scene. Generate the backdrop entirely from the scene text:
 
 Scene text to analyze for ALL location/environment details:
-"${selectedText}"
+"${selectedText || ""}"
 
 Location clues detected: ${locationClues.length > 0 ? locationClues.join("; ") : "Analyze the passage for any spatial, architectural, or environmental details — materials, lighting, weather, surfaces, objects in frame."}
 
@@ -6045,7 +6045,7 @@ const TabAIChat = memo(({ project, settings, tabName, tabContext, placeholder, o
       const history = historySlice.map(m => ({ role: m.role, content: m.content }));
 
       const allMessages = [
-        { role: "system", content: `You are an expert fiction writing assistant. You are helping with ${tabContext}.
+        { role: "system", content: `You are an expert fiction writing assistant. You are helping with ${tabContext || ""}.
 
 ${contextInfo || ""}
 
@@ -6063,7 +6063,11 @@ RULES:
 - Be creative, specific, genre-aware.
 - When filling in empty fields, ONLY fill fields listed as [Empty]. Do NOT overwrite existing content.
 - Make sure suggestions are consistent with existing characters and world.
-- Consider the current chapter position when making suggestions — what's appropriate at this point in the story.` },
+- Consider the current chapter position when making suggestions — what's appropriate at this point in the story.
+- IMPORTANT for WORLD entries: ALWAYS set the 'category' field first (Location, Religion, Magic System, Technology, Culture, History, Flora / Fauna, Language, Rule / Law, Organization) — then fill the category-specific fields.
+- If the project has motifs/symbols, weave them naturally into suggestions.
+- If the project tracks reader knowledge, respect what the reader knows vs. what characters know — use dramatic irony.
+- For chapter craft: consider narrativeDistance (how close the camera is), sensoryPalette (dominant senses), and subtextNotes (what's unsaid) when making suggestions.` },
         ...history,
         { role: "user", content: msgText },
       ];
@@ -6137,7 +6141,7 @@ RULES:
       setMessages(prev => [...prev, { id: uid(), role: "assistant", content, hasAutoFill }]);
     } catch (err) {
       if (err.name !== "AbortError") {
-        setMessages(prev => [...prev, { id: uid(), role: "assistant", content: `Error: ${err.message}`, isError: true }]);
+        setMessages(prev => [...prev, { id: uid(), role: "assistant", content: `Error: ${err?.message || "Unknown error"}`, isError: true }]);
       }
     }
     abortRef.current = null;
@@ -6217,7 +6221,7 @@ RULES:
     switch (tabName) {
       case "characters": {
         const actions = [
-          { label: "✦ Generate character", msg: "Generate a compelling character for my story considering genre, themes, and existing cast. Include ALL fields: name, role, gender, age, pronouns, orientation, aliases, occupation, height, build, tags, appearance, personality, backstory, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, allegiances, arc, canonNotes." },
+          { label: "✦ Generate character", msg: "Generate a compelling character for my story considering genre, themes, and existing cast. Include ALL fields: name, role, gender, age, pronouns, orientation, aliases, occupation, height, build, tags, appearance, personality, backstory, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, allegiances, arc, canonNotes. Return as structured JSON." },
         ];
         // D18: Contextual fill — reference which fields are actually empty
         if (editingEntityId && project?.characters) {
@@ -6237,7 +6241,7 @@ RULES:
         return actions;
       }
       case "world": return [
-        { label: "✦ Generate entry", msg: "Generate a world-building entry that fits my story's genre and existing world. IMPORTANT: Set the 'category' field to one of: Location, Rule / Law, Culture, Magic System, Technology, History, Flora / Fauna, Language, Religion, Organization. Then include the category-specific fields. LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies. MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes. TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations. CULTURE: values, customs, socialHierarchy, taboos. HISTORY: historyDate, historyFigures, historyCauses, historyConsequences. Always include: name, category, description, keywords." },
+        { label: "✦ Generate entry", msg: "Generate a world-building entry that fits my story's genre and existing world. IMPORTANT: Set the 'category' field to one of: Location, Rule / Law, Culture, Magic System, Technology, History, Flora / Fauna, Language, Religion, Organization. Then include the category-specific fields. LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies. MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes. TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations. CULTURE: values, customs, socialHierarchy, taboos. HISTORY: historyDate, historyFigures, historyCauses, historyConsequences. Always include: name, category, description, keywords. Return as structured JSON." },
         { label: "Expand world", msg: `Suggest 3 new entries that would deepen my world${project?.worldBuilding?.length ? ` (I already have ${project.worldBuilding.length} entries)` : ""}. For each, include all relevant fields. Explain why each matters for the story.` },
         { label: "Build organization", msg: "Generate a detailed Organization entry with name, category (Organization), description, orgPurpose, and an orgHierarchy with 3-5 positions including titles, roles, and which existing characters could fill them. Return structured JSON." },
       ];
@@ -6246,7 +6250,7 @@ RULES:
         const existingChNums = (project?.plotOutline || []).map(pl => pl.chapter || 0);
         const nextCh = existingChNums.length > 0 ? Math.max(...existingChNums) + 1 : 1;
         return [
-          { label: `✦ Outline Ch${nextCh}`, msg: `Generate a chapter outline for Chapter ${nextCh}. Include: chapter (number), title, summary, beats (array of {title, description}), sceneType, pov, date (story date if applicable), and characters (array of character names who appear). Consider the story's timeline and existing plot entries.` },
+          { label: `✦ Outline Ch${nextCh}`, msg: `Generate a chapter outline for Chapter ${nextCh}. Include: chapter (number), title, summary, beats (array of {title, description}), sceneType, pov, date (story date if applicable), and characters (array of character names who appear). Consider the story's timeline and existing plot entries. Return as structured JSON.` },
           { label: "Full arc plan", msg: "Suggest a complete story arc considering what's been written so far. Map turning points, climax, resolution with specific emotional beats." },
         ];
       }
@@ -6914,6 +6918,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
           max_tokens: 200, temperature: 0.85,
         }),
       });
+      if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
       const data = await res.json();
       const raw = (stripThinkingTokens(data.choices?.[0]?.message?.content || "")).trim();
       const sm = raw.match(/SCORE:\s*(\d+)/i);
@@ -8161,17 +8166,26 @@ export default function NovelForge() {
         if (p.length) {
           // H4: Data migration — ensure all characters have fields from newer schema versions
           const migrated = p.map(proj => {
-			// Ensure chapters have worldView field
+			// Ensure chapters have all new fields
             const chapters = (proj.chapters || []).map(ch => ({
 			  linkedPlotId: "",
               worldView: "",
+              narrativeDistance: "", sensoryPalette: "", subtextNotes: "",
+              tensionLevel: 5, chapterEndHookScore: 0, chapterEndHookNotes: "",
               ...ch,
             }));
             const chars = (proj.characters || []).map(c => ({
               aliases: "", canonNotes: "", status: "alive", statusChangedChapter: 0,
               firstAppearanceChapter: 0, backstoryRevealChapter: 0, image: "", lookAlike: "",
+              isBulk: false, bulkCount: 0, bulkDescription: "",
+              firstAppearanceDate: "", backstoryRevealDate: "", secretRevealDate: "", statusChangedDate: "",
+              voiceScore: 0, voiceNotes: "",
               ...c, // existing data overrides defaults
             }));
+            // Ensure project-level literary fields
+            if (!proj.motifs) proj.motifs = [];
+            if (!proj.thematicArgument) proj.thematicArgument = { thesis: "", antithesis: "", synthesis: "", embodiedBy: {} };
+            if (!proj.readerKnowledge) proj.readerKnowledge = [];
             // FIX: Migrate name-based relationship char1/char2 to ID-based
             const relationships = (proj.relationships || []).map(r => {
               const migrated_r = {
@@ -8539,6 +8553,7 @@ export default function NovelForge() {
           max_tokens: 2500, temperature: 0.85,
         }),
       });
+      if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
       const data = await res.json();
       let content = stripThinkingTokens(data.choices?.[0]?.message?.content || "").trim();
       content = content.replace(/^```json?\s*/i, "").replace(/\s*```$/i, "").trim();
@@ -8976,6 +8991,7 @@ export default function NovelForge() {
         }),
         signal: controller.signal,
       });
+      if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
       if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error?.message || `API error ${res.status}`); }
       return await res.json();
     });
@@ -9046,6 +9062,22 @@ export default function NovelForge() {
 ${craftFocus}
 </craft_standards>`;
 
+    // Inject chapter-level craft controls
+    let craftControls = "";
+    if (currentChapter?.narrativeDistance) {
+      const ndGuides = { cinematic: "Write from OUTSIDE — describe what can be observed. Minimal interiority.", "close-third": "Stay near the POV character's thoughts with some narrative distance.", "deep-interiority": "DEEP inside the POV character's head — stream of consciousness, raw sensation." };
+      craftControls += `\nNARRATIVE DISTANCE: ${ndGuides[currentChapter.narrativeDistance] || currentChapter.narrativeDistance}`;
+    }
+    if (currentChapter?.sensoryPalette) craftControls += `\nSENSORY PALETTE: ${currentChapter.sensoryPalette} — weight descriptions toward these.`;
+    if (currentChapter?.subtextNotes) craftControls += `\nSUBTEXT: ${currentChapter.subtextNotes} — what's happening beneath the surface. Show, don't tell.`;
+    if (currentChapter?.tensionLevel && currentChapter.tensionLevel !== 5) craftControls += `\nTENSION LEVEL: ${currentChapter.tensionLevel}/10 — ${currentChapter.tensionLevel >= 8 ? "high stakes, urgent pacing" : currentChapter.tensionLevel <= 3 ? "calm, contemplative, breathing room" : "moderate tension"}`;
+    if (project?.motifs?.length > 0) {
+      const named = project.motifs.filter(m => m.name);
+      if (named.length) craftControls += `\nMOTIFS to weave: ${named.map(m => `${m.name} (${m.meaning || "?"})`).join(", ")}`;
+    }
+    if (project?.thematicArgument?.thesis) craftControls += `\nTHEMATIC ARGUMENT: "${project.thematicArgument.thesis}"${project.thematicArgument.antithesis ? ` vs "${project.thematicArgument.antithesis}"` : ""}`;
+    if (craftControls) craftControls = `\n<chapter_craft_controls>${craftControls}\n</chapter_craft_controls>`;
+
     // F10: User's custom directives placed AFTER craft standards for higher priority
     // with explicit override language
     const customDirectives = settings.systemPrompt
@@ -9056,7 +9088,7 @@ ${craftFocus}
     const novelContext = ContextEngine.buildForMode(project, activeChapterIdx, currentSceneNotes, mode, null, settings.modelContextWindow);
 
     // F10: User directives sandwiched between context (high position) and actual content
-    return `${directives}\n\n${novelContext}${customDirectives}`;
+    return `${directives}${craftControls}\n\n${novelContext}${customDirectives}`;
   }, [project, activeChapterIdx, settings.systemPrompt, settings.modelContextWindow]);
 
   // F2/F7/F14: Mode prompts now adapt to scene type and give clearer instructions
@@ -9194,16 +9226,16 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
       // F12: Mode-specific guidance for selected text
       if (selectedText) {
         if (genMode === "rewrite") {
-          contextualUserMsg += `\n\n<text_to_rewrite>\n${selectedText}\n</text_to_rewrite>`;
+          contextualUserMsg += `\n\n<text_to_rewrite>\n${selectedText || ""}\n</text_to_rewrite>`;
         } else if (genMode === "continue") {
           // FIX 2.1: Override the continue prompt — the selected text IS the continuation point
-          contextualUserMsg = `[MODE: CONTINUE]\nContinue writing from EXACTLY where this selected passage ends. Match style, distance, register. Do not repeat the selected text.\n\n<continue_from_here>\n${selectedText}\n</continue_from_here>`;
+          contextualUserMsg = `[MODE: CONTINUE]\nContinue writing from EXACTLY where this selected passage ends. Match style, distance, register. Do not repeat the selected text.\n\n<continue_from_here>\n${selectedText || ""}\n</continue_from_here>`;
         } else if (genMode === "brainstorm") {
-          contextualUserMsg += `\n\n<selected_reference>\nThe author wants brainstorm ideas branching from this passage:\n${selectedText}\n</selected_reference>`;
+          contextualUserMsg += `\n\n<selected_reference>\nThe author wants brainstorm ideas branching from this passage:\n${selectedText || ""}\n</selected_reference>`;
         } else if (genMode === "dialogue") {
-          contextualUserMsg += `\n\n<selected_reference>\nThe author wants dialogue continuing from or responding to this passage:\n${selectedText}\n</selected_reference>`;
+          contextualUserMsg += `\n\n<selected_reference>\nThe author wants dialogue continuing from or responding to this passage:\n${selectedText || ""}\n</selected_reference>`;
         } else {
-          contextualUserMsg += `\n\n<selected_reference>\nThe author has highlighted this passage for context:\n${selectedText}\n</selected_reference>`;
+          contextualUserMsg += `\n\n<selected_reference>\nThe author has highlighted this passage for context:\n${selectedText || ""}\n</selected_reference>`;
         }
       }
 
@@ -9221,7 +9253,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
         m.role === "assistant"
       ).slice(-2).map(m => ({
         role: m.role,
-        content: `[From Ch${(m.chapterIdx || 0) + 1} ${m.mode}]: ${m.content.slice(0, 500)}${m.content.length > 500 ? "..." : ""}`
+        content: `[From Ch${(m.chapterIdx || 0) + 1} ${m?.mode || "continue"}]: ${m.content.slice(0, 500)}${m.content.length > 500 ? "..." : ""}`
       }));
       const history = [
         ...crossChapterMsgs,
@@ -9279,7 +9311,7 @@ Then 2-3 sentences describing the specific scene idea, character actions, and em
         }
         showToast("Stopped", "info");
       } else {
-        setChatMessages(prev => [...prev, { id: uid(), role: "assistant", content: `Error: ${_formatApiError(err)}`, isError: true }]);
+        setChatMessages(prev => [...prev, { id: uid(), role: "assistant", content: `Error: ${_formatApiError?.(err) || err?.message || "API error"}`, isError: true }]);
       }
     }
     setStreamingContent(""); streamingContentRef.current = "";
@@ -9674,8 +9706,8 @@ const appendToChapter = useCallback((text) => {
       const c2Desc = `${char2.name} (${char2.role}): ${char2.personality || "no personality set"}. Voice: ${char2.speechPattern || "default"}.`;
       const scenarioText = scenario ? `\nScenario: ${scenario}` : "";
       const result = await callOpenRouter([
-        { role: "system", content: `You are writing a non-canon character voice test. Write a ~500-word interaction between these two characters in a void/"white room" setting with the specified tension. Focus on distinct dialogue voices, body language, and internal states. This is for voice testing only — it doesn't affect the story.\n\n${c1Desc || "no description"}\n${c2Desc}` },
-        { role: "user", content: `Starting tension: ${tension || "none"}.${scenarioText}\n\nWrite the scene. Make their voices distinct and authentic.` },
+        { role: "system", content: `You are writing a non-canon character voice test. Write a ~500-word interaction between these two characters in a void/"white room" setting with the specified tension. Focus on distinct dialogue voices, body language, and internal states. This is for voice testing only — it doesn't affect the story.\n\n${c1Desc || "no description"}\n${c2Desc || ""}` },
+        { role: "user", content: `Starting tension: ${tension || "none"}.${scenarioText || ""}\n\nWrite the scene. Make their voices distinct and authentic.` },
       ], { maxTokens: 1200, temperature: 0.9 });
       setWhiteRoom(prev => ({ ...prev, result, isGenerating: false }));
     } catch (e) {
@@ -9704,8 +9736,8 @@ const appendToChapter = useCallback((text) => {
     showToast(`Flipping perspective to ${flipTo?.name || "unknown"}...`, "info");
     try {
       const result = await callOpenRouter([
-        { role: "system", content: `You are rewriting a passage from a different character's internal perspective. Preserve the same scene events but shift entirely into ${flipTo?.name || "unknown"}'s psychological state, thoughts, and sensory experience.\n\n${flipTo?.name || "unknown"} (${flipTo.role}): ${flipTo.personality || ""}. ${flipTo.desires ? `Desires: ${flipTo.desires}` : ""}` },
-        { role: "user", content: `Rewrite this passage entirely from ${flipTo?.name || "unknown"}'s internal perspective (currently written from ${currentPov.name}'s perspective):\n\n${selectedText}` },
+        { role: "system", content: `You are rewriting a passage from a different character's internal perspective. Preserve the same scene events but shift entirely into ${flipTo?.name || "unknown"}'s psychological state, thoughts, and sensory experience.\n\n${flipTo?.name || "unknown"} (${flipTo?.role || "character"}): ${flipTo.personality || ""}. ${flipTo.desires ? `Desires: ${flipTo.desires}` : ""}` },
+        { role: "user", content: `Rewrite this passage entirely from ${flipTo?.name || "unknown"}'s internal perspective (currently written from ${currentPov?.name || "the character"}'s perspective):\n\n${selectedText || ""}` },
       ], { maxTokens: 10000, temperature: 0.8 });
       if (result) {
         setDiffReview({
@@ -9755,7 +9787,7 @@ const appendToChapter = useCallback((text) => {
       }
 
       // E7: Continuity-focused summary prompt
-      const novelContext = `Novel: "${project.title}" (${project.genre || "fiction"})${charContext}`;
+      const novelContext = `Novel: "${project.title}" (${project.genre || "fiction"})${charContext || ""}`;
 
       // Look up the plot entry date for this chapter
       const plotEntryForSummary = ContextEngine._plotEntryForChapter(project, idx);
@@ -9775,7 +9807,7 @@ Write a detailed summary that a writing AI can use to maintain consistency in fu
 - Unresolved threads and cliffhangers that future chapters must address
 
 Be specific with character names. Write as a factual reference, not a story recap.` },
-        { role: "user", content: `Summarize Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""}: "${ch.title || 'Untitled'}":\n\n${sample}` },
+        { role: "user", content: `Summarize Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""}: "${ch.title || 'Untitled'}":\n\n${sample || ""}` },
       ], { maxTokens: 10000, temperature: 0.3 });
 
       // E1: Track when summary was generated for stale detection
@@ -9842,7 +9874,7 @@ For each character who changed, output:
 
 Fields you can suggest: desires, shortTermGoals, longTermGoals, arc, status, statusChangedChapter, canonNotes, backstory, speechPattern, internalConflict, externalConflict, allegiances, secrets.
 If no updates are needed, respond "No character updates needed."` },
-            { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nCurrent character profiles:\n${charContext}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}` },
+            { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary || ""}\n\nCurrent character profiles:\n${charContext || ""}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}` },
           ], { maxTokens: 10000, temperature: 0.4 });
 
           if (suggestions && !suggestions.toLowerCase().includes("no character updates needed")) {
@@ -9890,7 +9922,7 @@ If no updates are needed, respond "No character updates needed."` },
               // Fallback: show raw text if JSON parsing failed but AI returned content
               setChatMessages(prev => [...prev, {
                 id: uid(), role: "assistant", mode: "summarize", chapterIdx: idx,
-                content: `**Character Update Suggestions** (from Ch${chNum || 1} summary):\n\n${suggestions}\n\n*Apply these manually in the Characters tab.*`,
+                content: `**Character Update Suggestions** (from Ch${chNum || 1} summary):\n\n${suggestions || ""}\n\n*Apply these manually in the Characters tab.*`,
               }]);
               showToast("Character suggestions ready — check the AI panel", "info");
             }
@@ -9960,7 +9992,7 @@ Example output:
 \`\`\`
 
 If no relationship changes, respond "No relationship updates needed."` },
-              { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
+              { role: "user", content: `Chapter ${chNum || 1}${chapterDate ? ` (${chapterDate})` : ""} summary: ${summary || ""}\n\nChapter number: ${chNum || 1}${chapterDate ? `\nStory date: ${chapterDate}` : ""}\nCharacters in scene: ${mentionedChars.map(c => c.name).join(", ")}` },
             ], { maxTokens: 10000, temperature: 0.5 });
 
             if (relSuggestions && !relSuggestions.toLowerCase().includes("no relationship updates needed")) {
@@ -10303,7 +10335,7 @@ CURRENT CHAPTER (Ch${currentChNum}: "${ch.title || "Untitled"}"):
 ${plain.length > 18000 ? plain.slice(0, 9000) + "\n[... middle omitted ...]\n" + plain.slice(-9000) : plain}
 
 CHARACTERS:
-${charContext}
+${charContext || ""}
 
 WORLD ENTRIES (locations — note which have uploaded reference images):
 ${worldContext}
@@ -11157,6 +11189,11 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     }
 
     updateProject({ worldBuilding: newWorld });
+    // Auto-expand newly added entries so user can see the fields
+    if (added > 0) {
+      const newIds = newWorld.slice(-added).map(w => w.id);
+      setExpandedWorldIds(prev => new Set([...prev, ...newIds]));
+    }
     const parts = [added && `${added} added`, updated && `${updated} updated`].filter(Boolean);
     showToast(`World entries: ${parts.join(", ")}`, "success");
   }, [project, updateProject, showToast]);
@@ -11222,6 +11259,10 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     }
 
     updateProject({ plotOutline: currentOutline });
+    if (added > 0) {
+      const newIds = currentOutline.slice(-added).map(p => p.id);
+      setExpandedPlotIds(prev => new Set([...prev, ...newIds]));
+    }
     const parts = [added && `${added} added`, updated && `${updated} updated`].filter(Boolean);
     showToast(`Plot entries: ${parts.join(", ")}`, "success");
   }, [project, updateProject, showToast]);
@@ -11275,6 +11316,8 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     updateProject({ relationships: newRels });
 
     if (addedCount > 0) {
+      const newIds = newRels.slice(-addedCount).map(r => r.id);
+      setExpandedRelIds(prev => new Set([...prev, ...newIds]));
       showToast(`${addedCount} relationship${addedCount !== 1 ? "s" : ""} added`, "success");
     } else {
       const skippedCount = items.length;
@@ -13196,7 +13239,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               </div>
             </div>
 
-            {/* Character Portrait — Polaroid style with AI generation and upload */}
+            {/* Character Portrait — different for individuals vs groups */}
+            {!editingChar.isBulk ? (
             <div className="nf-char-section" style={{ display: "flex", gap: 20, alignItems: "start" }}>
               <div className="nf-polaroid" style={{ width: 140, flexShrink: 0, cursor: "default" }}>
                 <div style={{
@@ -13241,6 +13285,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           temperature: 0.8, max_tokens: 4096,
                         }),
                       });
+                      if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                       const data = await res.json();
                       const message = data.choices?.[0]?.message;
                       let imageUrl = null;
@@ -13285,6 +13330,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 </div>
               </div>
             </div>
+            ) : null}
 
             {/* D4: Section — Identity */}
             {editingChar.isBulk ? (
@@ -13939,6 +13985,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
                                         body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: `Create a simple, clean logo/emblem/crest for an organization called "${item?.name || "unnamed"}". ${item.orgPurpose ? `Purpose: ${item.orgPurpose}. ` : ""}Style: minimalist Japandi aesthetic, clean lines, muted earth tones, on a plain dark background. Square format, icon-only, no text.` }], modalities: ["image", "text"], temperature: 0.8, max_tokens: 4096 }),
                                       });
+                                      if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                       const data = await res.json();
                                       const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
                                       if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: img } : it) }); showToast("Logo generated", "success"); }
@@ -13970,7 +14017,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                           const members = item.orgHierarchy.filter(p => p.charId).map(p => { const ch = (project?.characters || []).find(c => c.id === p.charId); if (!ch || ch.isBulk) return null; return { name: ch.name, role: p.name, appearance: ch.appearance || "", lookAlike: ch.lookAlike || "", gender: ch.gender || "", build: ch.build || "" }; }).filter(Boolean);
                                           if (!members.length) { showToast("No non-bulk members", "error"); return; }
                                           const memberDescs = members.map(m => `- ${m.name} (${m.role}): ${m.appearance || "no desc"}${m.lookAlike ? ` [looks like ${m.lookAlike}]` : ""}`).join("\n");
-                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: settings.model, messages: [{ role: "system", content: "Create a COMPLETE image generation prompt for a formal group portrait. Every person fully described. Output ONLY the prompt." }, { role: "user", content: `Group photo for "${item?.name || "unnamed"}".\nMembers:\n${memberDescs}\n\nFormal group portrait, higher ranks center/front, appropriate setting.` }], max_tokens: 1500, temperature: 0.8 }) });
+                                          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: settings.model, messages: [{ role: "system", content: "Create a COMPLETE image generation prompt for a formal group portrait. Every person fully described. Output ONLY the prompt." }, { role: "user", content: `Group photo for "${item?.name || "unnamed"}".\nMembers:\n${memberDescs || ""}\n\nFormal group portrait, higher ranks center/front, appropriate setting.` }], max_tokens: 1500, temperature: 0.8 }) });
+                                          if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                           const data = await res.json();
                                           const prompt = stripThinkingTokens(data.choices?.[0]?.message?.content || "").trim();
                                           if (prompt) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhotoPrompt: prompt } : it) }); showToast("Prompt ready — click Render", "success"); }
@@ -13980,6 +14028,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                         showToast("Rendering...", "info");
                                         try {
                                           const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: item.orgGroupPhotoPrompt }], modalities: ["image", "text"], temperature: 0.8, max_tokens: 4096 }) });
+                                          if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                           const data = await res.json();
                                           const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
                                           if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: img } : it) }); showToast("Photo rendered", "success"); }
@@ -14318,6 +14367,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                                   temperature: 0.8, max_tokens: 4096,
                                                 }),
                                               });
+                                              if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                               const data = await res.json();
                                               const message = data.choices?.[0]?.message;
                                               let imageUrl = null;

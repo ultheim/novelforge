@@ -707,6 +707,9 @@ const Icons = {
   Map: mkIcon(<><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></>),
   Pen: mkIcon(<><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></>),
   Brain: mkIcon(<><path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.58.67 3 1.74 4.01L4 14l2.5 1L5 18l3 2 1.5-3 2 1V22h1V18.07a5.5 5.5 0 0 0 0-11.14V2z"/><path d="M14.5 2A5.5 5.5 0 0 1 20 7.5c0 1.58-.67 3-1.74 4.01L20 14l-2.5 1L19 18l-3 2-1.5-3-2 1V22h-1V18.07"/></>),
+  Heart: mkIcon(<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>),
+  Leaf: mkIcon(<><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19.2 2.96c1.72 6.97-5.9 11.66-12.2 11.87V20z"/><path d="M2 21c0-3 1.85-5.36 5.08-6"/></>),
+  Image: mkIcon(<><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></>),
   Settings: mkIcon(<><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></>),
   Send: mkIcon(<><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>),
   Plus: mkIcon(<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>, 16),
@@ -943,6 +946,60 @@ const renderMarkdown = (text) => {
 // H1: Memoization cache for rendered markdown
 const _mdCache = new Map();
 const _MD_CACHE_MAX = 100;
+
+// Deprecated AI-returned fields — these get stripped before being stored.
+// Kept at module scope (not inside the component) so it's available for all handlers.
+const DEPRECATED_AI_FIELDS = new Set([
+  // Old chapter-number fields (replaced by booleans)
+  "backstoryRevealChapter", "backstoryRevealDate",
+  "secretRevealChapter", "secretRevealDate",
+  "firstAppearanceChapter", "firstAppearanceDate",
+  "statusChangedChapter", "statusChangedDate",
+  "chapterEndHookNotes",
+  // World-level deprecated
+  "introducedInChapter", "introducedInDate",
+  // Relationship-level deprecated
+  "meetsInChapter", "meetsInDate",
+  // Plot-level deprecated (date ranges replaced by 'date')
+  "chapterDate", "chapterStartDate", "chapterEndDate",
+  // Misc AI-hallucinated fields
+  "id", // AI should never set its own ID
+  "createdAt", "updatedAt", "lastModified",
+  "order", "index", "position", // ordering handled by array index
+  "deleted", "archived", "hidden", // never storage-level booleans
+]);
+
+// Normalize ANY value returned by an AI into a clean string.
+// This prevents "[object Object]" bugs when AI returns nested objects/arrays
+// where the schema expected a string. Handles: string, number, boolean, array of primitives,
+// array of objects (serializes intelligently), nested objects (flattens), and more.
+const normalizeAiValue = (v) => {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) {
+    // Array of primitives → comma join
+    if (v.every(x => typeof x === "string" || typeof x === "number" || typeof x === "boolean")) {
+      return v.filter(x => x !== null && x !== undefined && x !== "").join(", ");
+    }
+    // Array of objects → flatten each, join with newlines
+    return v.map(x => normalizeAiValue(x)).filter(Boolean).join("\n");
+  }
+  if (typeof v === "object") {
+    // Object → "key: value" pairs on separate lines
+    const entries = Object.entries(v)
+      .filter(([, val]) => val !== null && val !== undefined && val !== "")
+      .map(([k, val]) => {
+        const label = k.replace(/([A-Z])/g, " $1").replace(/^./, s => s.toUpperCase()).trim();
+        const valStr = normalizeAiValue(val);
+        return valStr ? `${label}: ${valStr}` : "";
+      })
+      .filter(Boolean);
+    return entries.join("\n");
+  }
+  return String(v);
+};
+
 // JSON repair for truncated AI responses. Tries to close open braces/brackets
 // so that truncated max_tokens responses still parse.
 const tryRepairJson = (str) => {
@@ -2869,6 +2926,7 @@ const ContextEngine = {
             parts.push(`\nOther characters:`);
             others.forEach(c => {
               let line = `  • ${c.name} (${c.role})`;
+              if (c.isBulk) line += ` [BULK GROUP × ${c.bulkCount || "many"}]`;
               if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
               parts.push(line);
             });
@@ -2877,6 +2935,7 @@ const ContextEngine = {
           parts.push(`\nExisting characters:`);
           project.characters.forEach(c => {
             let line = `  • ${c.name} (${c.role})`;
+            if (c.isBulk) line += ` [BULK GROUP × ${c.bulkCount || "many"}]`;
             if (c.personality) line += ` — ${_truncateAtBoundary(c.personality, 1000)}`;
             parts.push(line);
           });
@@ -2906,6 +2965,18 @@ const ContextEngine = {
             }
           });
           parts.push(`</organizations>`);
+        }
+        // ─── Location Context for Characters (so AI can link occupations to specific locations) ───
+        const locationEntries = (project.worldBuilding || []).filter(w => w.category === "Location" && w.name);
+        if (locationEntries.length > 0) {
+          parts.push(`\n<locations>`);
+          locationEntries.forEach(loc => {
+            let line = `  • ${loc.name}`;
+            if (loc.description) line += `: ${_truncateAtBoundary(loc.description, 150)}`;
+            parts.push(line);
+          });
+          parts.push(`  [When creating a character, if their occupation or backstory ties to one of these locations, reference it by name in backstory/canonNotes/allegiances.]`);
+          parts.push(`</locations>`);
         }
         break;
       }
@@ -2965,7 +3036,10 @@ const ContextEngine = {
               if (w.coreBeliefs) line += ` | Beliefs: ${_truncateAtBoundary(w.coreBeliefs, 200)}`;
               if (w.rituals) line += ` | Rituals: ${w.rituals}`;
             }
-            if (w.orgPurpose) line += ` | Purpose: ${_truncateAtBoundary(w.orgPurpose, 200)}`;
+            // Organization-specific: only surface for Organization entries
+            if (w.category === "Organization") {
+              if (w.orgPurpose) line += ` | Purpose: ${_truncateAtBoundary(w.orgPurpose, 200)}`;
+            }
             // Include frequent characters by name
             if (Array.isArray(w.frequentCharacters) && w.frequentCharacters.length > 0 && project.characters) {
               const charNames = w.frequentCharacters.map(cid => {
@@ -2974,8 +3048,8 @@ const ContextEngine = {
               }).filter(n => n !== "?");
               if (charNames.length) line += ` | Characters here: ${charNames.join(", ")}`;
             }
-            // Include org hierarchy summary
-            if (Array.isArray(w.orgHierarchy) && w.orgHierarchy.length > 0 && project.characters) {
+            // Include org hierarchy summary — ONLY for Organizations
+            if (w.category === "Organization" && Array.isArray(w.orgHierarchy) && w.orgHierarchy.length > 0 && project.characters) {
               const hierParts = w.orgHierarchy.map(pos => {
                 let h = pos.name || "Unnamed";
                 if (pos.role) h += ` (${pos.role})`;
@@ -3024,6 +3098,51 @@ const ContextEngine = {
         break;
       }
       case "plot": {
+        // If focused on a specific plot entry, highlight it first
+        if (editingEntity && project.plotOutline?.length) {
+          const focus = project.plotOutline.find(pl => pl.id === editingEntity);
+          if (focus) {
+            parts.push(`\n<currently_editing_plot_entry chapter="${focus.chapter || "?"}">`);
+            if (focus.title) parts.push(`  Title: ${focus.title}`);
+            if (focus.summary) parts.push(`  Summary: ${focus.summary}`);
+            if (focus.pov) parts.push(`  POV: ${focus.pov}`);
+            if (focus.sceneType) parts.push(`  Scene type: ${focus.sceneType}`);
+            if (focus.date) parts.push(`  Story date: ${focus.date}`);
+            if (focus.narrativeDistance) parts.push(`  Narrative distance: ${focus.narrativeDistance}`);
+            if (focus.sensoryPalette) parts.push(`  Sensory palette: ${focus.sensoryPalette}`);
+            if (focus.subtextNotes) parts.push(`  Subtext: ${focus.subtextNotes}`);
+            if (typeof focus.tensionLevel === "number") parts.push(`  Tension level: ${focus.tensionLevel}/10`);
+            if (focus.beats) {
+              const beatsText = Array.isArray(focus.beats)
+                ? focus.beats.map(b => `    - ${b.title || "Beat"}: ${b.description || ""}`).join("\n")
+                : focus.beats;
+              parts.push(`  Beats:\n${beatsText}`);
+            }
+            if (Array.isArray(focus.characters) && focus.characters.length) {
+              const names = focus.characters.map(cid => {
+                const ch = (project.characters || []).find(c => c.id === cid);
+                return ch?.name;
+              }).filter(Boolean);
+              if (names.length) parts.push(`  Characters: ${names.join(", ")}`);
+            }
+            if (Array.isArray(focus.locations) && focus.locations.length) {
+              const names = focus.locations.map(lid => {
+                const loc = (project.worldBuilding || []).find(w => w.id === lid);
+                return loc?.name;
+              }).filter(Boolean);
+              if (names.length) parts.push(`  Locations: ${names.join(", ")}`);
+            }
+            // List empty fields the AI should fill
+            const emptyPlotFields = [];
+            ["title","summary","pov","sceneType","date","narrativeDistance","sensoryPalette","subtextNotes"].forEach(k => {
+              if (!focus[k]) emptyPlotFields.push(k);
+            });
+            if (!Array.isArray(focus.beats) || focus.beats.length === 0) emptyPlotFields.push("beats");
+            if (!Array.isArray(focus.characters) || focus.characters.length === 0) emptyPlotFields.push("characters");
+            if (emptyPlotFields.length) parts.push(`  [Empty fields needing content: ${emptyPlotFields.join(", ")}]`);
+            parts.push(`</currently_editing_plot_entry>`);
+          }
+        }
         // G4: Include chapter content summary for plot-aware suggestions
         if (project.plotOutline?.length) {
           parts.push(`\n<existing_plot>`);
@@ -3776,11 +3895,22 @@ const createDefaultProject = () => ({
   motifs: [], // [{id, name, meaning, evolution, appearances: [{chapter, context}]}]
   thematicArgument: { thesis: "", antithesis: "", synthesis: "", embodiedBy: {} }, // {charId: "thesis"|"antithesis"}
   readerKnowledge: [], // [{id, fact, revealedInChapter, revealedDate, knownBy: [charIds], description}]
+  // ─── FUN / MENTAL-HEALTH FIELDS ───
+  coverImage: "", // Base64 data URL or path — the novel's cover
+  sentenceGarden: [], // [{id, text, chapterIdx, chapterTitle, savedAt, note}]
+  writingJournal: {}, // { [chapterIdx]: { note, mood, savedAt } } — private per-chapter diary
+  firstLines: [], // [{chapterIdx, line, savedAt}] — auto-collected on chapter save
+  characterLetters: [], // [{id, charId, chapterIdx, content, generatedAt}] — AI letters from characters
+  sessionLogs: [], // [{id, startedAt, endedAt, wordsDelta, ambient, mood, intention}]
+  thinkingPad: "", // Freeform scratch space per project
   chapters: [{ id: uid(), title: "Chapter 1", content: "", summary: "", notes: "", sceneNotes: "", pov: "", summaryGeneratedAt: "", worldView: "", linkedPlotId: "",
     // ─── CHAPTER CRAFT FIELDS (author-set) ───
     narrativeDistance: "", sensoryPalette: "", subtextNotes: "", tensionLevel: 5,
     // ─── AI-MAINTAINED CHAPTER STATE ───
     chapterEndHookScore: 0, chapterMomentum: 0, emotionalAftertaste: "",
+    // ─── FUN FIELDS ───
+    bannerImage: "", // Chapter header banner
+    toneKey: "", // "melancholy"|"hopeful"|"dread"|"tender"|"wild"|""
   }],
   createdAt: new Date().toISOString(),
   wordGoal: 0,
@@ -3830,6 +3960,9 @@ const createDefaultCharacter = () => ({
   obligationsOwed: "",
   knowledgeState: "",
   lastUpdatedChapter: 0,
+  // ─── FUN: Multi-image mood board ───
+  moodBoard: [], // [{id, data, caption, addedAt}] — multiple reference images
+  signatureItemImages: [], // [{id, itemName, data, addedAt}]
 });
 
 // Create a bulk character group (e.g. "Police Officers", "Villagers")
@@ -4467,7 +4600,7 @@ const FindReplaceModal = memo(({ project, onClose, onUpdate }) => {
               {matches.map((m, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 12, color: "var(--nf-text)", borderBottom: i < matches.length - 1 ? "1px solid var(--nf-border)" : "none" }}>
                   <span>
-                    <span style={{ color: "var(--nf-text-muted)", fontSize: 10, marginRight: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>{m.kind}</span>
+                    <span style={{ color: "var(--nf-text-muted)", marginRight: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>{m.kind}</span>
                     {m.title || "(untitled)"}
                   </span>
                   <span style={{ color: "var(--nf-accent-2)", fontFamily: "var(--nf-font-mono)", fontSize: 11 }}>{m.count}×</span>
@@ -4483,6 +4616,743 @@ const FindReplaceModal = memo(({ project, onClose, onUpdate }) => {
     </div>
   );
 });
+
+// ─── SENTENCE GARDEN MODAL ───
+// A keepsake viewer for your favorite sentences. Not a list — visually a garden.
+// ─── MULTI-IMAGE GALLERY ───
+// Reusable gallery for mood boards, location refs, signature item illustrations, org logos, etc.
+// Handles upload, preview thumbnails, captions, and removal.
+const MultiImageGallery = memo(({ label, hint, images, onAdd, onRemove, onUpdateCaption, maxMB = 3, maxCount = 12, compact = false }) => {
+  const inputId = useMemo(() => `nf-mig-${Math.random().toString(36).slice(2, 9)}`, []);
+  const imgs = Array.isArray(images) ? images : [];
+  const thumbSize = compact ? 72 : 96;
+
+  const handleFiles = (files) => {
+    const remaining = maxCount - imgs.length;
+    const toRead = Array.from(files).slice(0, remaining);
+    if (toRead.length === 0) return;
+    toRead.forEach(file => {
+      if (file.size > maxMB * 1024 * 1024) return;
+      const reader = new FileReader();
+      reader.onload = ev => onAdd({ id: uid(), data: ev.target.result, caption: "", addedAt: new Date().toISOString() });
+      reader.readAsDataURL(file);
+    });
+  };
+
+  return (
+    <div className="nf-field">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <label className="nf-label" style={{ margin: 0 }}>{label}</label>
+        <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>{imgs.length}/{maxCount}</span>
+      </div>
+      {hint && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 8, lineHeight: 1.6 }}>{hint}</div>}
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`, gap: 8 }}>
+        {imgs.map(img => (
+          <div key={img.id} style={{ position: "relative", borderRadius: 3, overflow: "hidden", border: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)", aspectRatio: "1/1" }}>
+            <img loading="lazy" src={img.data} alt={img.caption || "Reference image"}
+              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+            {img.caption && (
+              <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "4px 6px", fontSize: 11, color: "#fff", background: "linear-gradient(to top, rgba(0,0,0,0.75), transparent)" }}>{img.caption}</div>
+            )}
+            <button onClick={() => onRemove(img.id)}
+              style={{ position: "absolute", top: 3, right: 3, padding: 2, background: "rgba(0,0,0,0.5)", color: "#fff", border: "none", borderRadius: 2, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}
+              aria-label="Remove image"><Icons.X /></button>
+            {onUpdateCaption && (
+              <input value={img.caption || ""} onChange={e => onUpdateCaption(img.id, e.target.value)}
+                placeholder="Caption…"
+                style={{ position: "absolute", bottom: -22, left: 0, right: 0, fontSize: 11, padding: "2px 4px", background: "var(--nf-bg-raised)", border: "1px solid var(--nf-border)", color: "var(--nf-text)", opacity: 0, transition: "opacity 0.2s" }}
+                onFocus={e => e.target.style.opacity = "1"}
+                onBlur={e => e.target.style.opacity = img.caption ? "1" : "0"} />
+            )}
+          </div>
+        ))}
+        {imgs.length < maxCount && (
+          <>
+            <input type="file" accept="image/*" multiple id={inputId} style={{ display: "none" }}
+              onChange={e => { handleFiles(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => document.getElementById(inputId)?.click()}
+              style={{ aspectRatio: "1/1", border: "1px dashed var(--nf-border)", borderRadius: 3, background: "var(--nf-bg-deep)", color: "var(--nf-text-muted)", cursor: "pointer", fontSize: 22, display: "flex", alignItems: "center", justifyContent: "center" }}
+              title={`Add images (max ${maxMB}MB each)`}>+</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+});
+
+const SentenceGardenModal = memo(({ project, onClose, onRemove, onUpdateNote }) => {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  const garden = project?.sentenceGarden || [];
+  // A subtle assortment of soft colors for each "flower" (pinned sentence)
+  const flowerColors = ["#c4a484", "#7d8a6f", "#a8765a", "#8b7355", "#9c8876", "#6b8e7f"];
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9998,
+      background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      animation: "nf-fadeIn 0.12s ease-out",
+    }} onClick={onClose} role="dialog" aria-modal="true" aria-label="Sentence Garden">
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        padding: "24px 28px", maxWidth: 720, width: "92%", maxHeight: "85vh", overflow: "auto",
+        boxShadow: "var(--nf-shadow-lg)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <h3 style={{ color: "var(--nf-text)", fontSize: 18, fontWeight: 600, margin: 0, fontFamily: "var(--nf-font-display)" }}>
+              🌿 Sentence Garden
+            </h3>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4 }}>
+              {garden.length} pinned {garden.length === 1 ? "sentence" : "sentences"} · your anthology of favorite lines
+            </div>
+          </div>
+          <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
+        </div>
+        {garden.length === 0 ? (
+          <div style={{ padding: "40px 20px", textAlign: "center", color: "var(--nf-text-muted)", fontSize: 13, lineHeight: 1.7 }}>
+            Nothing planted yet.<br /><br />
+            <span style={{ fontSize: 11 }}>Select any text in the editor or an AI response, then click the 🌿 icon to pin it here.</span>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 14 }}>
+            {garden.slice().reverse().map((entry, i) => {
+              const color = flowerColors[i % flowerColors.length];
+              return (
+                <div key={entry.id} style={{
+                  background: "var(--nf-bg-raised)", border: `1px solid ${color}44`, borderLeft: `3px solid ${color}`,
+                  borderRadius: 3, padding: "12px 14px", position: "relative",
+                  transition: "transform 0.2s, box-shadow 0.2s",
+                }}>
+                  <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.65, color: "var(--nf-text)", fontStyle: "italic" }}>
+                    "{entry.text}"
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span>{entry.chapterTitle || `Ch${(entry.chapterIdx ?? 0) + 1}`}</span>
+                    <span>{entry.savedAt ? new Date(entry.savedAt).toLocaleDateString() : ""}</span>
+                  </div>
+                  {entry.note && (
+                    <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginTop: 6, fontStyle: "normal", opacity: 0.9 }}>
+                      — {entry.note}
+                    </div>
+                  )}
+                  <button onClick={() => onRemove(entry.id)} className="nf-btn-icon" style={{ position: "absolute", top: 4, right: 4, padding: 4, opacity: 0.5 }} aria-label="Remove from garden"><Icons.X /></button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+// ─── AMBIENT SOUND PLAYER ───
+// Uses Web Audio API to generate looping ambient textures procedurally.
+// No external audio files — everything synthesized on-device.
+const AmbientPlayer = memo(({ sound, volume }) => {
+  const audioCtxRef = useRef(null);
+  const nodesRef = useRef({ sources: [], gains: [], master: null });
+
+  useEffect(() => {
+    // Stop & clean up any existing sources
+    const cleanup = () => {
+      try {
+        nodesRef.current.sources.forEach(s => { try { s.stop(); } catch {} });
+        nodesRef.current.gains.forEach(g => { try { g.disconnect(); } catch {} });
+        if (nodesRef.current.master) { try { nodesRef.current.master.disconnect(); } catch {} }
+        nodesRef.current = { sources: [], gains: [], master: null };
+      } catch {}
+    };
+    cleanup();
+
+    if (!sound || sound === "none") return;
+
+    // Lazy-create AudioContext on user gesture (browsers require this)
+    if (!audioCtxRef.current) {
+      try {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      } catch { return; }
+    }
+    const ctx = audioCtxRef.current;
+    if (ctx.state === "suspended") ctx.resume();
+
+    const master = ctx.createGain();
+    master.gain.value = Math.max(0, Math.min(1, volume ?? 0.4));
+    master.connect(ctx.destination);
+    nodesRef.current.master = master;
+
+    // Create brown/pink noise buffer (2 seconds, loops seamlessly)
+    const makeNoise = (type) => {
+      const bufferSize = ctx.sampleRate * 2;
+      const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      if (type === "brown") {
+        let lastOut = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          lastOut = (lastOut + 0.02 * white) / 1.02;
+          data[i] = lastOut * 3.5;
+        }
+      } else if (type === "pink") {
+        let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+        for (let i = 0; i < bufferSize; i++) {
+          const white = Math.random() * 2 - 1;
+          b0 = 0.99886 * b0 + white * 0.0555179;
+          b1 = 0.99332 * b1 + white * 0.0750759;
+          b2 = 0.96900 * b2 + white * 0.1538520;
+          b3 = 0.86650 * b3 + white * 0.3104856;
+          b4 = 0.55000 * b4 + white * 0.5329522;
+          b5 = -0.7616 * b5 - white * 0.0168980;
+          data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+          b6 = white * 0.115926;
+        }
+      } else {
+        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+      }
+      return buffer;
+    };
+
+    // Each sound is a combination of filtered noise + optional oscillators
+    const makeSource = (buffer, filterType, filterFreq, gain) => {
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+      src.loop = true;
+      const filter = ctx.createBiquadFilter();
+      filter.type = filterType;
+      filter.frequency.value = filterFreq;
+      filter.Q.value = 0.7;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      src.connect(filter);
+      filter.connect(g);
+      g.connect(master);
+      src.start();
+      nodesRef.current.sources.push(src);
+      nodesRef.current.gains.push(g);
+    };
+
+    try {
+      if (sound === "rain") {
+        makeSource(makeNoise("pink"), "lowpass", 2200, 0.7);
+        makeSource(makeNoise("white"), "highpass", 3500, 0.15);
+      } else if (sound === "cafe") {
+        makeSource(makeNoise("brown"), "lowpass", 900, 0.6);
+        makeSource(makeNoise("pink"), "bandpass", 400, 0.25);
+      } else if (sound === "fireplace") {
+        makeSource(makeNoise("brown"), "lowpass", 600, 0.8);
+        makeSource(makeNoise("pink"), "highpass", 2000, 0.08);
+      } else if (sound === "forest") {
+        makeSource(makeNoise("pink"), "bandpass", 1500, 0.4);
+        makeSource(makeNoise("brown"), "lowpass", 500, 0.3);
+      } else if (sound === "library") {
+        makeSource(makeNoise("brown"), "lowpass", 400, 0.35);
+      }
+    } catch (e) { console.warn("[AmbientPlayer]", e); }
+
+    return cleanup;
+  }, [sound]);
+
+  // Volume changes without recreating the graph
+  useEffect(() => {
+    if (nodesRef.current.master) {
+      nodesRef.current.master.gain.value = Math.max(0, Math.min(1, volume ?? 0.4));
+    }
+  }, [volume]);
+
+  return null;
+});
+
+// ─── BREATHING PAUSER ───
+// Appears at the corner after N minutes of continuous writing.
+// 4-second inhale, 4-second hold, 6-second exhale. One cycle, then dismisses.
+const BreathingPauser = memo(({ onDismiss }) => {
+  const [phase, setPhase] = useState("inhale"); // inhale | hold | exhale | done
+  const [cycle, setCycle] = useState(1);
+  useEffect(() => {
+    const timers = [];
+    const runCycle = () => {
+      setPhase("inhale");
+      timers.push(setTimeout(() => setPhase("hold"), 4000));
+      timers.push(setTimeout(() => setPhase("exhale"), 8000));
+      timers.push(setTimeout(() => {
+        if (cycle < 3) { setCycle(c => c + 1); runCycle(); }
+        else setPhase("done");
+      }, 14000));
+    };
+    runCycle();
+    return () => timers.forEach(clearTimeout);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (phase === "done") {
+    setTimeout(onDismiss, 500);
+    return null;
+  }
+  const scale = phase === "inhale" ? 1.5 : phase === "hold" ? 1.5 : 0.8;
+  const label = phase === "inhale" ? "Breathe in" : phase === "hold" ? "Hold" : "Breathe out";
+  const duration = phase === "inhale" ? "4s" : phase === "hold" ? "4s" : "6s";
+
+  return (
+    <div style={{
+      position: "fixed", bottom: 40, right: 40, zIndex: 9997,
+      display: "flex", flexDirection: "column", alignItems: "center", gap: 12,
+      padding: 24, background: "rgba(26,25,24,0.94)", backdropFilter: "blur(10px)",
+      border: "1px solid var(--nf-border)", borderRadius: 12, boxShadow: "var(--nf-shadow-lg)",
+      animation: "nf-fadeIn 0.6s ease-out",
+    }}>
+      <div style={{
+        width: 80, height: 80, borderRadius: "50%",
+        background: "radial-gradient(circle, var(--nf-accent-glow) 0%, transparent 70%)",
+        border: "1px solid var(--nf-accent-2)",
+        transform: `scale(${scale})`,
+        transition: `transform ${duration} ease-in-out`,
+      }} />
+      <div style={{ color: "var(--nf-text)", fontSize: 13, fontFamily: "var(--nf-font-display)", letterSpacing: "0.08em" }}>{label}</div>
+      <div style={{ color: "var(--nf-text-muted)", fontSize: 10 }}>Cycle {cycle}/3</div>
+      <button onClick={onDismiss} className="nf-btn-micro" style={{ fontSize: 10 }}>Skip</button>
+    </div>
+  );
+});
+
+// ─── CHAPTER CELEBRATION ───
+// A muted bloom animation when a chapter reaches a satisfying word count.
+const ChapterCelebration = memo(({ onEnd }) => {
+  useEffect(() => {
+    const t = setTimeout(onEnd, 2600);
+    return () => clearTimeout(t);
+  }, [onEnd]);
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9996, pointerEvents: "none",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <div style={{
+        width: 120, height: 120, borderRadius: "50%",
+        background: "radial-gradient(circle, var(--nf-accent-glow) 0%, transparent 65%)",
+        animation: "nf-celebration-bloom 2.6s ease-out forwards",
+      }} />
+    </div>
+  );
+});
+
+// ─── STORY MAP ───
+// A drag-drop 2D canvas showing characters, locations, and orgs as connected nodes.
+// Visual thinking space — positions persist in project.storyMapNodes.
+const StoryMapModal = memo(({ project, onClose, onUpdatePositions }) => {
+  const [draggingId, setDraggingId] = useState(null);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  // Build nodes from project data with stable default positions
+  const nodes = useMemo(() => {
+    const existing = project?.storyMapNodes || {};
+    const chars = (project?.characters || []).filter(c => c.name && !c.isBulk);
+    const locs = (project?.worldBuilding || []).filter(w => w.name && (w.category === "Location" || w.category === "Organization"));
+    const all = [];
+    chars.forEach((c, i) => {
+      const pos = existing[c.id] || { x: 80 + (i % 4) * 160, y: 80 + Math.floor(i / 4) * 120 };
+      all.push({ id: c.id, type: "character", label: c.name, color: "#c4653a", ...pos });
+    });
+    locs.forEach((w, i) => {
+      const pos = existing[w.id] || { x: 80 + (i % 4) * 160, y: 320 + Math.floor(i / 4) * 120 };
+      const color = w.category === "Organization" ? "#7d8a6f" : "#8b7355";
+      all.push({ id: w.id, type: w.category.toLowerCase(), label: w.name, color, ...pos });
+    });
+    return all;
+  }, [project?.characters, project?.worldBuilding, project?.storyMapNodes]);
+
+  // Derive edges from relationships + character-org memberships
+  const edges = useMemo(() => {
+    const e = [];
+    const nodeIds = new Set(nodes.map(n => n.id));
+    (project?.relationships || []).forEach(r => {
+      if (nodeIds.has(r.char1) && nodeIds.has(r.char2)) {
+        e.push({ from: r.char1, to: r.char2, kind: "relationship" });
+      }
+    });
+    (project?.worldBuilding || []).forEach(w => {
+      if (w.category === "Organization" && Array.isArray(w.orgMembers)) {
+        w.orgMembers.forEach(memberId => {
+          if (nodeIds.has(memberId) && nodeIds.has(w.id)) {
+            e.push({ from: memberId, to: w.id, kind: "membership" });
+          }
+        });
+      }
+    });
+    return e;
+  }, [nodes, project?.relationships, project?.worldBuilding]);
+
+  // Unified mouse + touch pointer extraction
+  const getPointer = (e) => {
+    if (e.touches && e.touches[0]) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (e.changedTouches && e.changedTouches[0]) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+    return { x: e.clientX, y: e.clientY };
+  };
+  const handleDragStart = (e, nodeId) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    const p = getPointer(e);
+    setOffset({ x: p.x - rect.left - node.x, y: p.y - rect.top - node.y });
+    setDraggingId(nodeId);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  const handleDragMove = (e) => {
+    if (!draggingId) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const p = getPointer(e);
+    const newX = Math.max(20, Math.min(rect.width - 100, p.x - rect.left - offset.x));
+    const newY = Math.max(20, Math.min(rect.height - 60, p.y - rect.top - offset.y));
+    const existing = project?.storyMapNodes || {};
+    onUpdatePositions({ ...existing, [draggingId]: { x: newX, y: newY } });
+    e.preventDefault();
+  };
+  const handleDragEnd = () => setDraggingId(null);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9998, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        padding: "20px 24px", width: "92%", maxWidth: 1000, height: "85vh", display: "flex", flexDirection: "column",
+        boxShadow: "var(--nf-shadow-lg)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div>
+            <h3 style={{ color: "var(--nf-text)", fontSize: 18, fontWeight: 600, margin: 0, fontFamily: "var(--nf-font-display)" }}>🗺 Story Map</h3>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4 }}>
+              Drag nodes to arrange. Orange = characters, green = organizations, tan = locations. Lines = relationships & memberships.
+            </div>
+          </div>
+          <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
+        </div>
+        <div ref={canvasRef}
+          onMouseMove={handleDragMove}
+          onMouseUp={handleDragEnd}
+          onMouseLeave={handleDragEnd}
+          onTouchMove={handleDragMove}
+          onTouchEnd={handleDragEnd}
+          onTouchCancel={handleDragEnd}
+          style={{
+            flex: 1, position: "relative", background: "var(--nf-bg-deep)",
+            border: "1px solid var(--nf-border)", borderRadius: 4, overflow: "hidden",
+            backgroundImage: "radial-gradient(circle, rgba(139,115,85,0.04) 1px, transparent 1px)",
+            backgroundSize: "24px 24px",
+            cursor: draggingId ? "grabbing" : "default",
+            touchAction: "none", // prevent browser scroll while dragging nodes
+          }}>
+          {/* Edges */}
+          <svg style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+            {edges.map((edge, i) => {
+              const from = nodes.find(n => n.id === edge.from);
+              const to = nodes.find(n => n.id === edge.to);
+              if (!from || !to) return null;
+              const strokeColor = edge.kind === "membership" ? "rgba(125,138,111,0.4)" : "rgba(196,101,58,0.3)";
+              const dashArray = edge.kind === "membership" ? "4 4" : "";
+              return (
+                <line key={i} x1={from.x + 50} y1={from.y + 20} x2={to.x + 50} y2={to.y + 20}
+                  stroke={strokeColor} strokeWidth="1.5" strokeDasharray={dashArray} />
+              );
+            })}
+          </svg>
+          {/* Nodes */}
+          {nodes.map(node => (
+            <div key={node.id}
+              onMouseDown={(e) => handleDragStart(e, node.id)}
+              onTouchStart={(e) => handleDragStart(e, node.id)}
+              style={{
+                position: "absolute", left: node.x, top: node.y,
+                padding: "8px 12px", background: "var(--nf-bg-raised)",
+                border: `2px solid ${node.color}`, borderRadius: 4,
+                cursor: "grab", userSelect: "none", maxWidth: 140,
+                fontSize: 11, color: "var(--nf-text)", fontWeight: 500,
+                boxShadow: draggingId === node.id ? "0 8px 24px rgba(0,0,0,0.3)" : "0 2px 6px rgba(0,0,0,0.1)",
+                transition: draggingId === node.id ? "none" : "box-shadow 0.2s",
+                whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                touchAction: "none",
+                WebkitUserSelect: "none",
+              }}>
+              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>{node.type}</div>
+              {node.label}
+            </div>
+          ))}
+          {nodes.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--nf-text-muted)", fontSize: 13 }}>
+              Add characters and locations to see your story map
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+
+// ─── CHARACTER CONVERSATION ROOM ───
+// Pick two characters, provide a prompt, AI generates a practice dialogue.
+// Not for the book — a sandbox to hear their voices and deepen your feel for them.
+const CharacterConversationModal = memo(({ project, settings, onClose, showToast }) => {
+  const [char1Id, setChar1Id] = useState("");
+  const [char2Id, setChar2Id] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [conversation, setConversation] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const chars = (project?.characters || []).filter(c => c.name && !c.isBulk);
+
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const generate = async () => {
+    const c1 = chars.find(c => c.id === char1Id);
+    const c2 = chars.find(c => c.id === char2Id);
+    if (!c1 || !c2 || !settings?.apiKey || !prompt.trim()) {
+      showToast("Need two characters, a prompt, and an API key", "error");
+      return;
+    }
+    setIsGenerating(true);
+    setConversation("");
+    try {
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
+        body: JSON.stringify({
+          model: settings.model || "anthropic/claude-sonnet-4",
+          messages: [
+            { role: "system", content: `You are a creative writing sandbox. Generate a SHORT dialogue between two characters (6-10 exchanges). This is practice — NOT for the novel. It's for the author to hear their characters' voices.
+
+${c1.name}: ${c1.role}. Personality: ${(c1.personality || "").slice(0, 300)}. Speech pattern: ${c1.speechPattern || "none specified"}. Current state: ${c1.currentEmotionalState || "normal"}.
+
+${c2.name}: ${c2.role}. Personality: ${(c2.personality || "").slice(0, 300)}. Speech pattern: ${c2.speechPattern || "none specified"}. Current state: ${c2.currentEmotionalState || "normal"}.
+
+Format: "${c1.name}: ..." and "${c2.name}: ..." alternating. Keep lines short and authentic. Include brief action beats sparingly.` },
+            { role: "user", content: `Scenario: ${prompt}\n\nWrite the conversation.` },
+          ],
+          max_tokens: 700, temperature: 0.95,
+        }),
+      });
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data = await res.json();
+      const content = (stripThinkingTokens(data.choices?.[0]?.message?.content || "")).trim();
+      setConversation(content);
+    } catch (e) {
+      showToast(`Failed: ${e.message}`, "error");
+    }
+    setIsGenerating(false);
+  };
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9998, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }} onClick={onClose} role="dialog" aria-modal="true" aria-label="Character conversation">
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        padding: "24px 28px", maxWidth: 720, width: "92%", maxHeight: "85vh", overflow: "auto",
+        boxShadow: "var(--nf-shadow-lg)",
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <h3 style={{ color: "var(--nf-text)", fontSize: 18, fontWeight: 600, margin: 0, fontFamily: "var(--nf-font-display)" }}>
+              💬 Character Conversation Room
+            </h3>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4 }}>
+              A sandbox to hear their voices. Not for the book.
+            </div>
+          </div>
+          <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+          <div>
+            <label className="nf-label">Character 1</label>
+            <select value={char1Id} onChange={e => setChar1Id(e.target.value)} className="nf-select">
+              <option value="">Select...</option>
+              {chars.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="nf-label">Character 2</label>
+            <select value={char2Id} onChange={e => setChar2Id(e.target.value)} className="nf-select">
+              <option value="">Select...</option>
+              {chars.filter(c => c.id !== char1Id).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="nf-field">
+          <label className="nf-label">Scenario</label>
+          <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
+            placeholder="e.g. They meet at a funeral. Or: an old argument resurfaces."
+            className="nf-textarea" style={{ minHeight: 60 }} />
+        </div>
+        <button onClick={generate} disabled={isGenerating || !char1Id || !char2Id || !prompt.trim()} className="nf-btn nf-btn-primary" style={{ marginBottom: 12 }}>
+          {isGenerating ? "Generating..." : <><Icons.Wand /> Generate conversation</>}
+        </button>
+        {conversation && (
+          <div style={{ padding: "16px 18px", background: "var(--nf-bg-raised)", border: "1px solid var(--nf-border)", borderLeft: "3px solid var(--nf-accent-2)", borderRadius: "0 3px 3px 0" }}>
+            <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.8, color: "var(--nf-text)", whiteSpace: "pre-wrap" }}>{conversation}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+
+// ─── QUESTION OF THE DAY ───
+const QUESTION_BANK = [
+  "What does your protagonist wish they had said last chapter?",
+  "What does the antagonist believe they're protecting?",
+  "Which scene in your novel would your protagonist rewrite if they could?",
+  "What small detail in your world are you proudest of inventing?",
+  "If your novel had a soundtrack, what would play during the climactic scene?",
+  "Which character surprised you this week?",
+  "What is the oldest wound your main character carries?",
+  "What would make your protagonist feel truly seen?",
+  "Which minor character deserves more page time?",
+  "What is the moral question your novel is asking?",
+  "If your book ended on page 1 instead, what would it be about?",
+  "What scene have you been avoiding writing? Why?",
+  "What does your antagonist secretly envy about your protagonist?",
+  "Which setting in your novel feels most alive to you?",
+  "What promise did you make to readers in Chapter 1?",
+  "If you could only keep 10 sentences from your book, which would survive?",
+  "What lie does your protagonist believe about themselves?",
+  "Where does your novel get quiet? Is that deliberate?",
+  "What would change if your POV character were 10 years older?",
+  "What object in your novel holds the most meaning?",
+];
+const QuestionOfDayModal = memo(({ onClose, onDismiss }) => {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  const question = useMemo(() => {
+    const day = Math.floor(Date.now() / 86400000);
+    return QUESTION_BANK[day % QUESTION_BANK.length];
+  }, []);
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      animation: "nf-fadeIn 0.3s ease-out",
+    }} onClick={onClose} role="dialog" aria-modal="true" aria-label="Question of the day">
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        padding: "36px 40px", maxWidth: 520, width: "90%", textAlign: "center",
+        boxShadow: "var(--nf-shadow-lg)",
+      }}>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 14 }}>Question of the day</div>
+        <div style={{ fontFamily: "var(--nf-font-display)", fontSize: 22, lineHeight: 1.5, color: "var(--nf-text)", marginBottom: 24, fontWeight: 400 }}>
+          {question}
+        </div>
+        <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+          <button onClick={onClose} className="nf-btn nf-btn-primary">Sit with it</button>
+          <button onClick={onDismiss} className="nf-btn nf-btn-ghost">Don't ask again today</button>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+// ─── PRE-SESSION INTENTION ───
+const IntentionModal = memo(({ onChoose, onClose }) => {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  const intentions = [
+    { k: "catharsis", label: "Catharsis", desc: "Process something through writing" },
+    { k: "exploration", label: "Exploration", desc: "See where the story takes me" },
+    { k: "productivity", label: "Productivity", desc: "Move the plot forward" },
+    { k: "play", label: "Play", desc: "Have fun, experiment freely" },
+  ];
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(4px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }} onClick={onClose} role="dialog" aria-modal="true" aria-label="Set intention">
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        padding: "28px 32px", maxWidth: 480, width: "90%",
+        boxShadow: "var(--nf-shadow-lg)",
+      }}>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 10 }}>Today's writing session</div>
+        <div style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, color: "var(--nf-text)", marginBottom: 20, fontWeight: 400 }}>
+          What do you want from today's writing?
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {intentions.map(i => (
+            <button key={i.k} onClick={() => onChoose(i.k)} className="nf-btn nf-btn-ghost"
+              style={{ flexDirection: "column", padding: "14px 12px", alignItems: "flex-start", gap: 3, textAlign: "left", minHeight: 62 }}>
+              <span style={{ fontWeight: 600, fontSize: 13 }}>{i.label}</span>
+              <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 400, lineHeight: 1.5 }}>{i.desc}</span>
+            </button>
+          ))}
+        </div>
+        <button onClick={onClose} className="nf-btn nf-btn-ghost" style={{ marginTop: 14, width: "100%", fontSize: 11 }}>Skip</button>
+      </div>
+    </div>
+  );
+});
+
+// ─── END-OF-SESSION DECOMPRESSION ───
+const DecompressionModal = memo(({ sessionData, onClose }) => {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+  const mins = Math.max(1, Math.round((sessionData.durationMs || 0) / 60000));
+  const words = sessionData.wordsDelta || 0;
+  return (
+    <div style={{
+      position: "fixed", inset: 0, zIndex: 9997, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        maxWidth: 480, width: "90%", padding: "40px 36px",
+        background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-dialog-border)", borderRadius: 8,
+        boxShadow: "var(--nf-shadow-lg)", textAlign: "center",
+      }}>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.15em", marginBottom: 16 }}>Session complete</div>
+        <div style={{ fontFamily: "var(--nf-font-display)", fontSize: 28, color: "var(--nf-text)", marginBottom: 20, fontWeight: 300, lineHeight: 1.4 }}>
+          You spent {mins} minute{mins !== 1 ? "s" : ""} with your story.
+        </div>
+        <div style={{ fontSize: 15, color: "var(--nf-text-dim)", marginBottom: 10, lineHeight: 1.7 }}>
+          {words > 0 ? `You wrote ${words.toLocaleString()} word${words !== 1 ? "s" : ""}.` : "You showed up. That counts."}
+        </div>
+        {sessionData.intention && (
+          <div style={{ fontSize: 12, color: "var(--nf-text-muted)", fontStyle: "italic", marginBottom: 24 }}>
+            Your intention today: {sessionData.intention}
+          </div>
+        )}
+        <div style={{ fontSize: 13, color: "var(--nf-text-dim)", marginBottom: 28, fontStyle: "italic", lineHeight: 1.6 }}>
+          Rest well.
+        </div>
+        <button onClick={onClose} className="nf-btn nf-btn-primary">Close</button>
+      </div>
+    </div>
+  );
+});
+
 
 // ─── DIFF / REVIEW MODAL ───
 const DiffReviewModal = memo(({ original, proposed, onAccept, onReject, onInsertAtCursor }) => {
@@ -4513,12 +5383,12 @@ const DiffReviewModal = memo(({ original, proposed, onAccept, onReject, onInsert
         <div style={{ flex: 1, minHeight: 0, overflow: "auto", display: "flex", gap: 0, flexWrap: "wrap" }}>
           {original && (
             <div style={{ flex: "1 1 300px", minWidth: 250, padding: 22, borderRight: "1px solid var(--nf-diff-border)" }}>
-              <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>Original</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-accent)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>Original</div>
               <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text-dim)", whiteSpace: "pre-wrap" }}>{original}</div>
             </div>
           )}
           <div style={{ flex: "1 1 300px", minWidth: 250, padding: 22 }}>
-            <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>{original ? "Proposed" : "Generated Content"}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 22 }}>{original ? "Proposed" : "Generated Content"}</div>
             <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text)", whiteSpace: "pre-wrap" }}>{proposed}</div>
           </div>
         </div>
@@ -4598,7 +5468,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{s.charName}</span>
                       <span style={{ fontSize: 11, color: "var(--nf-accent-2)", marginLeft: 8, fontWeight: 500 }}>{FIELD_LABELS[s.field] || s.field}</span>
                       {s.current && s.field !== "status" && (
-                        <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: 6, opacity: 0.6 }}>
+                        <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: 6, opacity: 0.6 }}>
                           (will merge with existing)
                         </span>
                       )}
@@ -4614,14 +5484,14 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                   </div>
                   {s.current && (
                     <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 4, padding: "6px 8px", background: "var(--nf-bg-deep)", borderRadius: 6, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                      <span style={{ fontWeight: 600, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 2 }}>Existing (will be kept): </span>{typeof s.current === "string" ? s.current.slice(0, 400) : String(s.current)}{String(s.current).length > 400 ? "…" : ""}
+                      <span style={{ fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", display: "block", marginBottom: 2 }}>Existing (will be kept): </span>{typeof s.current === "string" ? s.current.slice(0, 400) : String(s.current)}{String(s.current).length > 400 ? "…" : ""}
                     </div>
                   )}
                   <div style={{ fontSize: 12, color: "var(--nf-text)", padding: "6px 8px", background: "var(--nf-success-bg)", border: "1px solid var(--nf-success)", borderRadius: 6, lineHeight: 1.5, marginBottom: s.reason ? 4 : 0, whiteSpace: "pre-wrap" }}>
-                    <span style={{ fontWeight: 600, fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-success)", display: "block", marginBottom: 2 }}>{s.current && s.field !== "status" ? "New addition:" : "New value:"} </span>{s.suggested}
+                    <span style={{ fontWeight: 600, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-success)", display: "block", marginBottom: 2 }}>{s.current && s.field !== "status" ? "New addition:" : "New value:"} </span>{s.suggested}
                   </div>
                   {s.reason && (
-                    <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic", marginTop: 4, paddingLeft: 8 }}>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic", marginTop: 4, paddingLeft: 8 }}>
                       Why: {s.reason}
                     </div>
                   )}
@@ -4632,12 +5502,12 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
 
           {accepted.length > 0 && (
             <div style={{ marginBottom: 22 }}>
-              <span style={{ fontSize: 10, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Applied ({accepted.length})</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Applied ({accepted.length})</span>
               {accepted.map(s => (
                 <div key={s.id} style={{ fontSize: 11, color: "var(--nf-text-dim)", padding: "6px 8px", marginTop: 4, background: "var(--nf-bg-raised)", borderRadius: 6 }}>
                   <span key={s.id} style={{ color: "var(--nf-success)" }}>✓</span> {s.charName} → {FIELD_LABELS[s.field] || s.field}
                   {s.applied && s.applied !== s.suggested && (
-                    <span key={s.id} style={{ fontSize: 10, color: "var(--nf-text-muted)", marginLeft: 6 }}>(merged with existing)</span>
+                    <span key={s.id} style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: 6 }}>(merged with existing)</span>
                   )}
                 </div>
               ))}
@@ -4645,7 +5515,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
           )}
           {rejected.length > 0 && (
             <div>
-              <span style={{ fontSize: 10, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Skipped ({rejected.length})</span>
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Skipped ({rejected.length})</span>
               {rejected.map(s => (
                 <div key={s.id} style={{ fontSize: 11, color: "var(--nf-text-muted)", padding: "4px 8px", marginTop: 4, opacity: 0.5 }}>
                   ✗ {s.charName} → {FIELD_LABELS[s.field] || s.field}
@@ -4672,7 +5542,7 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                     <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 6 }}>
                       <div>
                         <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{s.char1Name} ↔ {s.char2Name}</span>
-                        <span style={{ fontSize: 10, color: "var(--nf-accent-2)", marginLeft: 8 }}>
+                        <span style={{ fontSize: 11, color: "var(--nf-accent-2)", marginLeft: 8 }}>
                           {s.action === "create" ? "New relationship" : `Update: ${s.field}`}
                         </span>
                       </div>
@@ -4691,11 +5561,11 @@ const CharacterSuggestionsModal = memo(({ suggestions, onAccept, onReject, onAcc
                       </div>
                     ) : (
                       <div style={{ fontSize: 12, color: "var(--nf-text)", padding: "4px 8px", background: "var(--nf-success-bg)", border: "1px solid var(--nf-success)", borderRadius: 2, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-                        {s.current && <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 2 }}>Was: {String(s.current).slice(0, 150)}</div>}
+                        {s.current && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 2 }}>Was: {String(s.current).slice(0, 150)}</div>}
                         → {s.suggested}
                       </div>
                     )}
-                    {s.reason && <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic", marginTop: 4 }}>Why: {s.reason}</div>}
+                    {s.reason && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic", marginTop: 4 }}>Why: {s.reason}</div>}
                   </div>
                 ))}
                 {relAccepted.length > 0 && relAccepted.map(s => (
@@ -4756,7 +5626,7 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
         <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, color: "var(--nf-text)", letterSpacing: "0.01em" }}>The White Room</span>
-            <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 2, letterSpacing: "0.08em" }}>Non-canon character voice testing</div>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, letterSpacing: "0.08em" }}>Non-canon character voice testing</div>
           </div>
           <button onClick={onClose} className="nf-btn-icon" aria-label="Close"><Icons.X /></button>
         </div>
@@ -4784,7 +5654,7 @@ const WhiteRoomModal = memo(({ char1, char2, tension, result, isGenerating, onGe
               fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.9, color: "var(--nf-text)",
               whiteSpace: "pre-wrap", maxHeight: 400, overflowY: "auto",
             }}>
-              <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 20, fontFamily: "var(--nf-font-body)" }}>
+              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 20, fontFamily: "var(--nf-font-body)" }}>
                 Non-Canon Scene — Voice Test Only
               </div>
               <div dangerouslySetInnerHTML={{ __html: renderMarkdownCached(result) }} />
@@ -4888,7 +5758,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
         <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 20, fontWeight: 400, color: "var(--nf-text)" }}>Story Timeline</span>
-            {dateSpan && <span style={{ fontSize: 10, color: "var(--nf-text-muted)", marginLeft: 12, fontFamily: "var(--nf-font-mono)" }}>{dateSpan}</span>}
+            {dateSpan && <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: 12, fontFamily: "var(--nf-font-mono)" }}>{dateSpan}</span>}
           </div>
           <button aria-label="Close" onClick={onClose} className="nf-btn-icon"><Icons.X /></button>
         </div>
@@ -4908,7 +5778,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                     }}>{group.key}</div>
                   )}
                   {group.key === "Undated" && groups.length > 1 && (
-                    <div style={{ fontSize: 10, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Undated</div>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8 }}>Undated</div>
                   )}
                   <div style={{ position: "relative", paddingLeft: 40 }}>
                     <div style={{ position: "absolute", left: 18, top: 0, bottom: 0, width: 1, background: "var(--nf-border)" }} />
@@ -4944,7 +5814,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                               position: "relative", textAlign: "center", margin: "4px 0 8px -40px", paddingLeft: 40,
                             }}>
                               <div style={{
-                                display: "inline-block", padding: "2px 12px", fontSize: 9, fontWeight: 500,
+                                display: "inline-block", padding: "2px 12px", fontSize: 11, fontWeight: 500,
                                 color: "var(--nf-text-muted)", background: "var(--nf-bg)", border: "1px dashed var(--nf-border)",
                                 borderRadius: 2, letterSpacing: "0.06em", fontFamily: "var(--nf-font-mono)",
                               }}>
@@ -4967,15 +5837,15 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
                               <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-accent)", fontFamily: "var(--nf-font-mono)" }}>Ch{p.chapter || chIdx + 1}</span>
                               <span style={{ fontSize: 14, fontWeight: 400, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)" }}>{p.title || "Untitled"}</span>
                             </div>
-                            {dateDisplay && <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)", background: "var(--nf-bg-surface)", padding: "2px 8px", borderRadius: 2 }}>{dateDisplay}</span>}
+                            {dateDisplay && <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)", background: "var(--nf-bg-surface)", padding: "2px 8px", borderRadius: 2 }}>{dateDisplay}</span>}
                           </div>
                           {p.summary && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{p.summary.slice(0, 150)}{p.summary.length > 150 ? "..." : ""}</div>}
                           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                            {p.sceneType && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{p.sceneType}</span>}
-                            {charNames.map(name => <span key={name} style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 2, color: "var(--nf-accent)" }}>{name}</span>)}
-                            {wordC > 0 && <span style={{ fontSize: 9, color: "var(--nf-success)" }}>✓ {wordC.toLocaleString()}w</span>}
-                            {chContent && wordC === 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontStyle: "italic" }}>blank</span>}
-                            {!chContent && <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontStyle: "italic" }}>no chapter yet</span>}
+                            {p.sceneType && <span style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{p.sceneType}</span>}
+                            {charNames.map(name => <span key={name} style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", borderRadius: 2, color: "var(--nf-accent)" }}>{name}</span>)}
+                            {wordC > 0 && <span style={{ fontSize: 11, color: "var(--nf-success)" }}>✓ {wordC.toLocaleString()}w</span>}
+                            {chContent && wordC === 0 && <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>blank</span>}
+                            {!chContent && <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>no chapter yet</span>}
                           </div>
                         </div>
 						{(() => {
@@ -5029,7 +5899,7 @@ const TimelineView = memo(({ plotOutline, chapters, characters, onClose, restore
             )}
             <div style={{ position: "absolute", bottom: -30, left: "50%", transform: "translateX(-50%)", color: "rgba(255,255,255,0.5)", fontSize: 12, fontFamily: "var(--nf-font-mono)" }}>
               {lightbox.index + 1} / {lightbox.images.length}
-              <span style={{ marginLeft: 12, fontSize: 10, opacity: 0.5 }}>← → navigate · Esc close</span>
+              <span style={{ marginLeft: 12, opacity: 0.5 }}>← → navigate · Esc close</span>
             </div>
           </div>
         </div>,
@@ -5094,7 +5964,7 @@ const CleanViewModal = memo(({ project, startChapter, onClose }) => {
         }} dangerouslySetInnerHTML={{ __html: contentHtml || '<p style="color:var(--nf-text-muted);font-style:italic">This chapter is empty.</p>' }} />
       </div>
       {/* Keyboard hint */}
-      <div style={{ padding: "6px 24px", borderTop: "1px solid var(--nf-border)", textAlign: "center", fontSize: 10, color: "var(--nf-text-muted)" }}>
+      <div style={{ padding: "6px 24px", borderTop: "1px solid var(--nf-border)", textAlign: "center", color: "var(--nf-text-muted)" }}>
         ← → navigate chapters · Esc to close
       </div>
     </div>
@@ -5586,11 +6456,11 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
           </div>
         </div>
         {/* Filter bar */}
-        <div style={{ padding: "6px 22px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", display: "flex", gap: 6, alignItems: "center", fontSize: 10, color: "var(--nf-text-muted)", flexShrink: 0, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>Filter:</span>
+        <div style={{ padding: "6px 22px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", display: "flex", gap: 6, alignItems: "center", color: "var(--nf-text-muted)", flexShrink: 0, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", marginRight: 4 }}>Filter:</span>
           {["all","romantic","family","friendship","professional","mentor","rivalry"].map(cat => (
             <button key={cat} onClick={() => setFilterCategory(cat)} style={{
-              padding: "2px 8px", borderRadius: 3, fontSize: 9, border: "1px solid", cursor: "pointer",
+              padding: "2px 8px", borderRadius: 3, fontSize: 11, border: "1px solid", cursor: "pointer",
               background: filterCategory === cat ? "var(--nf-accent-glow)" : "transparent",
               borderColor: filterCategory === cat ? "var(--nf-accent)" : "var(--nf-border)",
               color: filterCategory === cat ? "var(--nf-accent)" : "var(--nf-text-muted)",
@@ -5599,7 +6469,7 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
               {cat}{catCounts[cat] ? ` (${catCounts[cat]})` : ""}
             </button>
           ))}
-          <span style={{ marginLeft: "auto", opacity: 0.6, fontSize: 9 }}>Scroll to zoom · Drag canvas to pan · Drag nodes to reposition</span>
+          <span style={{ marginLeft: "auto", opacity: 0.6, fontSize: 11 }}>Scroll to zoom · Drag canvas to pan · Drag nodes to reposition</span>
         </div>
         {/* Canvas */}
         <div style={{ flex: 1, background: "var(--nf-bg-deep)", cursor: panStateRef.current || dragRef.current ? "grabbing" : "grab", overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
@@ -5750,11 +6620,11 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
             {/* Location zones in legend */}
             {showLocations && locationZones.length > 0 && (
               <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>
-                <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Locations</div>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Locations</div>
                 {locationZones.map(zone => (
                   <div key={zone.id} className="nf-wl-i">
                     <div key={zone.id} style={{ width: 14, height: 10, borderRadius: "50%", flexShrink: 0, background: ZONE_COLORS[zone.colorIdx], border: `1px dashed ${ZONE_BORDER_COLORS[zone.colorIdx]}` }} />
-                    <span key={zone.id} style={{ fontSize: 9 }}>📍 {zone.name} ({zone.memberCount})</span>
+                    <span key={zone.id} style={{ fontSize: 11 }}>📍 {zone.name} ({zone.memberCount})</span>
                   </div>
                 ))}
               </div>
@@ -5762,16 +6632,16 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
             {/* Org hierarchy in legend */}
             {showOrgs && orgLinks.length > 0 && (
               <div className="nf-wl-s" style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}>
-                <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Hierarchy</div>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Hierarchy</div>
                 <div className="nf-wl-i">
                   <svg width="24" height="12" className="nf-wl-sw"><path d="M2,2 L2,6 L22,6 L22,10" fill="none" stroke="rgba(160,140,200,0.6)" strokeWidth="1.5" strokeDasharray="4 3" /></svg>
-                  <span style={{ fontSize: 9 }}>Reports to</span>
+                  <span style={{ fontSize: 11 }}>Reports to</span>
                 </div>
                 {(() => {
                   const orgNames = [...new Set(orgLinks.map(l => l.orgName))];
                   return orgNames.map(name => (
                     <div key={name} className="nf-wl-i">
-                      <span style={{ fontSize: 9, color: "rgba(160,140,200,0.7)" }}>⛨ {name} ({orgLinks.filter(l => l.orgName === name).length} links)</span>
+                      <span style={{ fontSize: 11, color: "rgba(160,140,200,0.7)" }}>⛨ {name} ({orgLinks.filter(l => l.orgName === name).length} links)</span>
                     </div>
                   ));
                 })()}
@@ -5780,11 +6650,11 @@ const RelationshipWebModal = memo(({ characters, relationships, onClose, povChar
           </div>
         </div>
         {/* Hover tooltip */}
-        {hoveredInfo?.type === 'rel' && (() => { const {data: r, c1, c2} = hoveredInfo; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c1.name}</span><span style={{ color: tColor(r.tension), fontSize: 16 }}>↔</span><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c2.name}</span></div>{r.dynamic && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{r.dynamic}</div>}<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{r.status && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: `1px solid ${tColor(r.tension)}`, borderRadius: 3, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}{r.category && <span style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.category}</span>}</div>{r.sharedSecrets && <div style={{ marginTop: 6, fontSize: 10, color: "var(--nf-accent)", lineHeight: 1.4 }}>🤫 Shared secret: {r.sharedSecrets.slice(0, 80)}…</div>}</div>); })()}
+        {hoveredInfo?.type === 'rel' && (() => { const {data: r, c1, c2} = hoveredInfo; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c1.name}</span><span style={{ color: tColor(r.tension), fontSize: 16 }}>↔</span><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{c2.name}</span></div>{r.dynamic && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6 }}>{r.dynamic}</div>}<div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{r.status && <span style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.status}</span>}{r.tension && r.tension !== "none" && <span style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-bg-surface)", border: `1px solid ${tColor(r.tension)}`, borderRadius: 3, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}{r.category && <span style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)" }}>{r.category}</span>}</div>{r.sharedSecrets && <div style={{ marginTop: 6, color: "var(--nf-accent)", lineHeight: 1.4 }}>🤫 Shared secret: {r.sharedSecrets.slice(0, 80)}…</div>}</div>); })()}
         {/* Org hierarchy tooltip */}
-        {hoveredInfo?.type === 'org' && (() => { const link = hoveredInfo.data; const sup = charMap[link.superiorId]; const sub = charMap[link.subordinateId]; if (!sup || !sub) return null; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ fontSize: 10, color: "rgba(160,140,200,0.7)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>⛨ {link.orgName}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sup.name}</span><span style={{ fontSize: 10, color: "rgba(160,140,200,0.7)" }}>{link.superiorRole}</span></div><div style={{ fontSize: 10, color: "rgba(160,140,200,0.5)", textAlign: "center", margin: "2px 0" }}>▼ reports to</div><div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sub.name}</span><span style={{ fontSize: 10, color: "rgba(160,140,200,0.7)" }}>{link.subordinateRole}</span></div></div>); })()}
+        {hoveredInfo?.type === 'org' && (() => { const link = hoveredInfo.data; const sup = charMap[link.superiorId]; const sub = charMap[link.subordinateId]; if (!sup || !sub) return null; return (<div className="nf-rel-web-tip" style={{ bottom: 80, left: "50%", transform: "translateX(-50%)" }}><div style={{ fontSize: 11, color: "rgba(160,140,200,0.7)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 6 }}>⛨ {link.orgName}</div><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sup.name}</span><span style={{ fontSize: 11, color: "rgba(160,140,200,0.7)" }}>{link.superiorRole}</span></div><div style={{ fontSize: 11, color: "rgba(160,140,200,0.5)", textAlign: "center", margin: "2px 0" }}>▼ reports to</div><div style={{ display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontWeight: 700, color: "var(--nf-text)", fontSize: 13 }}>{sub.name}</span><span style={{ fontSize: 11, color: "rgba(160,140,200,0.7)" }}>{link.subordinateRole}</span></div></div>); })()}
         {/* Selected node panel */}
-        {selectedNode && (() => { const ch = charMap[selectedNode]; if (!ch) return null; const nodeRels = procRels.filter(r => r.char1 === selectedNode || r.char2 === selectedNode); const nodeLocs = charLocations[selectedNode] || []; const nodeOrgRoles = charOrgRoles[selectedNode] || []; const nodeOrgLinks = orgLinks.filter(l => l.subordinateId === selectedNode || l.superiorId === selectedNode); return (<div className="nf-rel-web-tip" style={{ top: 80, left: 20, transform: "none", maxWidth: 280, pointerEvents: "auto" }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>{ch.image && <img loading="lazy" src={ch.image} alt={ch.name} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} />}<div><div style={{ fontWeight: 700, fontSize: 13, color: "var(--nf-text)" }}>{ch.name}</div><div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{ch.role}{ch.occupation ? ` · ${ch.occupation}` : ""}</div></div></div>{ch.personality && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginBottom: 6, lineHeight: 1.4 }}>{ch.personality.slice(0, 120)}{ch.personality.length > 120 ? "…" : ""}</div>}{nodeLocs.length > 0 && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>📍 {nodeLocs.join(", ")}</div>}{nodeOrgRoles.length > 0 && <div style={{ fontSize: 10, color: "rgba(160,140,200,0.8)", marginBottom: 4 }}>⛨ {nodeOrgRoles.map(r => `${r.role} (${r.org})`).join(", ")}</div>}{ch.allegiances && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginBottom: 4 }}>⚔ {ch.allegiances}</div>}{nodeOrgLinks.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6, marginBottom: 4 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(160,140,200,0.6)", marginBottom: 4 }}>Org Chain</div>{nodeOrgLinks.map(l => { const isSuper = l.superiorId === selectedNode; const otherId = isSuper ? l.subordinateId : l.superiorId; const other = charMap[otherId]; return (<div key={l.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ color: "rgba(160,140,200,0.6)", fontSize: 8 }}>{isSuper ? "▼" : "▲"}</span><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "rgba(160,140,200,0.5)" }}>{isSuper ? l.subordinateRole : l.superiorRole}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.5 }}>{l.orgName}</span></div>); })}</div>)}{nodeRels.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}><div style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Connections ({nodeRels.length})</div>{nodeRels.map(r => { const otherId = r.char1 === selectedNode ? r.char2 : r.char1; const other = charMap[otherId]; return (<div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ width: 8, height: 2, background: tColor(r.tension), borderRadius: 1, flexShrink: 0 }} /><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.7 }}>{r.category || "romantic"}</span>{r.tension && r.tension !== "none" && <span style={{ fontSize: 8, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}</div>); })}</div>)}<div style={{ fontSize: 9, color: "var(--nf-text-muted)", opacity: 0.5, marginTop: 6, fontStyle: "italic" }}>Click again to deselect</div></div>); })()}
+        {selectedNode && (() => { const ch = charMap[selectedNode]; if (!ch) return null; const nodeRels = procRels.filter(r => r.char1 === selectedNode || r.char2 === selectedNode); const nodeLocs = charLocations[selectedNode] || []; const nodeOrgRoles = charOrgRoles[selectedNode] || []; const nodeOrgLinks = orgLinks.filter(l => l.subordinateId === selectedNode || l.superiorId === selectedNode); return (<div className="nf-rel-web-tip" style={{ top: 80, left: 20, transform: "none", maxWidth: 280, pointerEvents: "auto" }}><div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>{ch.image && <img loading="lazy" src={ch.image} alt={ch.name} style={{ width: 28, height: 28, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} />}<div><div style={{ fontWeight: 700, fontSize: 13, color: "var(--nf-text)" }}>{ch.name}</div><div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>{ch.role}{ch.occupation ? ` · ${ch.occupation}` : ""}</div></div></div>{ch.personality && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginBottom: 6, lineHeight: 1.4 }}>{ch.personality.slice(0, 120)}{ch.personality.length > 120 ? "…" : ""}</div>}{nodeLocs.length > 0 && <div style={{ fontSize: 11, color: "var(--nf-accent-2)", marginBottom: 4 }}>📍 {nodeLocs.join(", ")}</div>}{nodeOrgRoles.length > 0 && <div style={{ fontSize: 11, color: "rgba(160,140,200,0.8)", marginBottom: 4 }}>⛨ {nodeOrgRoles.map(r => `${r.role} (${r.org})`).join(", ")}</div>}{ch.allegiances && <div style={{ fontSize: 11, color: "var(--nf-accent-2)", marginBottom: 4 }}>⚔ {ch.allegiances}</div>}{nodeOrgLinks.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6, marginBottom: 4 }}><div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "rgba(160,140,200,0.6)", marginBottom: 4 }}>Org Chain</div>{nodeOrgLinks.map(l => { const isSuper = l.superiorId === selectedNode; const otherId = isSuper ? l.subordinateId : l.superiorId; const other = charMap[otherId]; return (<div key={l.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ color: "rgba(160,140,200,0.6)", fontSize: 10 }}>{isSuper ? "▼" : "▲"}</span><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 11, color: "rgba(160,140,200,0.5)" }}>{isSuper ? l.subordinateRole : l.superiorRole}</span><span style={{ fontSize: 11, color: "var(--nf-text-muted)", opacity: 0.5 }}>{l.orgName}</span></div>); })}</div>)}{nodeRels.length > 0 && (<div style={{ borderTop: "1px solid var(--nf-border)", paddingTop: 6 }}><div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Connections ({nodeRels.length})</div>{nodeRels.map(r => { const otherId = r.char1 === selectedNode ? r.char2 : r.char1; const other = charMap[otherId]; return (<div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4, fontSize: 10 }}><span style={{ width: 8, height: 2, background: tColor(r.tension), borderRadius: 1, flexShrink: 0 }} /><span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{other?.name || "?"}</span><span style={{ fontSize: 11, color: "var(--nf-text-muted)", opacity: 0.7 }}>{r.category || "romantic"}</span>{r.tension && r.tension !== "none" && <span style={{ fontSize: 11, color: tColor(r.tension), fontWeight: 700 }}>{r.tension}</span>}</div>); })}</div>)}<div style={{ fontSize: 11, color: "var(--nf-text-muted)", opacity: 0.5, marginTop: 6, fontStyle: "italic" }}>Click again to deselect</div></div>); })()}
       </div>
     </div>
   );
@@ -6680,30 +7550,59 @@ ${desc}`;
 // ─── FIELD COMPONENT ───
 const Field = memo(({ label, value, onChange, multiline, placeholder, small, type }) => {
   const ref = useRef(null);
-  const lastPropValue = useRef(value || "");
+  // Defensive: if value is somehow a non-string (object/array), coerce to something readable
+  const safeValue = useMemo(() => {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    // Object/array — try to serialize readably (prevents "[object Object]" display)
+    try { return typeof normalizeAiValue === "function" ? normalizeAiValue(value) : JSON.stringify(value); }
+    catch { return ""; }
+  }, [value]);
+  const lastPropValue = useRef(safeValue);
+
+  // Auto-grow textarea up to 8 lines then scroll
+  const autoResize = useCallback(() => {
+    const ta = ref.current;
+    if (!ta || ta.tagName !== "TEXTAREA") return;
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || (small ? 20 : 22);
+    const padV = (parseFloat(getComputedStyle(ta).paddingTop) || 0) + (parseFloat(getComputedStyle(ta).paddingBottom) || 0);
+    const maxH = Math.round(lineHeight * 8 + padV);
+    ta.style.height = "auto";
+    const newH = Math.min(ta.scrollHeight, maxH);
+    ta.style.height = newH + "px";
+    ta.style.overflowY = ta.scrollHeight > maxH ? "auto" : "hidden";
+  }, [small]);
 
   // Only update DOM when prop value changes externally (not from our own onChange)
   useEffect(() => {
-    const incoming = value || "";
-    if (incoming !== lastPropValue.current && ref.current && ref.current !== document.activeElement) {
-      ref.current.value = incoming;
+    if (safeValue !== lastPropValue.current && ref.current && ref.current !== document.activeElement) {
+      ref.current.value = safeValue;
+      if (multiline) autoResize();
     }
-    lastPropValue.current = incoming;
-  }, [value]);
+    lastPropValue.current = safeValue;
+  }, [safeValue, multiline, autoResize]);
+
+  // Resize on mount
+  useEffect(() => {
+    if (multiline) autoResize();
+  }, [multiline, autoResize]);
 
   const handleChange = useCallback((e) => {
     lastPropValue.current = e.target.value;
+    if (multiline) autoResize();
     onChange(e.target.value);
-  }, [onChange]);
+  }, [onChange, multiline, autoResize]);
 
   return (
     <div className="nf-field">
       {label && <label className="nf-label">{label}</label>}
       {multiline ? (
-        <textarea ref={ref} defaultValue={value || ""} onChange={handleChange} placeholder={placeholder}
-          className={`nf-textarea ${small ? "nf-textarea-sm" : ""}`} />
+        <textarea ref={ref} defaultValue={safeValue} onChange={handleChange} placeholder={placeholder}
+          className={`nf-textarea ${small ? "nf-textarea-sm" : ""}`}
+          style={{ resize: "none", overflow: "hidden" }} />
       ) : (
-        <input ref={ref} defaultValue={value || ""} onChange={handleChange} placeholder={placeholder}
+        <input ref={ref} defaultValue={safeValue} onChange={handleChange} placeholder={placeholder}
           type={type || "text"} className="nf-input" />
       )}
     </div>
@@ -6713,22 +7612,48 @@ const Field = memo(({ label, value, onChange, multiline, placeholder, small, typ
 // Debounced field — keeps local state while typing, only pushes to parent on blur or after 400ms idle
 // Prevents re-rendering entire parent component tree on every keystroke
 const DebouncedField = memo(({ label, value, onChange, multiline, placeholder, small, type }) => {
-  const [local, setLocal] = useState(value || "");
+  // Defensive coercion — if value is an object/array (AI corruption), render it readably instead of "[object Object]"
+  const safeValue = useMemo(() => {
+    if (value === null || value === undefined) return "";
+    if (typeof value === "string") return value;
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    try { return typeof normalizeAiValue === "function" ? normalizeAiValue(value) : JSON.stringify(value); }
+    catch { return ""; }
+  }, [value]);
+  const [local, setLocal] = useState(safeValue);
   const timerRef = useRef(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
-  const isFlushing = useRef(false); // tracks whether WE caused the parent update
-  const lastFlushed = useRef(value || ""); // last value we pushed to parent
+  const lastFlushed = useRef(safeValue); // last value we pushed to parent
+  const textareaRef = useRef(null);
+
+  // Auto-grow textarea up to 8 lines, then scroll
+  const autoResize = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    // Compute max height = 8 lines at current line-height
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight) || (small ? 20 : 22);
+    const padV = (parseFloat(getComputedStyle(ta).paddingTop) || 0) + (parseFloat(getComputedStyle(ta).paddingBottom) || 0);
+    const maxH = Math.round(lineHeight * 8 + padV);
+    ta.style.height = "auto";
+    const newH = Math.min(ta.scrollHeight, maxH);
+    ta.style.height = newH + "px";
+    ta.style.overflowY = ta.scrollHeight > maxH ? "auto" : "hidden";
+  }, [small]);
 
   // Sync from parent ONLY when value changed externally (not from our own flush)
   useEffect(() => {
-    const incoming = value || "";
     // If this is the value we just flushed, skip — we already have it locally
-    if (incoming === lastFlushed.current) return;
+    if (safeValue === lastFlushed.current) return;
     // External change (e.g. AI autofill, undo, import) — sync local to match
-    setLocal(incoming);
-    lastFlushed.current = incoming;
-  }, [value]);
+    setLocal(safeValue);
+    lastFlushed.current = safeValue;
+  }, [safeValue]);
+
+  // Resize whenever local content changes (typing, or external sync)
+  useEffect(() => {
+    if (multiline) autoResize();
+  }, [local, multiline, autoResize]);
 
   const handleChange = useCallback((e) => {
     const v = e.target.value;
@@ -6752,8 +7677,9 @@ const DebouncedField = memo(({ label, value, onChange, multiline, placeholder, s
     <div className="nf-field">
       {label && <label className="nf-label">{label}</label>}
       {multiline ? (
-        <textarea value={local} onChange={handleChange} onBlur={flush} placeholder={placeholder}
-          className={`nf-textarea ${small ? "nf-textarea-sm" : ""}`} />
+        <textarea ref={textareaRef} value={local} onChange={handleChange} onBlur={flush} placeholder={placeholder}
+          className={`nf-textarea ${small ? "nf-textarea-sm" : ""}`}
+          style={{ resize: "none", overflow: "hidden" }} />
       ) : (
         <input value={local} onChange={handleChange} onBlur={flush} placeholder={placeholder}
           type={type || "text"} className="nf-input" />
@@ -6868,7 +7794,7 @@ const ModelSelector = memo(({ apiKey, value, onChange }) => {
                 onMouseEnter={e => { if (m.id !== value) e.currentTarget.style.background = "var(--nf-bg-hover)"; }}
                 onMouseLeave={e => { e.currentTarget.style.background = m.id === value ? "var(--nf-bg-hover)" : "transparent"; }}>
                 <div style={{ fontSize: 12, fontWeight: m.id === value ? 600 : 400 }}>{m.name || m.id}</div>
-                <div style={{ fontSize: 10, color: "var(--nf-text-muted)", display: "flex", gap: 8 }}>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", display: "flex", gap: 8 }}>
                   <span style={{ opacity: 0.7 }}>{m.id}</span>
                   {m.pricing && <span style={{ color: "var(--nf-accent-2)" }}>In: {formatPrice(m.pricing.prompt)} · Out: {formatPrice(m.pricing.completion)}</span>}
                   {m.context_length && <span>{(m.context_length / 1000).toFixed(0)}k ctx</span>}
@@ -6922,14 +7848,14 @@ const SaveIndicator = memo(({ status, fileLinked }) => {
   if (status === "saving") return (
     <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "0 8px" }} role="status" aria-live="polite">
       <div style={{ width: 6, height: 6, borderRadius: 3, background: "var(--nf-accent-2)", animation: "nf-glyph-pulse-fast 0.7s ease-in-out infinite" }} />
-      <span style={{ fontSize: 9, color: "var(--nf-accent-2)", fontWeight: 500 }}>Saving...</span>
+      <span style={{ fontSize: 11, color: "var(--nf-accent-2)", fontWeight: 500 }}>Saving...</span>
     </div>
   );
 
   if (status === "error") return (
     <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "2px 8px", background: "var(--nf-error-bg)", borderRadius: 3 }} role="alert">
       <Icons.X />
-      <span style={{ fontSize: 9, color: "var(--nf-accent)", fontWeight: 600 }}>Save failed</span>
+      <span style={{ fontSize: 11, color: "var(--nf-accent)", fontWeight: 600 }}>Save failed</span>
     </div>
   );
 
@@ -6937,7 +7863,7 @@ const SaveIndicator = memo(({ status, fileLinked }) => {
     <div role="button" tabIndex={0} onClick={() => setShowDetail(d => !d)} style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", padding: "0 6px", borderRadius: 3, transition: "background 0.15s" }} title={`Saved ${timeAgo || ""}${fileLinked ? " · Auto-saving to file" : " · Auto-saving to browser"}\nCtrl+S to save manually`}>
       <div style={{ width: 5, height: 5, borderRadius: 3, background: "var(--nf-success)", opacity: 0.6, transition: "opacity 0.3s" }} />
       {(showDetail || status === "saved") && (
-        <span style={{ fontSize: 9, color: "var(--nf-text-muted)", transition: "opacity 0.2s", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+        <span style={{ fontSize: 11, color: "var(--nf-text-muted)", transition: "opacity 0.2s", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {status === "saved" ? "Saved" : timeAgo || "Saved"}
           {fileLinked && " 📄"}
         </span>
@@ -6952,7 +7878,7 @@ const WordGoalBar = memo(({ current, goal, sessionWords }) => {
     // A23: Return a minimal placeholder to prevent layout shift
     return sessionWords > 0 ? (
       <div style={{ padding: "4px 20px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", display: "flex", justifyContent: "flex-end" }}>
-        <span style={{ fontSize: 10, color: "var(--nf-success)", fontWeight: 500 }}>+{sessionWords.toLocaleString()} this session</span>
+        <span style={{ fontSize: 11, color: "var(--nf-success)", fontWeight: 500 }}>+{sessionWords.toLocaleString()} this session</span>
       </div>
     ) : null;
   }
@@ -6962,10 +7888,10 @@ const WordGoalBar = memo(({ current, goal, sessionWords }) => {
     <div style={{ padding: "6px 20px 8px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)" }}
       role="progressbar" aria-valuenow={current} aria-valuemin={0} aria-valuemax={goal} aria-label={`Word goal: ${current} of ${goal}`}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-        <span style={{ fontSize: 10, color: done ? "var(--nf-success)" : "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+        <span style={{ fontSize: 11, color: done ? "var(--nf-success)" : "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>
           {done ? "✦ Goal reached!" : `${current.toLocaleString()} / ${goal.toLocaleString()} words`}
         </span>
-        {sessionWords > 0 && <span style={{ fontSize: 10, color: "var(--nf-success)", fontWeight: 500 }}>+{sessionWords.toLocaleString()} this session</span>}
+        {sessionWords > 0 && <span style={{ fontSize: 11, color: "var(--nf-success)", fontWeight: 500 }}>+{sessionWords.toLocaleString()} this session</span>}
       </div>
       <div style={{ height: 3, background: "var(--nf-bg-deep)", borderRadius: 2, overflow: "hidden", textOverflow: "ellipsis" }}>
         <div style={{
@@ -7087,18 +8013,85 @@ RULES:
 \`\`\`json
 { "type": "${tabName}", "data": { ... } }
 \`\`\`
-- For CHARACTER: name, role, gender, age, pronouns, orientation, aliases, occupation, title, height, build, tags, appearance, personality, backstory, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, allegiances, kinks, arc, canonNotes, status, isBulk, bulkCount, bulkDescription. AI-maintained fields: backstoryRevealed (bool), secretRevealed (bool), hasAppeared (bool), currentEmotionalState, obligationsOwed, knowledgeState
-- For WORLD: name, category, description, keywords, history, culturalNorms. LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. RULE/LAW: enforcement, scope, loopholes, publicOpinion, enactedBy. CULTURE: values, customs, socialHierarchy, taboos, artForms, dialect. MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes, magicPerception. TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations, techImpact, techCreator. HISTORY: historyDate, historyFigures, historyCauses, historyConsequences, historyLegacy. FLORA/FAUNA: habitat, floraAppearance, behavior, floraUses, floraRarity, floraCultural. LANGUAGE: langSpeakers, langWriting, langPhrases, langGrammar, langRelated, langStatus. RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies, followers. ORGANIZATION: orgPurpose, orgHierarchy, frequentCharacters.
-- For PLOT: chapter, title, summary, beats, sceneType, pov, characters, locations, date, povCharacterId. CHAPTER CRAFT: narrativeDistance (cinematic/close-third/deep-interiority), sensoryPalette, subtextNotes, tensionLevel (1-10). AI-MAINTAINED chapter state: chapterEndHookScore (0-10), chapterMomentum (0-10), emotionalAftertaste.
-- For RELATIONSHIP (foundational — set by author): char1, char2, category (romantic/family/friendship/professional/mentor/rivalry), conflictSource, terms, taboos, evolutionTimeline, isPublic, notes. AI-EVOLVING per chapter: dynamic, status, tension, tensionType, powerDynamic (equal/char1-dominant/char2-dominant/shifting), trustLevel (none/low/medium/high/absolute), chemistry, sharedSecrets, keyScenes, char1Perspective, char2Perspective, progression.
+
+🔑 CRITICAL JSON STRUCTURE RULES (prevent parse failures):
+- Return fields as FLAT keys directly inside 'data'. NEVER wrap fields inside groups like "IDENTITY", "PROFILE", "VOICE", "PSYCHOLOGY", "STATE". That nesting breaks the import.
+- NEVER key 'data' by character name like { "data": { "Harrison Killian": { ... } } }. Put fields directly in 'data'.
+- For multiple characters, return 'data' as an ARRAY: { "data": [ { ...char1 }, { ...char2 } ] }.
+- CORRECT: { "data": { "name": "Harrison", "role": "antagonist", "appearance": "...", ... } }
+- WRONG: { "data": { "Harrison": { "IDENTITY": { "name": "Harrison" }, "PROFILE": { "appearance": "..." } } } }
+- All string fields must be plain strings, never nested objects.
+
+═══ CHARACTER FIELDS (ALL must be filled unless context says otherwise) ═══
+All these are FLAT keys directly under 'data'. Do NOT group them under headings.
+Identity fields: name, role, gender, age, pronouns, orientation, aliases, occupation, height, build, tags
+Profile fields: appearance, personality, backstory, desires, shortTermGoals, longTermGoals
+Voice fields: speechPattern, voiceSamples, habits
+Psychology fields: fears, flaws, strengths, skills, internalConflict, externalConflict
+Story-hook fields: signatureItems, secrets, hiddenSecrets, allegiances, kinks, arc, canonNotes
+State fields: status (alive/dead/absent/unknown), isBulk (true for groups like "Police Officers"), bulkCount, bulkDescription
+AI-maintained fields (set only if appearance has already happened): backstoryRevealed, secretRevealed, hasAppeared, currentEmotionalState, obligationsOwed, knowledgeState
+
+🔑 CONSTRAINED VALUES — MUST USE EXACT SPELLING:
+  • role: MUST be one of: protagonist, love interest, deuteragonist, antagonist, mentor, sidekick, foil, confidant, supporting, minor, villain, anti-hero
+  • gender: MUST be one of: Female, Male, Non-binary, Genderfluid, Genderqueer, Agender, Bigender, Two-Spirit, Intersex, Trans woman, Trans man, Other
+  • orientation: MUST be one of: Straight, Gay, Lesbian, Bisexual, Pansexual, Asexual, Demisexual, Queer, Questioning, Fluid, Other, Prefer not to label
+  • pronouns: MUST be one of: she/her, he/him, they/them, she/they, he/they, ze/zir, xe/xem, it/its, any pronouns, no pronouns (use name)
+  • status: MUST be one of: alive, dead, absent, unknown
+  • build: MUST be one of: Slim, Lean, Athletic, Average, Muscular, Stocky, Heavyset, Petite, Curvy, Tall & lanky, Other
+
+🔑 WORLD AWARENESS WHEN CREATING CHARACTERS:
+If the character's occupation/title implies membership in an existing organization or location from the world context above (e.g. user says "Chief of Police" and "Police Department" exists in world-building, or "High Priestess" and "Temple of Light" exists), you MUST:
+  1. Match the occupation/title text to existing orgs/locations exactly (use the names from context)
+  2. Set 'allegiances' field to include the matching organization name(s)
+  3. Mention the location in 'backstory' or 'canonNotes' so connection is clear
+  4. If no matching world entry exists yet, note this in 'canonNotes' with: "[World entry needed: <type> called <name>]"
+
+═══ WORLD-BUILDING FIELDS ═══
+ALWAYS SET FIRST: name, category, description, keywords
+The 'category' field MUST be exactly one of: Location, Rule / Law, Culture, Organization, Magic System, Technology, History, Flora / Fauna, Language, Religion, Other
+Then fill category-specific fields:
+  • LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources
+  • RULE / LAW: enforcement, scope, loopholes, publicOpinion, enactedBy
+  • CULTURE: values, customs, socialHierarchy, taboos, artForms, dialect, population
+  • ORGANIZATION: orgPurpose, orgHierarchy (array of {name, role, charId (leave "")}), orgMembers (array of charIds, leave [] if unsure), frequentCharacters
+  • MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes, magicPerception, magicPractitioners
+  • TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations, techImpact, techCreator
+  • HISTORY: historyDate, historyFigures, historyCauses, historyConsequences, historyLegacy, historyDisputed
+  • FLORA / FAUNA: habitat, floraAppearance, behavior, floraUses, floraRarity, floraCultural
+  • LANGUAGE: langSpeakers, langWriting, langPhrases, langGrammar, langRelated, langStatus
+  • RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies, followers
+
+🚨 DEPRECATED — DO NOT INCLUDE THESE FIELDS:
+NEVER output: introducedInChapter, meetsInChapter, backstoryRevealChapter, secretRevealChapter, firstAppearanceChapter, statusChangedChapter, revealedDate, chapterEndHookNotes
+Instead use the AI-maintained booleans listed above.
+
+═══ PLOT FIELDS ═══
+chapter (number), title, summary, beats (array of {title, description}), sceneType, pov, characters (array of character IDs or names — IDs preferred), locations (array of location IDs or names), date, povCharacterId
+CHAPTER CRAFT: narrativeDistance (cinematic/close-third/deep-interiority), sensoryPalette, subtextNotes, tensionLevel (1-10)
+AI-MAINTAINED: chapterEndHookScore (0-10), chapterMomentum (0-10), emotionalAftertaste
+
+═══ RELATIONSHIP FIELDS ═══
+Foundational: char1 (character ID), char2 (character ID), category, conflictSource, terms, taboos, evolutionTimeline, isPublic, notes
+AI-EVOLVING: dynamic, status, tension, tensionType, powerDynamic, trustLevel, chemistry, sharedSecrets, keyScenes, char1Perspective, char2Perspective, progression
+
+🔑 RELATIONSHIP CONSTRAINED VALUES — MUST USE EXACT SPELLING:
+  • category: romantic, family, friendship, professional, mentor, rivalry, political, spiritual, other
+  • status: strangers, acquaintances, developing, friends, friends-with-benefits, tension, dating, lovers, committed, complicated, estranged, enemies, enemies-to-lovers, exes, forbidden, unrequited
+  • tension: none, low, medium, high, explosive
+  • tensionType: romantic, hostile, suspenseful, competitive, protective, friendly, neutral, acquaintance, mixed
+  • powerDynamic: equal, char1-dominant, char2-dominant, shifting
+  • trustLevel: none, low, medium, high, absolute
+
+═══ GENERAL PRINCIPLES ═══
 - Be creative, specific, genre-aware.
-- When filling in empty fields, ONLY fill fields listed as [Empty]. Do NOT overwrite existing content.
-- Make sure suggestions are consistent with existing characters and world.
-- Consider the current chapter position when making suggestions — what's appropriate at this point in the story.
-- IMPORTANT for WORLD entries: ALWAYS set the 'category' field first (Location, Religion, Magic System, Technology, Culture, History, Flora / Fauna, Language, Rule / Law, Organization) — then fill the category-specific fields.
-- If the project has motifs/symbols, weave them naturally into suggestions.
-- If the project tracks reader knowledge, respect what the reader knows vs. what characters know — use dramatic irony.
-- For chapter craft: consider narrativeDistance (how close the camera is), sensoryPalette (dominant senses), and subtextNotes (what's unsaid) when making suggestions.` },
+- When filling empty fields, ONLY fill fields listed as [Empty]. Do NOT overwrite existing content.
+- Make suggestions consistent with existing characters, world entries, and plot.
+- Consider current chapter position — what's appropriate for this point in the story.
+- If project has motifs/symbols, weave them naturally into suggestions.
+- If project tracks reader knowledge, respect what the reader knows vs. what characters know (dramatic irony).
+- For chapter craft: consider narrativeDistance, sensoryPalette, subtextNotes.
+- Output ALL field values as plain strings unless schema says array/number/boolean — do NOT return nested objects like {primary: "...", secondary: "..."} where a string is expected.` },
         ...history,
         { role: "user", content: msgText },
       ];
@@ -7230,6 +8223,87 @@ RULES:
 
       // Collect all items into a flat array
       const allItems = [];
+
+      // Character/world/plot/relationship fields that should be flat strings/values at the top of a data item.
+      // Used to detect AI "category grouping" and "name-keyed wrapping" patterns so we can flatten them.
+      const FLAT_FIELD_HINTS = new Set([
+        // Character
+        "name","role","gender","age","pronouns","orientation","aliases","occupation","height","build","tags",
+        "appearance","personality","backstory","desires","shortTermGoals","longTermGoals","speechPattern",
+        "voiceSamples","habits","fears","flaws","strengths","skills","internalConflict","externalConflict",
+        "signatureItems","secrets","hiddenSecrets","allegiances","kinks","arc","canonNotes","status",
+        "isBulk","bulkCount","bulkDescription","image","lookAlike",
+        // World
+        "category","description","keywords","atmosphere","sensoryDetails","orgPurpose","orgHierarchy","orgMembers",
+        // Plot
+        "chapter","title","summary","beats","sceneType","pov",
+        // Relationship
+        "char1","char2","dynamic","tension","tensionType","chemistry","conflictSource",
+      ]);
+
+      // Detect if an object is a "category group" wrapper (e.g. {IDENTITY: {...}, PROFILE: {...}})
+      // rather than a flat field object. Heuristic: ALL top-level keys are ALL-CAPS OR snake-case capitalized
+      // AND all their values are themselves objects containing known flat fields.
+      const isCategoryGrouped = (obj) => {
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+        const keys = Object.keys(obj);
+        if (keys.length < 2) return false;
+        let groupedCount = 0;
+        for (const k of keys) {
+          const v = obj[k];
+          if (v && typeof v === "object" && !Array.isArray(v)) {
+            const subKeys = Object.keys(v);
+            const hasKnownField = subKeys.some(sk => FLAT_FIELD_HINTS.has(sk));
+            if (hasKnownField) groupedCount++;
+          }
+        }
+        // If 2+ top-level keys each contain known flat fields as sub-keys → it's grouped
+        return groupedCount >= 2;
+      };
+
+      // Flatten a category-grouped object: {IDENTITY: {name, role}, PROFILE: {appearance}} → {name, role, appearance}
+      const flattenGroups = (obj) => {
+        const flat = {};
+        for (const [, groupVal] of Object.entries(obj)) {
+          if (groupVal && typeof groupVal === "object" && !Array.isArray(groupVal)) {
+            for (const [subK, subV] of Object.entries(groupVal)) {
+              // Only lift keys that look like real fields (avoid lifting nested structures like orgHierarchy accidentally)
+              flat[subK] = subV;
+            }
+          }
+        }
+        return flat;
+      };
+
+      // Detect "name-keyed wrapping": {data: {"Harrison Killian": {IDENTITY: {...}}}}
+      // Check if data is a single-key object where the key is NOT a known flat field,
+      // and the value is another object containing known field patterns.
+      const unwrapNameKey = (obj) => {
+        if (!obj || typeof obj !== "object" || Array.isArray(obj)) return obj;
+        const keys = Object.keys(obj);
+        if (keys.length !== 1) return obj;
+        const onlyKey = keys[0];
+        const val = obj[onlyKey];
+        if (!val || typeof val !== "object" || Array.isArray(val)) return obj;
+        // If the only key is not a flat field, but the inner object HAS flat fields or groups,
+        // assume this is name-wrapping and unwrap.
+        if (!FLAT_FIELD_HINTS.has(onlyKey)) {
+          const innerKeys = Object.keys(val);
+          const innerHasFlat = innerKeys.some(k => FLAT_FIELD_HINTS.has(k));
+          const innerIsGrouped = isCategoryGrouped(val);
+          if (innerHasFlat || innerIsGrouped) return val;
+        }
+        return obj;
+      };
+
+      // Normalize: first unwrap name-keys, then flatten category groups if detected
+      const normalizeItem = (raw) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+        let item = unwrapNameKey(raw);
+        if (isCategoryGrouped(item)) item = flattenGroups(item);
+        return item;
+      };
+
       for (const match of jsonBlocks) {
         try {
           const p = JSON.parse(match[1]);
@@ -7243,12 +8317,23 @@ RULES:
             }
           }
           if (p.data && typeof p.data === "object") {
-            if (Array.isArray(p.data)) p.data.forEach(item => { if (item && typeof item === "object") allItems.push(item); });
-            else allItems.push(p.data);
+            if (Array.isArray(p.data)) {
+              p.data.forEach(item => { if (item && typeof item === "object") allItems.push(normalizeItem(item)); });
+            } else {
+              // data may be: flat {name, role, ...}, OR name-keyed {"Harrison": {...}}, OR multiple name-keys
+              const dataKeys = Object.keys(p.data);
+              const looksLikeMultipleNameKeys = dataKeys.length > 1 && dataKeys.every(k => !FLAT_FIELD_HINTS.has(k) && p.data[k] && typeof p.data[k] === "object");
+              if (looksLikeMultipleNameKeys) {
+                // Multiple characters keyed by name
+                dataKeys.forEach(k => allItems.push(normalizeItem(p.data[k])));
+              } else {
+                allItems.push(normalizeItem(p.data));
+              }
+            }
           } else if (Array.isArray(p)) {
-            p.forEach(item => { if (item && typeof item === "object") allItems.push(item); });
+            p.forEach(item => { if (item && typeof item === "object") allItems.push(normalizeItem(item)); });
           } else if (typeof p === "object" && p !== null) {
-            allItems.push(p);
+            allItems.push(normalizeItem(p));
           }
         } catch { /* silent */ } // skip malformed individual blocks
       }
@@ -7266,15 +8351,20 @@ RULES:
     switch (tabName) {
       case "characters": {
         const actions = [
-          { label: "✦ Generate character", msg: "Generate a compelling character for my story considering genre, themes, and existing cast. Include ALL fields: name, role, gender, age, pronouns, orientation, aliases, occupation, height, build, tags, appearance, personality, backstory, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, allegiances, arc, canonNotes. Return as structured JSON." },
+          { label: "✦ Generate character", msg: `Generate a compelling character for my story. You MUST fill ALL of these fields — none may be blank:
+name, role, gender, age, pronouns, orientation, aliases, occupation, height, build, tags, appearance, personality, backstory, desires, shortTermGoals, longTermGoals, speechPattern, voiceSamples, habits, fears, flaws, strengths, skills, internalConflict, externalConflict, signatureItems, secrets, hiddenSecrets, allegiances, arc, canonNotes, status.
+
+For 'gender', 'orientation', 'role', 'status', 'pronouns', 'build' — use ONLY the exact values specified in the system rules.
+If this character's occupation implies membership in an existing organization or location from the context, set 'allegiances' to that org's exact name and reference it in 'backstory'/'canonNotes'.
+Return as structured JSON with the character data wrapped in { "type": "characters", "data": { ... } }.` },
         ];
         // D18: Contextual fill — reference which fields are actually empty
         if (editingEntityId && project?.characters) {
           const char = project.characters.find(c => c.id === editingEntityId);
           if (char) {
-            const emptyFields = ["appearance","personality","backstory","desires","shortTermGoals","longTermGoals","speechPattern","voiceSamples","habits","fears","flaws","strengths","skills","internalConflict","externalConflict","signatureItems","secrets","allegiances","arc","canonNotes","occupation","tags"].filter(k => !char[k]);
+            const emptyFields = ["gender","age","pronouns","orientation","aliases","occupation","height","build","tags","appearance","personality","backstory","desires","shortTermGoals","longTermGoals","speechPattern","voiceSamples","habits","fears","flaws","strengths","skills","internalConflict","externalConflict","signatureItems","secrets","hiddenSecrets","allegiances","arc","canonNotes"].filter(k => !char[k]);
             if (emptyFields.length > 0) {
-              actions.push({ label: `Fill ${emptyFields.length} empty fields`, msg: `Fill in these specific empty fields for "${char.name || "this character"}": ${emptyFields.join(", ")}. Base suggestions on existing details and genre. Return structured JSON.` });
+              actions.push({ label: `Fill ${emptyFields.length} empty fields`, msg: `Fill in these specific empty fields for "${char.name || "this character"}": ${emptyFields.join(", ")}. Respect the dropdown constraints (gender, orientation, role values must match exact spelling from system rules). If the character's role/occupation implies membership in an existing organization from context, include that org's exact name in 'allegiances'. Base suggestions on existing details and genre. Return structured JSON with { "type": "characters", "data": { ... } }.` });
             }
             // Psychology quick action
             const psychFields = ["fears","flaws","strengths","internalConflict","externalConflict"].filter(k => !char[k]);
@@ -7286,9 +8376,23 @@ RULES:
         return actions;
       }
       case "world": return [
-        { label: "✦ Generate entry", msg: "Generate a world-building entry that fits my story's genre and existing world. IMPORTANT: Set the 'category' field to one of: Location, Rule / Law, Culture, Magic System, Technology, History, Flora / Fauna, Language, Religion, Organization. Then include the category-specific fields. LOCATION: atmosphere, sensoryDetails, subLocations, dangers, rules, population, resources. RELIGION: deities, coreBeliefs, rituals, sacredPlaces, clergy, heresies. MAGIC SYSTEM: magicSource, magicRules, magicCost, magicRarity, magicTypes. TECHNOLOGY: techFunction, techMechanism, techAvailability, techLimitations. CULTURE: values, customs, socialHierarchy, taboos. HISTORY: historyDate, historyFigures, historyCauses, historyConsequences. Always include: name, category, description, keywords. Return as structured JSON." },
-        { label: "Expand world", msg: `Suggest 3 new entries that would deepen my world${project?.worldBuilding?.length ? ` (I already have ${project.worldBuilding.length} entries)` : ""}. For each, include all relevant fields. Explain why each matters for the story.` },
-        { label: "Build organization", msg: "Generate a detailed Organization entry with name, category (Organization), description, orgPurpose, and an orgHierarchy with 3-5 positions including titles, roles, and which existing characters could fill them. Return structured JSON." },
+        { label: "✦ Generate entry", msg: `Generate a world-building entry that fits my story's genre and existing world.
+
+MUST set 'category' to one of: Location, Rule / Law, Culture, Magic System, Technology, History, Flora / Fauna, Language, Religion, Organization.
+
+Then include the category-specific fields (see system rules).
+
+🚨 DO NOT include: introducedInChapter, meetsInChapter, firstAppearanceChapter, or any other chapter-number or date fields. These are handled automatically.
+
+Always include: name, category, description, keywords.
+Return as structured JSON wrapped in { "type": "world", "data": { ... } }.` },
+        { label: "Expand world", msg: `Suggest 3 new entries that would deepen my world${project?.worldBuilding?.length ? ` (I already have ${project.worldBuilding.length} entries)` : ""}. For each, include all relevant fields. DO NOT output introducedInChapter or any chapter-number fields. Explain briefly why each matters for the story.` },
+        { label: "Build organization", msg: `Generate a detailed Organization entry with:
+- name, category (Organization), description, orgPurpose, keywords
+- orgHierarchy: array of {name, role, charId} — leave charId blank if not in existing cast
+- orgMembers: array of existing character IDs if any match
+DO NOT include introducedInChapter or any chapter-number fields.
+Return structured JSON.` },
       ];
       case "plot": {
         // FIX 3.7: Use max chapter number from existing outline, not count
@@ -7300,9 +8404,22 @@ RULES:
         ];
       }
       case "relationships": return [
-        { label: "✦ Generate dynamic", msg: "Generate a compelling relationship dynamic between two of my characters. Include ALL fields: char1, char2, category, dynamic, status, tension, tensionType, powerDynamic, trustLevel, chemistry, conflictSource, sharedSecrets, keyScenes, terms, taboos, char1Perspective, char2Perspective, progression, evolutionTimeline, meetsInChapter. Return structured JSON." },
-        { label: "Deepen tension", msg: "Looking at the existing relationships listed above, suggest specific scenes and turning points to deepen the tension. Include keyScenes, conflictSource, and sharedSecrets for each. Be specific about which relationship and what should happen in which chapter." },
-        { label: "Map power dynamics", msg: "Analyze all existing relationships above and suggest powerDynamic, trustLevel, chemistry, and conflictSource for each one. Return as an array of relationship updates in structured JSON." },
+        { label: "✦ Generate dynamic", msg: `Generate a compelling relationship dynamic between two of my characters.
+
+Include ALL fields: char1 (character ID), char2 (character ID), category, dynamic, status, tension, tensionType, powerDynamic, trustLevel, chemistry, conflictSource, sharedSecrets, keyScenes, terms, taboos, char1Perspective, char2Perspective, progression, evolutionTimeline.
+
+Constrained values — MUST match exactly:
+- category: romantic, family, friendship, professional, mentor, rivalry
+- powerDynamic: equal, char1-dominant, char2-dominant, shifting
+- trustLevel: none, low, medium, high, absolute
+- status: strangers, acquaintances, developing, friends, tension, dating, lovers, committed, complicated, estranged, enemies, exes
+- tension: none, low, medium, high, explosive
+
+🚨 DO NOT include: meetsInChapter, meetsInDate, or any chapter-number fields.
+
+Return structured JSON wrapped in { "type": "relationships", "data": { ... } }.` },
+        { label: "Deepen tension", msg: "Looking at the existing relationships listed above, suggest specific scenes and turning points to deepen the tension. Include keyScenes, conflictSource, and sharedSecrets for each. Be specific about which relationship and what should happen." },
+        { label: "Map power dynamics", msg: "Analyze all existing relationships above and suggest powerDynamic (equal/char1-dominant/char2-dominant/shifting), trustLevel (none/low/medium/high/absolute), chemistry, and conflictSource for each one. Return as an array of relationship updates in structured JSON." },
         { label: "Evolution timeline", msg: "For the most prominent relationship above, generate a detailed chapter-by-chapter evolution timeline and keyScenes showing how the dynamic, trust, and power shift over time." },
       ];
       default: return [];
@@ -7315,7 +8432,7 @@ RULES:
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "var(--nf-accent-2)" }}><Icons.Wand /></span>
           <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>AI</span>
-          {messages.length > 0 && <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>({messages.length})</span>}
+          {messages.length > 0 && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>({messages.length})</span>}
         </div>
         {messages.length > 0 && <button onClick={() => setMessages([])} className="nf-btn-micro"><Icons.Trash /> Clear</button>}
       </div>
@@ -7853,7 +8970,7 @@ const VoiceHoverPopup = memo(({ editorRef, charColors }) => {
   if (!popup) return null;
   return createPortal(<div style={{ position: "fixed", top: popup.y, left: popup.x, zIndex: 10000, background: "var(--nf-dialog-bg)", border: "1px solid var(--nf-border)", borderRadius: 8, padding: "4px 10px", display: "flex", alignItems: "center", gap: 8, boxShadow: "var(--nf-shadow)", pointerEvents: "none", animation: "nf-fadeIn 0.1s ease-out" }}>
     {popup.info.image ? <img loading="lazy" src={popup.info.image} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: `2px solid ${popup.info.color}`, flexShrink: 0 }} /> : <div style={{ width: 26, height: 26, borderRadius: "50%", background: popup.info.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--nf-text-inverse, #fff)", fontWeight: 600, flexShrink: 0 }}>{popup.info.name[0]}</div>}
-    <div><div style={{ fontSize: 11, fontWeight: 600, color: popup.info.color, lineHeight: 1.2 }}>{popup.info.name}</div><div style={{ fontSize: 8, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>speaking</div></div>
+    <div><div style={{ fontSize: 11, fontWeight: 600, color: popup.info.color, lineHeight: 1.2 }}>{popup.info.name}</div><div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>speaking</div></div>
   </div>, document.body);
 });
 
@@ -7861,8 +8978,8 @@ const ColorModeBar = memo(({ colorMode, setColorMode, characters }) => {
   const charColors = useMemo(() => _charColorMap(characters), [characters]);
   if (colorMode === "off") return null;
   return (<div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)", minHeight: 26, animation: "nf-fadeIn 0.15s ease-out" }}>
-    {colorMode === "voice" && <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minHeight: 0, overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span><div style={{ display: "flex", gap: 6, overflow: "hidden", textOverflow: "ellipsis" }}>{Object.entries(charColors).slice(0, 8).map(([id, info]) => <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>{info.image ? <img loading="lazy" src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, fontSize: 8, color: "var(--nf-text-inverse, #fff)", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{info.name[0]}</div>}<span style={{ fontSize: 9, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span></div>)}</div></div>}
-    {colorMode === "narrative" && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Mode</span>{Object.entries(NARRATIVE_FONT_COLORS).map(([mode, color]) => <div key={mode} style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color, fontSize: 11, fontWeight: 600 }}>A</span><span style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "capitalize" }}>{mode}</span></div>)}</div>}
+    {colorMode === "voice" && <div style={{ display: "flex", alignItems: "center", gap: 6, flex: 1, minHeight: 0, overflow: "hidden", textOverflow: "ellipsis" }}><span style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Voice</span><div style={{ display: "flex", gap: 6, overflow: "hidden", textOverflow: "ellipsis" }}>{Object.entries(charColors).slice(0, 8).map(([id, info]) => <div key={id} style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>{info.image ? <img loading="lazy" src={info.image} alt="" style={{ width: 14, height: 14, borderRadius: "50%", objectFit: "cover", border: `1.5px solid ${info.color}` }} /> : <div style={{ width: 14, height: 14, borderRadius: "50%", background: info.color, color: "var(--nf-text-inverse, #fff)", fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center" }}>{info.name[0]}</div>}<span style={{ fontSize: 11, color: info.color, fontWeight: 500, whiteSpace: "nowrap" }}>{info.name.split(/\s+/)[0]}</span></div>)}</div></div>}
+    {colorMode === "narrative" && <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1 }}><span style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, flexShrink: 0 }}>Mode</span>{Object.entries(NARRATIVE_FONT_COLORS).map(([mode, color]) => <div key={mode} style={{ display: "flex", alignItems: "center", gap: 3 }}><span style={{ color, fontSize: 11, fontWeight: 600 }}>A</span><span style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "capitalize" }}>{mode}</span></div>)}</div>}
     <button onClick={() => setColorMode("off")} className="nf-btn-icon" style={{ padding: 2, opacity: 0.5 }}><Icons.X /></button>
   </div>);
 });
@@ -8000,7 +9117,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
   // No beats
   if (!beats.length) return (
     <div style={{ padding: 12, textAlign: "center", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-deep)" }}>
-      <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>No beats for this chapter. Add beats in Plot tab first.</div>
+      <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>No beats for this chapter. Add beats in Plot tab first.</div>
       <button onClick={onClose} className="nf-btn-micro" style={{ marginTop: 6 }}><Icons.X /> Close</button>
     </div>
   );
@@ -8014,7 +9131,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", borderBottom: "1px solid var(--nf-border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ fontSize: 12 }}>⚡</span>
-          <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent)" }}>Write or Whip!</span>
+          <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent)" }}>Write or Whip!</span>
         </div>
         <button aria-label="Close" onClick={onClose} className="nf-btn-icon" style={{ padding: 2 }}><Icons.X /></button>
       </div>
@@ -8032,7 +9149,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
             opacity: isLocked ? 0.15 : 1,
           }} />;
         })}
-        <span style={{ fontSize: 8, color: "var(--nf-text-muted)", marginLeft: 4, flexShrink: 0 }}>{currentBeatIdx + 1}/{beats.length}</span>
+        <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: 4, flexShrink: 0 }}>{currentBeatIdx + 1}/{beats.length}</span>
       </div>
 
       {/* Content */}
@@ -8040,13 +9157,13 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
         <div style={{ padding: "16px 10px", textAlign: "center" }}>
           <div style={{ fontSize: 20, marginBottom: 6 }}>🏆</div>
           <div style={{ fontSize: 12, fontWeight: 600, color: "#6b9e78" }}>All {beats.length} beats completed!</div>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4 }}>Forge-chan reluctantly approves.</div>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4 }}>Forge-chan reluctantly approves.</div>
         </div>
       ) : currentBeat ? (
         <div style={{ padding: "8px 10px 10px" }}>
           {/* Beat header */}
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--nf-accent)", color: "var(--nf-text-inverse, #fff)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{currentBeatIdx + 1}</div>
+            <div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--nf-accent)", color: "var(--nf-text-inverse, #fff)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, flexShrink: 0 }}>{currentBeatIdx + 1}</div>
             <div style={{ flex: 1, fontSize: 12, fontWeight: 600, color: "var(--nf-text)" }}>
               {typeof currentBeat === "string" ? currentBeat : (currentBeat.title || `Beat ${currentBeatIdx + 1}`)}
             </div>
@@ -8058,13 +9175,13 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
 
           {/* Beat description */}
           {typeof currentBeat === "object" && currentBeat.description && (
-            <div style={{ fontSize: 10, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6, padding: "4px 8px", background: "var(--nf-bg-surface)", borderRadius: 3, borderLeft: "2px solid var(--nf-accent)" }}>
+            <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5, marginBottom: 6, padding: "4px 8px", background: "var(--nf-bg-surface)", borderRadius: 3, borderLeft: "2px solid var(--nf-accent)" }}>
               {currentBeat.description}
             </div>
           )}
 
           {/* Instruction */}
-          <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginBottom: 6, fontStyle: "italic" }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 6, fontStyle: "italic" }}>
             Write this beat in the editor, then click Score. Need 7/10 to unlock next beat.
           </div>
 
@@ -8074,11 +9191,11 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                 <span style={{ fontSize: 24, fontWeight: 700, color: scoreColor, fontFamily: "var(--nf-font-display)", lineHeight: 1 }}>{sc}</span>
                 <div>
-                  <div style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>/10</div>
-                  {sc >= 7 ? <div style={{ fontSize: 10, color: "#6b9e78", fontWeight: 700 }}>✓ PASSED</div> : <div style={{ fontSize: 10, color: "#c43a3a", fontWeight: 700 }}>✗ REWRITE</div>}
+                  <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>/10</div>
+                  {sc >= 7 ? <div style={{ fontSize: 11, color: "#6b9e78", fontWeight: 700 }}>✓ PASSED</div> : <div style={{ fontSize: 11, color: "#c43a3a", fontWeight: 700 }}>✗ REWRITE</div>}
                 </div>
               </div>
-              <div style={{ fontSize: 10, color: "var(--nf-text-dim)", lineHeight: 1.5 }}>{currentScore.feedback}</div>
+              <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5 }}>{currentScore.feedback}</div>
             </div>
           )}
 
@@ -8090,7 +9207,7 @@ function WriteOrWhipPanel({ project, settings, chapterIdx, editorRef, onClose })
           )}
         </div>
       ) : (
-        <div style={{ padding: 12, fontSize: 10, color: "var(--nf-text-muted)" }}>No beat data found.</div>
+        <div style={{ padding: 12, color: "var(--nf-text-muted)" }}>No beat data found.</div>
       )}
     </div>
   );
@@ -8389,6 +9506,31 @@ const ForgeAssistant = memo(({ editorContent, project, settings, chapterIdx }) =
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
+  // Good night / time-of-day greetings on mount
+  useEffect(() => {
+    if (!settings?.forgeChanGoodNight) return;
+    try {
+      const today = new Date().toDateString();
+      const greetedToday = sessionStorage.getItem("nf-forge-greeted");
+      if (greetedToday === today) return;
+      const hour = new Date().getHours();
+      let greeting = "";
+      let glyphOverride = "";
+      if (hour >= 22 || hour < 5) { greeting = "Late-night writing again? (◕‿◕✿) I'll keep you company. Drink water."; glyphOverride = "☽"; }
+      else if (hour < 10) { greeting = "Morning! ✦ Fresh page energy. What shall we ruin today?"; glyphOverride = "✦"; }
+      else if (hour < 14) { greeting = "Midday check-in. ⟡ Are you writing or doomscrolling? Be honest."; }
+      else if (hour < 18) { greeting = "Afternoon dip incoming. ✿ Stretch. Your wrists will thank you."; }
+      else if (hour < 22) { greeting = "Evening. ◉ Soft hours. Write the tender things."; }
+      if (greeting) {
+        const glyph = glyphOverride || FORGE_CHAN_REACTIONS[Math.floor(Math.random() * FORGE_CHAN_REACTIONS.length)];
+        const initialMood = hour >= 22 || hour < 5 ? "sleepy" : hour < 10 ? "curious" : "pondering";
+        setMood(initialMood);
+        setMessages([{ id: Date.now(), text: greeting, glyph, mood: initialMood }]);
+        try { sessionStorage.setItem("nf-forge-greeted", today); } catch {}
+      }
+    } catch {}
+  }, [settings?.forgeChanGoodNight]);
+
   useEffect(() => {
     if (!settings?.apiKey || !editorContent) return;
     if (timerRef.current) clearTimeout(timerRef.current);
@@ -8490,20 +9632,20 @@ RULES:
       {/* Tamagotchi header with body */}
       <div role="button" tabIndex={0} onClick={() => setMinimized(p => !p)} style={{ cursor: "pointer", padding: "6px 8px 2px", textAlign: "center", position: "relative" }}>
         <ForgeChanBody mood={mood} isThinking={isThinking} isSpeaking={isSpeaking} />
-        <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--nf-text-muted)", marginTop: 2, opacity: 0.6 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.12em", color: "var(--nf-text-muted)", marginTop: 2, opacity: 0.6 }}>
           forge-chan
           {isThinking && <span style={{ color: "var(--nf-accent)", animation: "nf-blink 1s infinite", marginLeft: 4 }}>···</span>}
         </div>
         {messages.length > 0 && (
-          <button onClick={(e) => { e.stopPropagation(); setMessages([]); }} style={{ position: "absolute", top: 4, right: 6, background: "none", border: "none", color: "var(--nf-text-muted)", cursor: "pointer", fontSize: 8, opacity: 0.4 }}>×</button>
+          <button onClick={(e) => { e.stopPropagation(); setMessages([]); }} style={{ position: "absolute", top: 4, right: 6, background: "none", border: "none", color: "var(--nf-text-muted)", cursor: "pointer", opacity: 0.4 }}>×</button>
         )}
-        <div style={{ position: "absolute", top: 4, left: 6, fontSize: 8, color: "var(--nf-text-muted)", opacity: 0.4 }}>{minimized ? "▸" : "▾"}</div>
+        <div style={{ position: "absolute", top: 4, left: 6, color: "var(--nf-text-muted)", opacity: 0.4 }}>{minimized ? "▸" : "▾"}</div>
       </div>
       {/* Speech bubbles */}
       {!minimized && (
         <div style={{ flex: 1, maxHeight: 140, overflowY: "auto", padding: "4px 8px 6px", scrollBehavior: "smooth" }}>
           {messages.length === 0 && !isThinking && (
-            <div style={{ textAlign: "center", padding: "6px 0", color: "var(--nf-text-muted)", fontSize: 9, fontStyle: "italic", opacity: 0.4, animation: "nf-glyph-breathe-slow 4s infinite" }}>
+            <div style={{ textAlign: "center", padding: "6px 0", color: "var(--nf-text-muted)", fontSize: 11, fontStyle: "italic", opacity: 0.4, animation: "nf-glyph-breathe-slow 4s infinite" }}>
               write something...
             </div>
           )}
@@ -8511,9 +9653,9 @@ RULES:
             <div key={msg.id} style={{
               marginBottom: 4, padding: "4px 8px", background: "var(--nf-bg-raised)", borderRadius: 8, borderBottomLeftRadius: 2,
               borderLeft: `2px solid ${moodColors[msg.mood] || "var(--nf-border)"}`,
-              animation: "nf-fc-bubble 0.3s ease-out", fontSize: 10, lineHeight: 1.45, color: "var(--nf-text-dim)",
+              animation: "nf-fc-bubble 0.3s ease-out", fontSize: 11, lineHeight: 1.45, color: "var(--nf-text-dim)",
             }}>
-              <span style={{ color: moodColors[msg.mood], marginRight: 3, fontSize: 9 }}>{msg.glyph}</span>
+              <span style={{ color: moodColors[msg.mood], marginRight: 3, fontSize: 11 }}>{msg.glyph}</span>
               {msg.text}
             </div>
           ))}
@@ -8577,7 +9719,7 @@ const BeatTooltip = memo(({ editorRef, chapterIdx }) => {
       animation: "nf-fadeIn 0.1s ease-out",
     }}>
       <div style={{
-        fontSize: 10,
+        fontSize: 11,
         fontWeight: 700,
         color: "var(--nf-accent)",
         textTransform: "uppercase",
@@ -8731,7 +9873,7 @@ const _syncCrossRefs = (oldP, newP) => {
               dynamic: `Colleagues in ${nw.name}${isSubordinate ? ` (${pos.name} reports to ${otherPos.name})` : isSuperior ? ` (${otherPos.name} reports to ${pos.name})` : ""}`,
               status: "acquaintances", tension: "none", tensionType: "neutral",
               notes: `Auto-created: both serve in ${nw.name}`, char1Perspective: "", char2Perspective: "", progression: "",
-              meetsInChapter: 0, evolutionTimeline: "", category: "professional",
+              evolutionTimeline: "", category: "professional",
               powerDynamic: isSubordinate ? "char2-dominant" : isSuperior ? "char1-dominant" : "equal",
               sharedSecrets: "", keyScenes: "", chemistry: "", conflictSource: "", trustLevel: "medium", isPublic: true, taboos: "", terms: "",
             });
@@ -9026,7 +10168,7 @@ const _syncCrossRefs = (oldP, newP) => {
               id: uid(), char1: newCid, char2: existingCid,
               dynamic: `Share space at ${nw.name}`, status: "acquaintances", tension: "none", tensionType: "acquaintance",
               notes: `Auto-created: both frequent ${nw.name}`, char1Perspective: "", char2Perspective: "", progression: "",
-              meetsInChapter: 0, evolutionTimeline: "", category: "other", powerDynamic: "equal",
+              evolutionTimeline: "", category: "friendship", powerDynamic: "equal",
               sharedSecrets: "", keyScenes: "", chemistry: "", conflictSource: "", trustLevel: "low", isPublic: true, taboos: "", terms: "",
             });
             dirty = true;
@@ -9111,6 +10253,20 @@ export default function NovelForge() {
     agentModels: {}, // per-role model overrides; defaults to x-ai/grok-4.1-fast
     agentPostProcessors: { continuityChecker: true, voiceDriftDetector: false, hookScorer: true, motifAuditor: true, stateUpdater: true },
     language: "en", // UI language — see I18N_LANGUAGES
+    // ─── FUN / MENTAL HEALTH SETTINGS ───
+    ambientSound: "none", // "none"|"rain"|"cafe"|"fireplace"|"forest"|"library"
+    ambientVolume: 0.4,
+    silentWritingMode: false, // hides all stats when writing
+    lineFocusMode: false, // fade non-current paragraphs
+    typewriterPacing: false, // slow cursor for meditative pace
+    circadianDimming: false, // auto-shift warmer at night
+    breathingPauser: true, // 4-4-6 breath nudge after N minutes
+    breathingPauserInterval: 45, // minutes
+    sessionDecompression: true, // show reflection on session end
+    chapterCelebration: true, // muted bloom animation on chapter finish
+    questionOfTheDay: true, // morning reflection prompt
+    forgeChanGoodNight: true, // Forge-chan greets on close
+    ambientBrightness: 1.0, // 0.6-1.0 for circadian
   });
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
@@ -9149,14 +10305,30 @@ export default function NovelForge() {
   useEffect(() => {
     setCurrentLang(settings?.language || "en");
   }, [settings?.language]);
+
   const [tabChatHistories, setTabChatHistories] = useState({});
   const [showApiKey, setShowApiKey] = useState(false);
   const [dragOverIdx, setDragOverIdx] = useState(null); // C4: Chapter drag indicator
   const [expandedWorldIds, setExpandedWorldIds] = useState(new Set()); // D6: Collapsible world entries
+  const [expandedHierIds, setExpandedHierIds] = useState(new Set()); // Collapsible hierarchy position cards
   const [expandedRelIds, setExpandedRelIds] = useState(new Set()); // D11: Collapsible relationships
   const [expandedPlotIds, setExpandedPlotIds] = useState(new Set()); // Collapsible plot entries
   const [deleteConfirmText, setDeleteConfirmText] = useState(""); // E7: Type-to-confirm delete
   const [findReplaceOpen, setFindReplaceOpen] = useState(false); // Find & Replace modal
+  const [sentenceGardenOpen, setSentenceGardenOpen] = useState(false); // Sentence Garden viewer
+  const [showBreathingPauser, setShowBreathingPauser] = useState(false);
+  const [showChapterCelebration, setShowChapterCelebration] = useState(false);
+  const [sessionStartedAt] = useState(() => Date.now());
+  const lastBreathingCheckRef = useRef(Date.now());
+  const lastCelebrationChapterRef = useRef({});
+  // Session-bound fun-feature state
+  const [questionOfDayOpen, setQuestionOfDayOpen] = useState(false);
+  const [intentionOpen, setIntentionOpen] = useState(false);
+  const [decompressionOpen, setDecompressionOpen] = useState(false);
+  const [sessionIntention, setSessionIntention] = useState("");
+  const sessionStartWordsRef = useRef(null);
+  const [conversationRoomOpen, setConversationRoomOpen] = useState(false);
+  const [storyMapOpen, setStoryMapOpen] = useState(false);
   const [flushConfirm, setFlushConfirm] = useState(false);
   const [charSuggestions, setCharSuggestions] = useState(null);
   const [fillReview, setFillReview] = useState(null); // { type: 'character'|'world', entityId, original, proposed, fields }
@@ -9210,10 +10382,20 @@ export default function NovelForge() {
   const themeVars = useMemo(() => Object.entries(THEMES[theme]).map(([k, v]) => `${k}: ${v};`).join("\n"), [theme]);
 
   // ─── RESPONSIVE ───
+  // iPad Mini 7 is 744px wide in portrait — treat it as mobile for layout
+  // iPad Pro 11" in portrait is 834px — gets tablet layout below
   useEffect(() => {
-    const check = () => setIsMobile(window.innerWidth < 768);
-    check(); window.addEventListener("resize", check);
-    return () => window.removeEventListener("resize", check);
+    const check = () => {
+      const w = window.innerWidth;
+      setIsMobile(w < 820); // covers iPad Mini (744), iPhones, most phones
+    };
+    check();
+    window.addEventListener("resize", check);
+    window.addEventListener("orientationchange", check);
+    return () => {
+      window.removeEventListener("resize", check);
+      window.removeEventListener("orientationchange", check);
+    };
   }, []);
 
   // ─── LOAD ───
@@ -9246,14 +10428,38 @@ export default function NovelForge() {
               tensionLevel: 5, chapterEndHookScore: 0, chapterMomentum: 0, emotionalAftertaste: "",
               ...ch,
             }));
-            const chars = (proj.characters || []).map(c => ({
-              aliases: "", canonNotes: "", status: "alive",
-              image: "", lookAlike: "",
-              isBulk: false, bulkCount: 0, bulkDescription: "",
-              // Date fields deprecated — AI-maintained booleans instead
-              voiceScore: 0, voiceNotes: "",
-              ...c, // existing data overrides defaults
-            }));
+            const chars = (proj.characters || []).map(c => {
+              const merged = {
+                aliases: "", canonNotes: "", status: "alive",
+                image: "", lookAlike: "",
+                isBulk: false, bulkCount: 0, bulkDescription: "",
+                voiceScore: 0, voiceNotes: "",
+                ...c,
+              };
+              // Scrub any field that should be a string but got a stray object/array from AI corruption
+              const stringFields = [
+                "name", "role", "gender", "age", "pronouns", "aliases", "occupation",
+                "tags", "allegiances", "height", "build", "orientation",
+                "appearance", "personality", "backstory", "desires", "speechPattern",
+                "arc", "notes", "canonNotes", "voiceNotes",
+                "kinks", "fears", "flaws", "strengths", "skills", "signatureItems",
+                "secrets", "hiddenSecrets", "shortTermGoals", "longTermGoals",
+                "internalConflict", "externalConflict", "habits", "voiceSamples",
+                "currentEmotionalState", "obligationsOwed", "knowledgeState",
+                "image", "lookAlike", "bulkDescription",
+              ];
+              stringFields.forEach(f => {
+                const v = merged[f];
+                if (v !== null && v !== undefined && typeof v !== "string" && typeof v !== "number" && typeof v !== "boolean") {
+                  try { merged[f] = normalizeAiValue(v); } catch { merged[f] = ""; }
+                }
+                // Also replace literal "[object Object]" strings from previous corruption
+                if (typeof merged[f] === "string" && merged[f].includes("[object Object]")) {
+                  merged[f] = merged[f].replace(/\[object Object\]/g, "").trim();
+                }
+              });
+              return merged;
+            });
             // Ensure project-level literary fields
             if (!proj.motifs) proj.motifs = [];
             if (!proj.thematicArgument) proj.thematicArgument = { thesis: "", antithesis: "", synthesis: "", embodiedBy: {} };
@@ -9387,7 +10593,7 @@ export default function NovelForge() {
           } catch (e) { console.warn("[NovelForge] Image map population failed:", e); }
         }
         if (s && typeof s === "object") {
-          const knownKeys = ["apiKey", "model", "maxTokens", "temperature", "systemPrompt", "frequencyPenalty", "presencePenalty", "modelContextWindow", "agentsEnabled", "agentModels", "agentPostProcessors", "language"];
+          const knownKeys = ["apiKey", "model", "maxTokens", "temperature", "systemPrompt", "frequencyPenalty", "presencePenalty", "modelContextWindow", "agentsEnabled", "agentModels", "agentPostProcessors", "language", "ambientSound", "ambientVolume", "silentWritingMode", "lineFocusMode", "typewriterPacing", "circadianDimming", "breathingPauser", "breathingPauserInterval", "sessionDecompression", "chapterCelebration", "questionOfTheDay", "forgeChanGoodNight", "ambientBrightness"];
           const filtered = {};
           knownKeys.forEach(k => { if (s[k] !== undefined) filtered[k] = s[k]; });
           if (Object.keys(filtered).length) setSettings(prev => ({ ...prev, ...filtered }));
@@ -9585,6 +10791,117 @@ export default function NovelForge() {
   const project = useMemo(() => projects.find(p => p.id === activeProjectId) || null, [projects, activeProjectId]);
   const activeChapter = useMemo(() => project?.chapters?.[activeChapterIdx] || null, [project, activeChapterIdx]);
 
+  // ─── FUN FEATURE EFFECTS (depend on project/activeChapter/settings being defined) ───
+  // Breathing pauser — fires after N minutes of continuous writing
+  useEffect(() => {
+    if (!settings?.breathingPauser) return;
+    const intervalMs = Math.max(5, settings.breathingPauserInterval || 45) * 60 * 1000;
+    const check = setInterval(() => {
+      const elapsed = Date.now() - lastBreathingCheckRef.current;
+      if (elapsed >= intervalMs && activeTab === "write" && !showBreathingPauser) {
+        setShowBreathingPauser(true);
+        lastBreathingCheckRef.current = Date.now();
+      }
+    }, 60 * 1000); // check every minute
+    return () => clearInterval(check);
+  }, [settings?.breathingPauser, settings?.breathingPauserInterval, activeTab, showBreathingPauser]);
+
+  // Chapter celebration — fires once when a chapter crosses 1000 words
+  useEffect(() => {
+    if (!settings?.chapterCelebration || !activeChapter) return;
+    const chId = activeChapter.id;
+    const words = wordCount(activeChapter.content);
+    if (words >= 1000 && !lastCelebrationChapterRef.current[chId]) {
+      lastCelebrationChapterRef.current[chId] = true;
+      setShowChapterCelebration(true);
+    }
+  }, [settings?.chapterCelebration, activeChapter?.id, activeChapter?.content]);
+
+  // Circadian dimming — apply class based on hour
+  useEffect(() => {
+    if (!settings?.circadianDimming) {
+      document.body.classList.remove("nf-circadian-dim");
+      return;
+    }
+    const update = () => {
+      const hour = new Date().getHours();
+      if (hour >= 20 || hour < 6) document.body.classList.add("nf-circadian-dim");
+      else document.body.classList.remove("nf-circadian-dim");
+    };
+    update();
+    const intr = setInterval(update, 10 * 60 * 1000);
+    return () => { clearInterval(intr); document.body.classList.remove("nf-circadian-dim"); };
+  }, [settings?.circadianDimming]);
+
+  // Line focus mode
+  useEffect(() => {
+    if (settings?.lineFocusMode) document.body.classList.add("nf-line-focus");
+    else document.body.classList.remove("nf-line-focus");
+    return () => document.body.classList.remove("nf-line-focus");
+  }, [settings?.lineFocusMode]);
+
+  // Typewriter pacing
+  useEffect(() => {
+    if (settings?.typewriterPacing) document.body.classList.add("nf-typewriter-pacing");
+    else document.body.classList.remove("nf-typewriter-pacing");
+    return () => document.body.classList.remove("nf-typewriter-pacing");
+  }, [settings?.typewriterPacing]);
+
+  // Chapter tone tint
+  useEffect(() => {
+    const tones = ["melancholy", "hopeful", "dread", "tender", "wild"];
+    tones.forEach(t => document.body.classList.remove(`nf-tone-${t}`));
+    if (activeChapter?.toneKey) document.body.classList.add(`nf-tone-${activeChapter.toneKey}`);
+    return () => tones.forEach(t => document.body.classList.remove(`nf-tone-${t}`));
+  }, [activeChapter?.toneKey]);
+
+  // Question of the Day — once per day
+  useEffect(() => {
+    if (!settings?.questionOfTheDay) return;
+    try {
+      const today = new Date().toDateString();
+      const lastShown = sessionStorage.getItem("nf-qotd-shown");
+      const dismissed = sessionStorage.getItem("nf-qotd-dismissed") === today;
+      if (lastShown !== today && !dismissed) {
+        const t = setTimeout(() => setQuestionOfDayOpen(true), 2500);
+        return () => clearTimeout(t);
+      }
+    } catch {}
+  }, [settings?.questionOfTheDay]);
+
+  // Pre-session intention — once per app load
+  useEffect(() => {
+    if (activeTab !== "write" || !project) return;
+    try {
+      const shown = sessionStorage.getItem("nf-intention-shown");
+      if (!shown) {
+        const t = setTimeout(() => setIntentionOpen(true), 800);
+        return () => clearTimeout(t);
+      }
+    } catch {}
+  }, [activeTab, project?.id]);
+
+  // Session start words (for decompression summary)
+  useEffect(() => {
+    if (!project || sessionStartWordsRef.current !== null) return;
+    const total = (project.chapters || []).reduce((s, ch) => s + wordCount(ch.content), 0);
+    sessionStartWordsRef.current = total;
+  }, [project?.id]);
+
+  // Decompression on tab hide
+  useEffect(() => {
+    if (!settings?.sessionDecompression) return;
+    const handleVisibility = () => {
+      if (document.hidden && !decompressionOpen) {
+        const elapsed = Date.now() - sessionStartedAt;
+        if (elapsed < 5 * 60 * 1000) return;
+        setDecompressionOpen(true);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [settings?.sessionDecompression, sessionStartedAt, decompressionOpen]);
+
   // ─── UNIVERSAL AI FILL: works for characters, world entries, relationships ───
   const handleUniversalFill = useCallback(async (type, entityId) => {
     if (!settings.apiKey || !project) return;
@@ -9592,19 +10909,57 @@ export default function NovelForge() {
     if (type === "character") {
       entity = project.characters?.find(c => c.id === entityId);
       if (!entity?.name) { showToast("Name the character first", "error"); return; }
-      fields = ["appearance","personality","backstory","desires","shortTermGoals","longTermGoals","speechPattern","voiceSamples","habits","fears","flaws","strengths","skills","internalConflict","externalConflict","signatureItems","secrets","allegiances","arc","canonNotes","occupation","tags","orientation"];
+      fields = ["gender","age","pronouns","orientation","aliases","occupation","height","build","appearance","personality","backstory","desires","shortTermGoals","longTermGoals","speechPattern","voiceSamples","habits","fears","flaws","strengths","skills","internalConflict","externalConflict","signatureItems","secrets","hiddenSecrets","allegiances","arc","canonNotes","tags"];
       contextInfo = ContextEngine.buildTabContext(project, activeChapterIdx, "characters", entityId);
       const emptyFields = fields.filter(f => !entity[f]);
       const filledFields = fields.filter(f => entity[f]).map(f => `${f}: ${entity[f]}`);
-      prompt = `Fill in ONLY these empty fields for character "${entity.name}" (${entity.role}): ${emptyFields.join(", ")}.\n\nAlready filled:\n${filledFields.join("\n")}\n\nReturn ONLY a JSON object with the field names as keys. Do NOT include fields that already have content. Be creative, genre-appropriate (${project.genre || "fiction"}), and consistent.`;
+      prompt = `Fill in ONLY these empty fields for character "${entity.name}" (${entity.role || "role unset"}): ${emptyFields.join(", ")}.
+
+Already filled:
+${filledFields.join("\n")}
+
+CRITICAL REQUIREMENTS:
+- For 'gender': use exact value from: Female, Male, Non-binary, Genderfluid, Genderqueer, Agender, Bigender, Two-Spirit, Intersex, Trans woman, Trans man, Other
+- For 'orientation': use exact value from: Straight, Gay, Lesbian, Bisexual, Pansexual, Asexual, Demisexual, Queer, Questioning, Fluid, Other, Prefer not to label
+- For 'pronouns': exact value from: she/her, he/him, they/them, she/they, he/they, ze/zir, xe/xem, it/its, any pronouns, no pronouns (use name)
+- For 'build': exact value from: Slim, Lean, Athletic, Average, Muscular, Stocky, Heavyset, Petite, Curvy, Tall & lanky, Other
+- For 'role' (if empty): exact value from: protagonist, love interest, deuteragonist, antagonist, mentor, sidekick, foil, confidant, supporting, minor, villain, anti-hero
+- Look at <organizations> and <locations> in the context. If this character's occupation matches an existing org or location, reference it in 'allegiances', 'backstory', or 'canonNotes' by exact name.
+- NEVER include deprecated fields: introducedInChapter, meetsInChapter, backstoryRevealChapter, firstAppearanceChapter, or any date/chapter number fields.
+- Return ONLY a JSON object with the field names as keys. Do NOT include fields that already have content. Do NOT return nested objects for string fields. Be creative, genre-appropriate (${project.genre || "fiction"}), and consistent.`;
     } else if (type === "world") {
       entity = project.worldBuilding?.find(w => w.id === entityId);
       if (!entity?.name) { showToast("Name the entry first", "error"); return; }
-      fields = ["description","keywords","atmosphere","sensoryDetails","subLocations","dangers","rules","population","history","culturalNorms","resources","orgPurpose"];
+      const cat = entity.category || "Location";
+      // Category-specific field sets
+      const catFields = {
+        "Location": ["description","keywords","atmosphere","sensoryDetails","subLocations","dangers","rules","population","resources","history"],
+        "Rule / Law": ["description","keywords","enforcement","scope","loopholes","publicOpinion","enactedBy","history"],
+        "Culture": ["description","keywords","values","customs","socialHierarchy","taboos","artForms","dialect","population","history"],
+        "Organization": ["description","keywords","orgPurpose","history","culturalNorms"],
+        "Magic System": ["description","keywords","magicSource","magicRules","magicCost","magicRarity","magicTypes","magicPerception","magicPractitioners"],
+        "Technology": ["description","keywords","techFunction","techMechanism","techAvailability","techLimitations","techImpact","techCreator"],
+        "History": ["description","keywords","historyDate","historyFigures","historyCauses","historyConsequences","historyLegacy","historyDisputed"],
+        "Flora / Fauna": ["description","keywords","habitat","floraAppearance","behavior","floraUses","floraRarity","floraCultural"],
+        "Language": ["description","keywords","langSpeakers","langWriting","langPhrases","langGrammar","langRelated","langStatus"],
+        "Religion": ["description","keywords","deities","coreBeliefs","rituals","sacredPlaces","clergy","heresies","followers"],
+        "Other": ["description","keywords","history"],
+      };
+      fields = catFields[cat] || catFields["Location"];
       contextInfo = ContextEngine.buildTabContext(project, activeChapterIdx, "world", entityId);
       const emptyFields = fields.filter(f => !entity[f]);
       const filledFields = fields.filter(f => entity[f]).map(f => `${f}: ${entity[f]}`);
-      prompt = `Fill in ONLY these empty fields for world entry "${entity.name}" (${entity.category || "Location"}): ${emptyFields.join(", ")}.\n\nAlready filled:\n${filledFields.join("\n")}\n\nReturn ONLY a JSON object. Be creative, consistent with the world.`;
+      prompt = `Fill in ONLY these empty fields for world entry "${entity.name}" (category: ${cat}): ${emptyFields.join(", ")}.
+
+Already filled:
+${filledFields.join("\n")}
+
+CRITICAL REQUIREMENTS:
+- This is a ${cat} entry. Fill ONLY the listed fields — they are specific to this category.
+- NEVER output deprecated fields: introducedInChapter, introducedInDate, firstAppearanceChapter, or any date/chapter number fields.
+- Do NOT output fields from other categories (e.g. don't output 'magicSource' on a Location entry).
+- Do NOT return nested objects for string fields. All values must be strings.
+- Return ONLY a JSON object with field names as keys. Be creative and consistent with the world.`;
     } else if (type === "relationship") {
       entity = project.relationships?.find(r => r.id === entityId);
       if (!entity) return;
@@ -9637,20 +10992,32 @@ export default function NovelForge() {
       let proposed; try { proposed = JSON.parse(content); } catch { proposed = null; }
       if (typeof proposed !== "object" || proposed === null) throw new Error("Invalid response");
       // Strip deprecated fields from AI response before processing
-      const DEPRECATED = new Set([
-        "backstoryRevealChapter", "backstoryRevealDate",
-        "secretRevealChapter", "secretRevealDate",
-        "firstAppearanceChapter", "firstAppearanceDate",
-        "statusChangedChapter", "statusChangedDate",
-        "chapterEndHookNotes", "introducedInChapter", "meetsInChapter",
-      ]);
+      const DEPRECATED = DEPRECATED_AI_FIELDS;
       const reviewFields = [];
+      const normalizeDropdown = (val, options) => {
+        if (!val || typeof val !== "string") return val;
+        const lower = val.trim().toLowerCase();
+        const match = options.find(opt => opt.toLowerCase() === lower);
+        return match || val.trim();
+      };
       for (const [key, value] of Object.entries(proposed)) {
         if (DEPRECATED.has(key)) continue; // skip deprecated
         if (!fields.includes(key)) continue;
+        // Coerce value: normalize nested objects to strings, match dropdown options exactly
+        let cleanValue = value;
+        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+          cleanValue = normalizeAiValue(value);
+        }
+        // Dropdown coercion for constrained fields
+        if (key === "gender") cleanValue = normalizeDropdown(cleanValue, GENDER_OPTIONS);
+        else if (key === "orientation") cleanValue = normalizeDropdown(cleanValue, ORIENTATION_OPTIONS);
+        else if (key === "role") cleanValue = normalizeDropdown(cleanValue, ROLE_OPTIONS);
+        else if (key === "status") cleanValue = normalizeDropdown(cleanValue, ["alive","dead","absent","unknown"]);
+        else if (key === "pronouns") cleanValue = normalizeDropdown(cleanValue, PRONOUN_OPTIONS);
+        else if (key === "build") cleanValue = normalizeDropdown(cleanValue, BUILD_OPTIONS);
         const original = entity[key] || "";
-        const isModification = original && original !== value;
-        reviewFields.push({ key, label: key.replace(/([A-Z])/g, " $1").replace(/^./, s => s.toUpperCase()), original, proposed: value, isModification });
+        const isModification = original && original !== cleanValue;
+        reviewFields.push({ key, label: key.replace(/([A-Z])/g, " $1").replace(/^./, s => s.toUpperCase()), original, proposed: cleanValue, isModification });
       }
       if (reviewFields.length === 0) { showToast("AI found nothing to fill", "info"); return; }
       setFillReview({ type, entityId, fields: reviewFields });
@@ -10643,6 +12010,27 @@ const appendToChapter = useCallback((text) => {
       showToast("Replaced", "success");
     } catch { showToast("Selection expired — use Append instead", "error"); }
   }, [activeChapter, selectionRange, pushUndo, showToast, syncEditorContent, _markdownToEditorHtml]);
+
+  // Sentence Garden: pin a sentence or excerpt to the garden
+  const pinToGarden = useCallback((text) => {
+    if (!text || !text.trim() || !project) return;
+    const clean = text.trim().replace(/\s+/g, " ").slice(0, 500);
+    const entry = {
+      id: uid(),
+      text: clean,
+      chapterIdx: activeChapterIdx,
+      chapterTitle: project?.chapters?.[activeChapterIdx]?.title || "",
+      savedAt: new Date().toISOString(),
+      note: "",
+    };
+    updateProject({ sentenceGarden: [...(project.sentenceGarden || []), entry] });
+    showToast("🌿 Pinned to your garden", "success");
+  }, [project, activeChapterIdx, updateProject, showToast]);
+
+  const removeFromGarden = useCallback((entryId) => {
+    if (!project) return;
+    updateProject({ sentenceGarden: (project.sentenceGarden || []).filter(e => e.id !== entryId) });
+  }, [project, updateProject]);
 
   const reviewBeforeInsert = useCallback((content, mode) => {
     if (mode === "rewrite" && selectedText) {
@@ -12233,17 +13621,22 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
 
   // ─── AUTO-FILL HANDLERS ───
   // Shared sanitizer: strip deprecated fields from AI responses & translate to new booleans
-  const DEPRECATED_AI_FIELDS = new Set([
-    "backstoryRevealChapter", "backstoryRevealDate",
-    "secretRevealChapter", "secretRevealDate",
-    "firstAppearanceChapter", "firstAppearanceDate",
-    "statusChangedChapter", "statusChangedDate",
-    "chapterEndHookNotes", "introducedInChapter", "meetsInChapter",
-  ]);
   const sanitizeAiCharData = useCallback((item) => {
     if (!item || typeof item !== "object") return item;
     const clean = {};
     const currentChCount = project?.chapters?.length || 1;
+
+    // Coerce AI-returned values to match dropdown options (case-insensitive)
+    const normalizeDropdown = (v, options) => {
+      if (!v || typeof v !== "string") return v;
+      const trimmed = v.trim();
+      const lower = trimmed.toLowerCase();
+      const match = options.find(opt => opt.toLowerCase() === lower);
+      if (match) return match;
+      // Try partial match for flexibility (e.g. "male" matches "Male", "chief of police" isn't in role)
+      return trimmed;
+    };
+
     Object.entries(item).forEach(([k, v]) => {
       if (DEPRECATED_AI_FIELDS.has(k)) {
         if (k === "backstoryRevealChapter" && v > 0 && currentChCount >= v) clean.backstoryRevealed = true;
@@ -12251,7 +13644,26 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         if (k === "firstAppearanceChapter" && v > 0 && currentChCount >= v) clean.hasAppeared = true;
         return;
       }
-      clean[k] = v;
+      // Coerce string booleans/numbers from AI (e.g. "isBulk": "false", "bulkCount": "0")
+      const boolFields = new Set(["isBulk","hasAppeared","backstoryRevealed","secretRevealed","isPublic"]);
+      const numFields = new Set(["bulkCount","age","voiceScore","tensionLevel","chapterEndHookScore","chapterMomentum"]);
+      if (boolFields.has(k) && typeof v === "string") {
+        clean[k] = v.toLowerCase() === "true" || v === "1";
+        return;
+      }
+      if (numFields.has(k) && typeof v === "string") {
+        const n = parseInt(v, 10);
+        clean[k] = isNaN(n) ? 0 : n;
+        return;
+      }
+      // Coerce constrained fields to match dropdown options exactly
+      if (k === "gender") clean[k] = normalizeDropdown(v, GENDER_OPTIONS);
+      else if (k === "orientation") clean[k] = normalizeDropdown(v, ORIENTATION_OPTIONS);
+      else if (k === "role") clean[k] = normalizeDropdown(v, ROLE_OPTIONS);
+      else if (k === "status") clean[k] = normalizeDropdown(v, ["alive", "dead", "absent", "unknown"]);
+      else if (k === "pronouns") clean[k] = normalizeDropdown(v, PRONOUN_OPTIONS);
+      else if (k === "build") clean[k] = normalizeDropdown(v, BUILD_OPTIONS);
+      else clean[k] = v;
     });
     return clean;
   }, [project?.chapters?.length]);
@@ -12272,39 +13684,116 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
             if (v && k !== "id" && !merged[k]) merged[k] = v;
           });
         }
-        let filled = 0, skipped = 0;
+        let filled = 0, appended = 0, replaced = 0, skipped = 0;
         // FIX 3.2: Numeric fields where 0 is a valid intentional value (meaning "always"/"from start")
         const intentionalZeroFields = new Set(["voiceScore", "tensionLevel", "chapterEndHookScore", "chapterMomentum"]);
+        // Text fields that should be appended (new content joined to old), not replaced
+        const appendableFields = new Set([
+          "appearance","personality","backstory","desires","shortTermGoals","longTermGoals",
+          "speechPattern","voiceSamples","habits","fears","flaws","strengths","skills",
+          "internalConflict","externalConflict","signatureItems","secrets","hiddenSecrets",
+          "allegiances","tags","aliases","arc","canonNotes","notes","kinks",
+          "currentEmotionalState","obligationsOwed","knowledgeState",
+        ]);
+        // Dropdowns/identity — replace if different
+        const replaceableFields = new Set([
+          "role","gender","age","pronouns","orientation","status","height","build",
+          "occupation","image","lookAlike","name",
+        ]);
         Object.entries(merged).forEach(([k, v]) => {
           const existing = currentChar[k];
           const isEmpty = !existing || existing === "" || (Array.isArray(existing) && existing.length === 0) || (existing === 0 && !intentionalZeroFields.has(k));
+          const normalized = normalizeAiValue(v);
+          if (!normalized && normalized !== 0) { skipped++; return; }
           if (isEmpty) {
-            const normalized = Array.isArray(v) ? v.join(", ") : v;
             updateCharById(editingCharId, k, normalized);
             filled++;
+          } else if (appendableFields.has(k) && typeof existing === "string" && typeof normalized === "string") {
+            // Append behavior — AI may return either same content (skip) or expansion (merge)
+            const existingLower = existing.toLowerCase().trim();
+            const normLower = normalized.toLowerCase().trim();
+            if (existingLower === normLower) {
+              skipped++;
+            } else if (normLower.includes(existingLower)) {
+              // AI returned a superset — replace with the expanded version
+              updateCharById(editingCharId, k, normalized);
+              replaced++;
+            } else if (existingLower.includes(normLower)) {
+              // AI returned a subset of what we have — skip
+              skipped++;
+            } else {
+              // AI returned something new — append with separator
+              const separator = existing.endsWith(".") || existing.endsWith("!") || existing.endsWith("?") ? " " : ". ";
+              updateCharById(editingCharId, k, `${existing}${separator}${normalized}`);
+              appended++;
+            }
+          } else if (replaceableFields.has(k) && normalized !== existing) {
+            // Dropdowns/identity — user probably wants to update these when AI suggests better
+            updateCharById(editingCharId, k, normalized);
+            replaced++;
           } else {
             skipped++;
           }
         });
-        if (skipped > 0) {
-          showToast(`Updated ${filled} field${filled !== 1 ? "s" : ""} (${skipped} existing preserved)`, "success");
-        } else {
-          showToast(`Updated ${filled} field${filled !== 1 ? "s" : ""}`, "success");
-        }
+        const parts = [
+          filled > 0 && `${filled} filled`,
+          appended > 0 && `${appended} appended`,
+          replaced > 0 && `${replaced} updated`,
+          skipped > 0 && `${skipped} unchanged`,
+        ].filter(Boolean);
+        showToast(parts.length ? parts.join(" · ") : "No changes", filled + appended + replaced > 0 ? "success" : "info");
       }
     } else {
       // Create all characters from batch
       let newChars = [...(project?.characters || [])];
       let lastId = null;
+      const newCharacters = [];
       for (const item of sanitizedItems) {
-        const normalized = Object.fromEntries(Object.entries(item).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]));
+        const normalized = Object.fromEntries(Object.entries(item).map(([k, v]) => [k, (typeof v === "object" && v !== null && !Array.isArray(v) && k !== "orgHierarchy" && k !== "beats" && k !== "appearances") ? normalizeAiValue(v) : (Array.isArray(v) ? normalizeAiValue(v) : v)]));
         const nc = { ...createDefaultCharacter(), ...normalized, id: uid() };
         newChars.push(nc);
+        newCharacters.push(nc);
         lastId = nc.id;
       }
-      updateProject({ characters: newChars });
+
+      // ─── AUTO-LINK: match character's occupation/allegiances to existing orgs ───
+      // If character says "Chief of Police" and a "Police Department" org exists,
+      // add this character to that org's orgMembers list.
+      const existingOrgs = (project?.worldBuilding || []).filter(w => w.category === "Organization" && w.name);
+      let updatedWorld = [...(project?.worldBuilding || [])];
+      let linksCreated = 0;
+      if (existingOrgs.length > 0) {
+        for (const char of newCharacters) {
+          const searchText = [char.occupation, char.title, char.allegiances, char.role, char.tags, char.backstory, char.canonNotes]
+            .filter(Boolean).join(" ").toLowerCase();
+          if (!searchText) continue;
+          for (const org of existingOrgs) {
+            const orgNameLower = org.name.toLowerCase();
+            // Match whole org name OR distinctive single-word (length>3) fragment
+            const orgWords = orgNameLower.split(/\s+/).filter(w => w.length > 3 && !["the","and","of","for","with"].includes(w));
+            const matches = searchText.includes(orgNameLower) || orgWords.some(w => searchText.includes(w));
+            if (matches) {
+              const currentMembers = Array.isArray(org.orgMembers) ? org.orgMembers : [];
+              if (!currentMembers.includes(char.id)) {
+                const orgIdx = updatedWorld.findIndex(w => w.id === org.id);
+                if (orgIdx >= 0) {
+                  updatedWorld[orgIdx] = { ...updatedWorld[orgIdx], orgMembers: [...currentMembers, char.id] };
+                  linksCreated++;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      const patch = { characters: newChars };
+      if (linksCreated > 0) patch.worldBuilding = updatedWorld;
+      updateProject(patch);
       if (lastId) setEditingCharId(lastId);
-      showToast(`${items.length} character${items.length !== 1 ? "s" : ""} created`, "success");
+      const msg = linksCreated > 0
+        ? `${items.length} character${items.length !== 1 ? "s" : ""} created, ${linksCreated} org link${linksCreated !== 1 ? "s" : ""} auto-created`
+        : `${items.length} character${items.length !== 1 ? "s" : ""} created`;
+      showToast(msg, "success");
     }
   }, [editingCharId, updateCharById, updateProject, project, showToast]);
 
@@ -12326,6 +13815,50 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       }).filter(Boolean);
     };
 
+    // Resolve orgHierarchy positions: AI returns { charId: "John Smith" }, we want { charId: "<uuid>" }
+    // If charId looks like a character NAME not a UUID, try to resolve; otherwise clear
+    const resolveOrgHierarchy = (hier) => {
+      if (!Array.isArray(hier)) return [];
+      return hier.map(pos => {
+        if (!pos || typeof pos !== "object") return null;
+        const clean = {
+          id: pos.id || uid(),
+          name: String(pos.name || "").trim(),
+          role: String(pos.role || "").trim(),
+          parentId: pos.parentId || "",
+          charId: "",
+        };
+        // Try to resolve charId: could be a real ID, a character name, or empty
+        if (pos.charId && typeof pos.charId === "string") {
+          const asId = pos.charId;
+          if (allChars.some(c => c.id === asId)) {
+            clean.charId = asId;
+          } else {
+            // Try matching as name
+            const match = allChars.find(c => c.name && c.name.toLowerCase() === asId.toLowerCase());
+            if (match) clean.charId = match.id;
+          }
+        }
+        return clean;
+      }).filter(Boolean);
+    };
+
+    // Auto-link: find existing characters whose occupation/role/title suggests org membership
+    // e.g. new "Police Department" org + existing char with occupation "Detective" → add as member
+    const findMatchingExistingChars = (orgName, orgPurpose) => {
+      if (!orgName) return [];
+      const orgWords = orgName.toLowerCase().split(/\s+/).filter(w => w.length > 3 && !["the","and","of","for","with"].includes(w));
+      const purposeWords = (orgPurpose || "").toLowerCase().split(/\s+/).filter(w => w.length > 4);
+      return allChars.filter(c => {
+        if (c.isBulk) return false;
+        const charText = [c.occupation, c.title, c.allegiances, c.tags, c.canonNotes].filter(Boolean).join(" ").toLowerCase();
+        if (!charText) return false;
+        if (charText.includes(orgName.toLowerCase())) return true;
+        if (orgWords.some(w => charText.includes(w))) return true;
+        return false;
+      }).map(c => c.id);
+    };
+
     // All possible world entry fields — generic merge for ANY category
     const worldFields = [
       "name","category","description","keywords",
@@ -12345,8 +13878,19 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     for (const raw of items) {
       const norm = Object.fromEntries(Object.entries(raw).map(([k, v]) => {
         if (["frequentCharacters","orgMembers","connectedTo","orgHierarchy"].includes(k)) return [k, v];
-        return [k, Array.isArray(v) ? v.join(", ") : v];
+        return [k, normalizeAiValue(v)];
       }));
+      // Normalize category to exact option spelling (accept "location" → "Location", "rule/law" → "Rule / Law")
+      if (norm.category) {
+        const validCats = ["Location","Rule / Law","Culture","Organization","Magic System","Technology","History","Flora / Fauna","Language","Religion","Other"];
+        const rawCat = String(norm.category).toLowerCase().replace(/\s+/g, " ").trim();
+        const match = validCats.find(c => {
+          const normalized = c.toLowerCase().replace(/\s*\/\s*/g, "/").replace(/\s+/g, " ");
+          const compared = rawCat.replace(/\s*\/\s*/g, "/");
+          return normalized === compared || normalized === rawCat || c.toLowerCase() === rawCat;
+        });
+        if (match) norm.category = match;
+      }
       const existing = newWorld.find(w => w.name && norm.name && w.name.toLowerCase() === norm.name.toLowerCase());
       if (existing) {
         // Merge: only fill empty fields, preserve existing values
@@ -12356,22 +13900,49 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         });
         // Category: always accept if provided (the whole point of this fix)
         if (norm.category) merged.category = norm.category;
-        // Special arrays
+        // Special arrays — resolve names to IDs
         if (norm.frequentCharacters) merged.frequentCharacters = resolveCharNames(norm.frequentCharacters);
-        if (norm.orgHierarchy && Array.isArray(norm.orgHierarchy)) merged.orgHierarchy = norm.orgHierarchy;
+        if (norm.orgMembers && Array.isArray(norm.orgMembers)) {
+          // Resolve: could be names OR IDs. Accept both.
+          const resolved = norm.orgMembers.map(ref => {
+            if (allChars.some(c => c.id === ref)) return ref;
+            const match = allChars.find(c => c.name && c.name.toLowerCase() === String(ref).toLowerCase());
+            return match ? match.id : null;
+          }).filter(Boolean);
+          // Merge with existing members, dedupe
+          const existingMembers = Array.isArray(merged.orgMembers) ? merged.orgMembers : [];
+          merged.orgMembers = [...new Set([...existingMembers, ...resolved])];
+        }
+        if (norm.orgHierarchy && Array.isArray(norm.orgHierarchy)) merged.orgHierarchy = resolveOrgHierarchy(norm.orgHierarchy);
         newWorld = newWorld.map(w => w.id === existing.id ? merged : w);
         updated++;
       } else {
         // Create new entry with all fields
+        const resolvedFreq = norm.frequentCharacters ? resolveCharNames(norm.frequentCharacters) : [];
+        // Resolve orgMembers (AI may return names, IDs, or both)
+        const aiMembers = Array.isArray(norm.orgMembers) ? norm.orgMembers.map(ref => {
+          if (allChars.some(c => c.id === ref)) return ref;
+          const match = allChars.find(c => c.name && c.name.toLowerCase() === String(ref).toLowerCase());
+          return match ? match.id : null;
+        }).filter(Boolean) : [];
+        // AUTO-LINK: if this is an Organization, find existing chars whose occupation matches
+        let autoLinkedMembers = [];
+        if (norm.category === "Organization" && norm.name) {
+          autoLinkedMembers = findMatchingExistingChars(norm.name, norm.orgPurpose);
+        }
+        const mergedMembers = [...new Set([...aiMembers, ...autoLinkedMembers])];
         const entry = {
           id: uid(), referenceImages: {}, imagePrompts: {},
-          frequentCharacters: norm.frequentCharacters ? resolveCharNames(norm.frequentCharacters) : [],
-          connectedTo: [], orgMembers: [],
-          orgHierarchy: Array.isArray(norm.orgHierarchy) ? norm.orgHierarchy : [],
+          frequentCharacters: resolvedFreq,
+          connectedTo: [],
+          orgMembers: mergedMembers,
+          orgHierarchy: resolveOrgHierarchy(norm.orgHierarchy),
         };
         worldFields.forEach(f => { entry[f] = norm[f] || ""; });
-        // Fix numeric fields
-        entry.introducedInChapter = parseInt(entry.introducedInChapter, 10) || 0;
+        // Deprecated fields — never store them
+        delete entry.introducedInChapter;
+        delete entry.introducedInDate;
+        delete entry.firstAppearanceChapter;
         newWorld.push(entry);
         added++;
       }
@@ -12383,7 +13954,11 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
       const newIds = newWorld.slice(-added).map(w => w.id);
       setExpandedWorldIds(prev => new Set([...prev, ...newIds]));
     }
-    const parts = [added && `${added} added`, updated && `${updated} updated`].filter(Boolean);
+    // Count auto-linked members on newly-added orgs (for toast)
+    const autoLinkCount = added > 0
+      ? newWorld.slice(-added).filter(w => w.category === "Organization").reduce((sum, w) => sum + (Array.isArray(w.orgMembers) ? w.orgMembers.length : 0), 0)
+      : 0;
+    const parts = [added && `${added} added`, updated && `${updated} updated`, autoLinkCount > 0 && `${autoLinkCount} existing character${autoLinkCount !== 1 ? "s" : ""} auto-linked`].filter(Boolean);
     showToast(`World entries: ${parts.join(", ")}`, "success");
   }, [project, updateProject, showToast]);
 
@@ -12418,7 +13993,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     };
 
     for (const raw of items) {
-      const norm = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, (k === "characters" || k === "locations") ? v : (Array.isArray(v) ? v.join("\n") : v)]));
+      const norm = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, (k === "characters" || k === "locations" || k === "beats") ? v : (typeof v === "object" && v !== null ? normalizeAiValue(v) : v)]));
       const chNum = norm.chapter || currentOutline.length + 1;
       const charIds = resolveCharList(norm.characters);
       const locIds = resolveLocList(norm.locations);
@@ -12467,7 +14042,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     let addedCount = 0;
 
     for (const raw of items) {
-      const norm = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : v]));
+      const norm = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, normalizeAiValue(v)]));
       // FIX: Resolve character names to IDs
       const c1Id = _resolveCharId(norm.char1 || "", allChars);
       const c2Id = _resolveCharId(norm.char2 || "", allChars);
@@ -12481,27 +14056,36 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         (r.char1 === c1Id && r.char2 === c2Id) || (r.char1 === c2Id && r.char2 === c1Id)
       );
       if (isDupe) continue;
-      // FIX: Validate dropdown values against valid options
+      // FIX: Validate dropdown values against valid options (case-insensitive)
       const validStatus = new Set(["strangers","acquaintances","developing","friends","friends-with-benefits","tension","dating","lovers","committed","complicated","estranged","enemies","enemies-to-lovers","exes","forbidden","unrequited"]);
       const validTension = new Set(["none","low","medium","high","explosive"]);
       const validTensionType = new Set(["romantic","hostile","suspenseful","competitive","protective","friendly","neutral","acquaintance","mixed"]);
+      const validCategory = new Set(["romantic","family","friendship","professional","mentor","rivalry","political","spiritual","other"]);
+      const validPower = new Set(["equal","char1-dominant","char2-dominant","shifting"]);
+      const validTrust = new Set(["none","low","medium","high","absolute"]);
+      // Normalize to canonical casing — accept "MEDIUM" or "Medium" from AI
+      const pickValid = (raw, validSet, fallback) => {
+        const s = String(raw || "").toLowerCase().trim();
+        return validSet.has(s) ? s : fallback;
+      };
       newRels.push({
         id: uid(), char1: c1Id, char2: c2Id,
         dynamic: norm.dynamic || "",
-        status: validStatus.has(String(norm.status || "").toLowerCase()) ? norm.status : "developing",
-        tension: validTension.has(String(norm.tension || "").toLowerCase()) ? norm.tension : "medium",
-        tensionType: validTensionType.has(String(norm.tensionType || "").toLowerCase()) ? norm.tensionType : "romantic",
+        status: pickValid(norm.status, validStatus, "developing"),
+        tension: pickValid(norm.tension, validTension, "medium"),
+        tensionType: pickValid(norm.tensionType, validTensionType, "romantic"),
         notes: norm.notes || "", char1Perspective: norm.char1Perspective || "",
         char2Perspective: norm.char2Perspective || "", progression: norm.progression || "",
-        meetsInChapter: norm.meetsInChapter || 0, evolutionTimeline: norm.evolutionTimeline || "",
-        // NEW FIELDS
-        category: norm.category || "romantic",
-        powerDynamic: norm.powerDynamic || "equal",
+        evolutionTimeline: norm.evolutionTimeline || "",
+        // Dropdowns with validation
+        category: pickValid(norm.category, validCategory, "romantic"),
+        powerDynamic: pickValid(norm.powerDynamic, validPower, "equal"),
+        trustLevel: pickValid(norm.trustLevel, validTrust, "medium"),
+        // Free-form text
         sharedSecrets: norm.sharedSecrets || "",
         keyScenes: norm.keyScenes || "",
         chemistry: norm.chemistry || "",
         conflictSource: norm.conflictSource || "",
-        trustLevel: norm.trustLevel || "medium",
         isPublic: norm.isPublic !== false,
         taboos: norm.taboos || "",
         terms: norm.terms || "",
@@ -12562,14 +14146,14 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           {/* Chapter images */}
           {chapterImages.length > 0 && (
             <div style={{ marginBottom: 24 }}>
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>In Chapters ({chapterImages.length})</div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>In Chapters ({chapterImages.length})</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
                 {chapterImages.map(img => (
                   <div key={img.id} className="nf-card" style={{ padding: 0, overflow: "hidden" }}>
                     <img loading="lazy" key={img.id} src={img.imageUrl} alt={img.alt} style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
                     <div key={img.id} style={{ padding: "8px 12px" }}>
-                      <div key={img.id} style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>{img.chapterTitle}</div>
-                      {img.alt && <div style={{ fontSize: 9, color: "var(--nf-text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{img.alt}</div>}
+                      <div key={img.id} style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{img.chapterTitle}</div>
+                      {img.alt && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{img.alt}</div>}
                     </div>
                   </div>
                 ))}
@@ -12580,7 +14164,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
           {/* Draft/generated images */}
           <div>
             {draftImages.length > 0 && chapterImages.length > 0 && (
-              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>Drafts ({draftImages.length})</div>
+              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 20 }}>Drafts ({draftImages.length})</div>
             )}
             {draftImages.length === 0 && chapterImages.length === 0 && (
               <div className="nf-empty-state">Generate images from the Write tab using the Image Prompt tool</div>
@@ -12591,7 +14175,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
                 <div key={img.id} className="nf-card" style={{ padding: 0, overflow: "hidden" }}>
                   <img loading="lazy" key={img.id} src={img.imageUrl} alt={img.prompt?.slice(0, 50) || "Generated image"} style={{ width: "100%", height: 180, objectFit: "cover", display: "block" }} />
                   <div key={img.id} style={{ padding: "10px 14px" }}>
-                    <div key={img.id} style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 4 }}>
+                    <div key={img.id} style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 4 }}>
                       {img.chapterTitle || `Chapter ${(img.chapterIdx || 0) + 1}`} · {img.createdAt ? new Date(img.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                     </div>
                     {img.prompt && <div style={{ fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.4, maxHeight: 48, overflow: "hidden", textOverflow: "ellipsis" }}>{img.prompt}</div>}
@@ -12630,6 +14214,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
     { id: "plot", label: "Plot", icon: <Icons.Book /> },
     { id: "relationships", label: "Relations", icon: <Icons.Flame /> },
     { id: "images", label: "Images", icon: <Icons.Eye /> },
+    { id: "keepsakes", label: "Keepsakes", icon: <Icons.Heart /> },
     { id: "memory", label: "Memory", icon: <Icons.Brain /> },
     { id: "settings", label: "Settings", icon: <Icons.Settings /> },
   ], []);
@@ -12711,6 +14296,9 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
               if (isMobile) setShowProjectList(false);
             }}
               className={`nf-project-item ${p.id === activeProjectId ? "active" : ""}`}>
+              {p.coverImage && (
+                <div style={{ width: "100%", height: 80, backgroundImage: `url(${p.coverImage})`, backgroundSize: "cover", backgroundPosition: "center", borderRadius: 3, marginBottom: 6, border: "1px solid var(--nf-border)" }} aria-hidden="true" />
+              )}
               <div className="nf-project-title">{p.title}</div>
               <div className="nf-project-meta">
                 {p.genre} · {p.chapters?.length || 0} ch · {projWords > 0 ? `${(projWords / 1000).toFixed(1)}k words` : "0 words"}
@@ -12749,7 +14337,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={{ color: "var(--nf-accent-2)" }}><Icons.Wand /></span>
           <span style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>AI</span>
-          {chatMessages.length > 0 && <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>({chatMessages.length})</span>}
+          {chatMessages.length > 0 && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>({chatMessages.length})</span>}
         </div>
         {chatMessages.length > 0 && (
           <button onClick={() => setChatMessages([])} className="nf-btn-micro">
@@ -12784,7 +14372,7 @@ CRITICAL: Every sentence must describe something visible. If a detail cannot be 
             <span style={{ fontWeight: 600, fontSize: 10 }}>Selected</span>
             <span style={{ opacity: 0.6, fontSize: 10 }}>({wordCount(selectedText)} words)</span>
           </div>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.4, maxHeight: 36, overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", lineHeight: 1.4, maxHeight: 36, overflow: "hidden", textOverflow: "ellipsis" }}>
             "{selectedText.slice(0, 100)}{selectedText.length > 100 ? "…" : ""}"
           </div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 5 }}>
@@ -13031,8 +14619,8 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           <div className="nf-chat-empty">
             <div style={{ fontSize: 24, marginBottom: 8, opacity: 0.25 }}>✦</div>
             <div>Select a mode and describe what you need.</div>
-            <div style={{ marginTop: 6, fontSize: 10, opacity: 0.5 }}>Tap mode buttons for details.</div>
-            <div style={{ marginTop: 10, fontSize: 10, opacity: 0.35 }}>
+            <div style={{ marginTop: 6, opacity: 0.5 }}>Tap mode buttons for details.</div>
+            <div style={{ marginTop: 10, opacity: 0.35 }}>
               Enter to send · {navigator.platform?.includes("Mac") ? "⌘" : "Ctrl"}+Enter from anywhere
             </div>
           </div>
@@ -13050,13 +14638,13 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           return (
             <div key={msg.id}>
               {showChapterLabel && (
-                <div style={{ textAlign: "center", padding: "6px 0", fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.5 }}>
+                <div style={{ textAlign: "center", padding: "6px 0", fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", opacity: 0.5 }}>
                   — Chapter {(msg.chapterIdx || 0) + 1} —
                 </div>
               )}
               <div className={`nf-chat-msg ${msg.role === "user" ? "nf-chat-msg-user" : ""}`}>
                 {msg.role === "assistant" && msg.mode && (
-                  <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 2, fontWeight: 700 }}>{msg.mode}</div>
+                  <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 2, fontWeight: 700 }}>{msg.mode}</div>
                 )}
                 <div className={`nf-chat-bubble ${msg.role === "user" ? "nf-chat-bubble-user" : ""} ${msg.isError ? "nf-chat-bubble-error" : ""} ${theme === "reading" && msg.role === "assistant" ? "nf-bubble-sentence-fade" : ""}`}
                   dangerouslySetInnerHTML={{ __html: msg.role === "assistant" ? renderMarkdownCached(msg.content) : msg.content.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\n/g,"<br/>") }} />
@@ -13071,6 +14659,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     <button onClick={() => handleCopyMsg(msg)} className="nf-btn-micro" style={{ transition: "background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s, transform 0.15s" }}>
                       {copiedMsgId === msg.id ? <><Icons.Check /> <span style={{ color: "var(--nf-success)" }}>Copied</span></> : <><Icons.Copy /> Copy</>}
                     </button>
+                    <Tooltip text="Pin a favorite line to your Sentence Garden">
+                      <button onClick={() => {
+                        // Pin the first 1-2 sentences or the whole thing if short
+                        const text = (msg.content || "").replace(/<[^>]*>/g, " ").trim();
+                        const firstSentence = text.match(/^[^.!?]+[.!?]["')]?\s*/);
+                        pinToGarden(firstSentence ? firstSentence[0] : text.slice(0, 300));
+                      }} className="nf-btn-micro" aria-label="Pin to Sentence Garden">🌿 Pin</button>
+                    </Tooltip>
                     {/* B4: Individual message delete */}
                     <button onClick={() => setChatMessages(prev => prev.filter(m => m.id !== msg.id))} className="nf-btn-micro" title="Remove message"><Icons.X /></button>
                   </div>
@@ -13146,7 +14742,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
       <div className="nf-chat-input-area">
         <div className="nf-scene-direction-box">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-            <label style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            <label style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
               Scene Direction <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, opacity: 0.6 }}>
                 {genMode === "rewrite" || genMode === "summarize"
                   ? `(not used in ${genMode} mode)`
@@ -13155,7 +14751,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             </label>
             {/* B14: Character count for scene direction */}
             {sceneNotes.length > 0 && (
-              <span style={{ fontSize: 9, color: sceneNotes.length > 1000 ? "var(--nf-accent)" : "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
+              <span style={{ fontSize: 11, color: sceneNotes.length > 1000 ? "var(--nf-accent)" : "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
                 {sceneNotes.length} chars · ~{estimateTokens(sceneNotes)} tok
               </span>
             )}
@@ -13165,11 +14761,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             className="nf-scene-textarea" aria-label="Scene direction notes" />
           {/* ─── LITERARY CRAFT PANEL ─── */}
           <details style={{ marginTop: 4 }}>
-            <summary style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", cursor: "pointer", padding: "4px 0", userSelect: "none" }}>Craft Controls</summary>
+            <summary style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", cursor: "pointer", padding: "4px 0", userSelect: "none" }}>Craft Controls</summary>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px", marginTop: 6 }}>
               <div className="nf-field">
                 <label className="nf-label">Narrative Distance</label>
-                <select value={activeChapter?.narrativeDistance || ""} onChange={e => updateChapter(activeChapterIdx, { narrativeDistance: e.target.value })} className="nf-select" style={{ fontSize: 10 }}>
+                <select value={activeChapter?.narrativeDistance || ""} onChange={e => updateChapter(activeChapterIdx, { narrativeDistance: e.target.value })} className="nf-select">
                   <option value="">Default</option>
                   <option value="cinematic">Cinematic (wide shot)</option>
                   <option value="close-third">Close Third</option>
@@ -13180,22 +14776,63 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 <label className="nf-label">Tension Level</label>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <input type="range" min="1" max="10" value={activeChapter?.tensionLevel || 5} onChange={e => updateChapter(activeChapterIdx, { tensionLevel: parseInt(e.target.value, 10) })} style={{ flex: 1, accentColor: "var(--nf-accent)" }} />
-                  <span style={{ fontSize: 10, fontFamily: "var(--nf-font-mono)", color: "var(--nf-text-muted)", minWidth: 16, textAlign: "center" }}>{activeChapter?.tensionLevel || 5}</span>
+                  <span style={{ fontSize: 11, fontFamily: "var(--nf-font-mono)", color: "var(--nf-text-muted)", minWidth: 16, textAlign: "center" }}>{activeChapter?.tensionLevel || 5}</span>
                 </div>
               </div>
               <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
                 <label className="nf-label">Sensory Palette</label>
-                <input value={activeChapter?.sensoryPalette || ""} onChange={e => updateChapter(activeChapterIdx, { sensoryPalette: e.target.value })} className="nf-input nf-input-compact" placeholder="e.g. Visual-dominant, cold blues, rain, damp stone" style={{ fontSize: 10 }} />
+                <input value={activeChapter?.sensoryPalette || ""} onChange={e => updateChapter(activeChapterIdx, { sensoryPalette: e.target.value })} className="nf-input nf-input-compact" placeholder="e.g. Visual-dominant, cold blues, rain, damp stone" />
               </div>
               <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
                 <label className="nf-label">Subtext</label>
-                <input value={activeChapter?.subtextNotes || ""} onChange={e => updateChapter(activeChapterIdx, { subtextNotes: e.target.value })} className="nf-input nf-input-compact" placeholder="What's really happening beneath the surface?" style={{ fontSize: 10 }} />
+                <input value={activeChapter?.subtextNotes || ""} onChange={e => updateChapter(activeChapterIdx, { subtextNotes: e.target.value })} className="nf-input nf-input-compact" placeholder="What's really happening beneath the surface?" />
               </div>
-              {activeChapter?.chapterEndHookScore > 0 && (
-                <div style={{ gridColumn: "1 / -1", fontSize: 10, color: "var(--nf-text-muted)", padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
+              {/* Chapter tone — optional emotional key for the chapter */}
+              <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
+                <label className="nf-label">Tone Key</label>
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                  {[
+                    { k: "", label: "—", c: "transparent" },
+                    { k: "melancholy", label: "Melancholy", c: "#5a6a7a" },
+                    { k: "hopeful", label: "Hopeful", c: "#7d8a6f" },
+                    { k: "dread", label: "Dread", c: "#5a3a3a" },
+                    { k: "tender", label: "Tender", c: "#a8765a" },
+                    { k: "wild", label: "Wild", c: "#c4653a" },
+                  ].map(t => (
+                    <button key={t.k} onClick={() => updateChapter(activeChapterIdx, { toneKey: t.k })}
+                      className={`nf-btn-micro ${activeChapter?.toneKey === t.k ? "nf-btn-primary" : ""}`}
+                      style={{ borderColor: activeChapter?.toneKey === t.k ? t.c : "var(--nf-border)", color: activeChapter?.toneKey === t.k ? t.c : "inherit" }}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, fontStyle: "italic" }}>
+                  Subtly shifts the editor palette for mood
+                </div>
+              </div>
+              {/* Chapter banner uploader */}
+              <div className="nf-field" style={{ gridColumn: "1 / -1" }}>
+                <label className="nf-label">Chapter Banner</label>
+                <input type="file" accept="image/*" id={`nf-banner-input-${activeChapterIdx}`} style={{ display: "none" }} onChange={e => {
+                  const file = e.target.files?.[0]; if (!file) return;
+                  if (file.size > 3 * 1024 * 1024) { showToast("Image too large — max 3MB", "error"); return; }
+                  const reader = new FileReader();
+                  reader.onload = ev => updateChapter(activeChapterIdx, { bannerImage: ev.target.result });
+                  reader.readAsDataURL(file);
+                  e.target.value = "";
+                }} />
+                <button onClick={() => document.getElementById(`nf-banner-input-${activeChapterIdx}`)?.click()} className="nf-btn-micro">
+                  {activeChapter?.bannerImage ? "🖼 Replace banner" : "🖼 Upload banner"}
+                </button>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, fontStyle: "italic" }}>
+                  Sets mood before you write — shown above the editor
+                </div>
+              </div>
+              {!settings.silentWritingMode && activeChapter?.chapterEndHookScore > 0 && (
+                <div style={{ gridColumn: "1 / -1", color: "var(--nf-text-muted)", padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
                   <span style={{ fontWeight: 600 }}>Chapter-end hook: </span>
                   <span style={{ color: activeChapter.chapterEndHookScore >= 7 ? "var(--nf-success)" : activeChapter.chapterEndHookScore >= 4 ? "var(--nf-accent-2)" : "var(--nf-accent)" }}>{activeChapter.chapterEndHookScore}/10</span>
-                  {activeChapter.chapterEndHookNotes && <span> — {activeChapter.chapterEndHookNotes}</span>}
+                  {activeChapter.emotionalAftertaste && <span> — {activeChapter.emotionalAftertaste}</span>}
                 </div>
               )}
             </div>
@@ -13203,10 +14840,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 		  {activeChapter?.worldView && (
 		    <div style={{ marginTop: 6, padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
 			  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
-			    <label style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-success)" }}>
+			    <label style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-success)" }}>
 				  Chapter World View
 			    </label>
-			    <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
+			    <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
 				  {(activeChapter.worldView || "").length.toLocaleString()} chars
 			    </span>
 			  </div>
@@ -13216,7 +14853,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 			    placeholder="Chapter world view..."
 			    className="nf-textarea nf-textarea-sm"
 			    style={{
-				  minHeight: 80, maxHeight: 200, fontSize: 10, lineHeight: 1.5,
+				  minHeight: 80, maxHeight: 200, lineHeight: 1.5,
 				  fontFamily: "var(--nf-font-mono)", background: "var(--nf-bg-surface)",
 				  resize: "vertical",
 			    }}
@@ -13337,7 +14974,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <div className="nf-chapter-item-title">{ch.title}</div>
                         {(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length > 0 && (
-                          <span style={{ fontSize: 8, padding: "0 4px", borderRadius: 2, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 600, lineHeight: "14px", flexShrink: 0 }}
+                          <span style={{ fontSize: 11, padding: "0 4px", borderRadius: 2, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 600, lineHeight: "14px", flexShrink: 0 }}
                             title={`${(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length} draft(s)`}>
                             {(project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).length} drafts
                           </span>
@@ -13379,7 +15016,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 {/* Drafts for this chapter — shown inline when sidebar drafts section is open */}
                 {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? -1) === i).map(draft => (
                   <div key={draft.id} style={{
-                    padding: "4px 10px 5px 28px", fontSize: 10, color: "var(--nf-text-muted)",
+                    padding: "4px 10px 5px 28px", color: "var(--nf-text-muted)",
                     borderLeft: "2px solid var(--nf-accent)", marginLeft: 14, marginBottom: 2,
                     background: "var(--nf-accent-glow)", borderRadius: "0 2px 2px 0",
                     lineHeight: 1.4,
@@ -13389,17 +15026,17 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                         title={draft.title}>
                         ↳ {draft.title}
                       </span>
-                      <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4, flexShrink: 0 }}>
+                      <span style={{ fontSize: 11, opacity: 0.5, marginLeft: 4, flexShrink: 0 }}>
                         {wordCount(draft.content)}w
                       </span>
                     </div>
                     <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
                       <button onClick={(e) => { e.stopPropagation(); handleRestoreDraft(draft.id); }}
-                        className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                        className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
                         ↩ Restore
                       </button>
                       <button onClick={(e) => { e.stopPropagation(); handleDeleteDraft(draft.id); }}
-                        className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px" }}>
+                        className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 5px" }}>
                         ✕
                       </button>
                     </div>
@@ -13410,7 +15047,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             {/* Drafts for chapters that no longer exist (position out of range) */}
             {showDrafts && (project?.drafts || []).filter(d => (d.originalIndex ?? 0) >= (project?.chapters?.length || 0)).map(draft => (
               <div key={draft.id} style={{
-                padding: "4px 10px", fontSize: 10, color: "var(--nf-text-muted)",
+                padding: "4px 10px", color: "var(--nf-text-muted)",
                 borderLeft: "2px solid var(--nf-accent-2)", marginLeft: 14, marginBottom: 2,
                 background: "var(--nf-bg-surface)", borderRadius: "0 2px 2px 0",
               }}>
@@ -13418,7 +15055,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   <span title={draft.title} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                     ↳ {draft.title} <span style={{ opacity: 0.5 }}>(no chapter)</span>
                   </span>
-                  <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>{wordCount(draft.content)}w</span>
+                  <span style={{ fontSize: 11, opacity: 0.5, marginLeft: 4 }}>{wordCount(draft.content)}w</span>
                 </div>
                 <div style={{ display: "flex", gap: 3, marginTop: 2 }}>
                   <button onClick={() => {
@@ -13435,10 +15072,10 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     setActiveChapterIdx(chapters.length - 1);
                     forceRepopulateEditor();
                     showToast(`"${draft.title}" restored as new chapter`, "success");
-                  }} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
+                  }} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 5px", borderColor: "var(--nf-success)", color: "var(--nf-success)" }}>
                     ↩ Add as Ch{(project?.chapters?.length || 0) + 1}
                   </button>
-                  <button onClick={() => handleDeleteDraft(draft.id)} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 5px" }}>
+                  <button onClick={() => handleDeleteDraft(draft.id)} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 5px" }}>
                     ✕
                   </button>
                 </div>
@@ -13448,14 +15085,32 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           {/* Drafts toggle */}
           {(project?.drafts || []).length > 0 && (
             <div style={{ padding: "6px 10px", borderTop: "1px solid var(--nf-border)", display: "flex", gap: 4 }}>
-              <button onClick={() => setShowDrafts(!showDrafts)} className="nf-btn-micro" style={{ flex: 1, justifyContent: "center", fontSize: 9 }}>
+              <button onClick={() => setShowDrafts(!showDrafts)} className="nf-btn-micro" style={{ flex: 1, justifyContent: "center", fontSize: 11 }}>
                 ◇ {showDrafts ? "Hide" : "Show"} {(project?.drafts || []).length} Draft{(project?.drafts || []).length > 1 ? "s" : ""}
               </button>
             </div>
           )}
-          <div style={{ padding: "8px 12px", borderTop: "1px solid var(--nf-border)", fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
-            {totalProjectWords.toLocaleString()} words total
+          <div style={{ padding: "8px 12px", borderTop: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
+            {settings.silentWritingMode ? "—" : `${totalProjectWords.toLocaleString()} words total`}
           </div>
+          {/* Quiet milestones — small marginal notes, not popups */}
+          {!settings.silentWritingMode && (() => {
+            const words = totalProjectWords;
+            const garden = (project?.sentenceGarden || []).length;
+            const chapters = (project?.chapters || []).filter(ch => wordCount(ch.content) > 100).length;
+            const milestones = [];
+            if (words >= 50000) milestones.push("a novel's length now");
+            else if (words >= 25000) milestones.push("halfway to a novel");
+            else if (words >= 10000) milestones.push("a quiet milestone: 10,000 words");
+            else if (words >= 5000) milestones.push("5k words kept");
+            if (garden >= 20) milestones.push(`${garden} favorite lines pinned`);
+            if (chapters >= 10) milestones.push(`${chapters} chapters underway`);
+            return milestones.length > 0 ? (
+              <div style={{ padding: "4px 12px 8px", fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic", opacity: 0.7, lineHeight: 1.5 }}>
+                {milestones[milestones.length - 1]}
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
       <div className={`nf-editor-area ${viewingDraftId ? "nf-draft-viewing" : ""}`}>
@@ -13473,14 +15128,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
                 <span style={{ color: "var(--nf-accent)", fontSize: 12 }}>◇</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 9, color: "var(--nf-accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                  <div style={{ fontSize: 11, color: "var(--nf-accent)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em" }}>
                     Viewing Draft — Ch{(draft.originalIndex ?? activeChapterIdx) + 1}
                   </div>
                   <div title={draft.title} style={{ fontSize: 14, fontWeight: 500, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {draft.title}
                   </div>
                   {draft.deactivatedAt && (
-                    <div style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>
                       Saved {new Date(draft.deactivatedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
                     </div>
                   )}
@@ -13564,7 +15219,6 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       style={{
                         borderColor: linkedPlot ? "var(--nf-success)" : undefined,
                         color: linkedPlot ? "var(--nf-success)" : undefined,
-                        fontSize: 10,
                         padding: "4px 10px",
                         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                         fontWeight: 600,
@@ -13605,7 +15259,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                           borderBottom: "1px solid var(--nf-border)",
                           background: "var(--nf-success-bg)",
                         }}>
-                          <div style={{ fontSize: 10, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-success)", textTransform: "uppercase", letterSpacing: "0.1em" }}>
                             Currently Linked
                           </div>
                           <div style={{
@@ -13616,7 +15270,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                           </div>
                           {linkedPlot.sceneType && (
                             <span style={{
-                              fontSize: 9, padding: "2px 6px",
+                              fontSize: 11, padding: "2px 6px",
                               background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)",
                               borderRadius: 3, color: "var(--nf-text-muted)", marginTop: 3, display: "inline-block",
                             }}>{linkedPlot.sceneType}</span>
@@ -13645,7 +15299,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                         <>
                           <div style={{
                             padding: "6px 12px",
-                            fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)",
+                            fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)",
                             textTransform: "uppercase", letterSpacing: "0.1em",
                           }}>
                             Relink to...
@@ -13672,7 +15326,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                               onMouseLeave={e => e.currentTarget.style.background = "transparent"}
                             >
                               <div style={{ fontWeight: 500 }}>{pl.title || "Untitled"}</div>
-                              <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 1 }}>
+                              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 1 }}>
                                 {(pl.chapter || 0) > 0 ? `Ch${pl.chapter}` : "unlinked"}
                                 {pl.sceneType ? ` · ${pl.sceneType}` : ""}
                               </div>
@@ -13711,7 +15365,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             })()}
           </div>
           <SaveIndicator status={saveStatus} fileLinked={fileLinked} />
-          <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words · ${Math.max(1, Math.ceil(currentChapterWords / 250))}m read` : ""}</span>
+          {!settings.silentWritingMode && (
+            <span className="nf-word-count">{currentChapterWords > 0 ? `${currentChapterWords.toLocaleString()} words · ${Math.max(1, Math.ceil(currentChapterWords / 250))}m read` : ""}</span>
+          )}
           <div className="nf-header-actions">
             <select value={activeChapter?.pov || ""} onChange={e => updateChapter(activeChapterIdx, { pov: e.target.value })}
               aria-label="Chapter POV"
@@ -13734,7 +15390,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                 className="nf-btn-icon-sm" style={activeChapter?.worldView ? { borderColor: "var(--nf-success)", color: "var(--nf-success)" } : undefined}
                 aria-label="Generate chapter world view">
                 <Icons.Map />
-                {!activeChapter?.worldView && <span style={{ fontSize: 9, opacity: 0.6 }}>World View</span>}
+                {!activeChapter?.worldView && <span style={{ fontSize: 11, opacity: 0.6 }}>World View</span>}
               </button>
             </Tooltip>
             <Tooltip text={wordCount(activeChapter?.content) > 0 ? "Save current content as draft, start fresh" : "Write some content first"}>
@@ -13985,6 +15641,18 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
             />
           )}
           <div className="nf-text-editor">
+            {/* Chapter banner image — optional mood-setter */}
+            {activeChapter?.bannerImage && !focusMode && (
+              <div style={{ position: "relative", marginBottom: 12, borderRadius: 3, overflow: "hidden", border: "1px solid var(--nf-border)" }}>
+                <img loading="lazy" src={activeChapter.bannerImage} alt="" style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
+                <button onClick={() => updateChapter(activeChapterIdx, { bannerImage: "" })}
+                  className="nf-btn-icon"
+                  style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.5)", color: "#fff", padding: 4, borderRadius: 3 }}
+                  aria-label="Remove banner">
+                  <Icons.X />
+                </button>
+              </div>
+            )}
             <ContinuityGhost
               prevChapter={activeChapterIdx > 0 ? project?.chapters?.[activeChapterIdx - 1] : null}
               prevChapterSummary={activeChapterIdx > 0 ? project?.chapters?.[activeChapterIdx - 1]?.summary : ""}
@@ -14147,7 +15815,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                 <div>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "var(--nf-text)", fontFamily: "var(--nf-font-display)" }}>Image Prompt</div>
-                  <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 1 }}>
+                  <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 1 }}>
                     {imagePromptData.mentionedChars?.length > 0
                       ? imagePromptData.mentionedChars.map(c => c.name).join(", ")
                       : "No characters detected"}
@@ -14159,7 +15827,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
 
               {/* Warnings */}
               {imagePromptData.mentionedChars?.some(c => !c.lookAlike) && (
-                <div style={{ padding: "6px 10px", background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 3, marginBottom: 8, fontSize: 10, color: "var(--nf-accent)" }}>
+                <div style={{ padding: "6px 10px", background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", borderRadius: 3, marginBottom: 8, color: "var(--nf-accent)" }}>
                   ⚠ Missing look-alike: {imagePromptData.mentionedChars.filter(c => !c.lookAlike).map(c => c.name).join(", ")}
                 </div>
               )}
@@ -14210,7 +15878,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   </button>
                   {!imageGen4x && (
                     <select value={imageGenAspect} onChange={e => setImageGenAspect(e.target.value)}
-                      className="nf-select" style={{ fontSize: 10, padding: "4px 6px", width: "auto", minWidth: 90 }}>
+                      className="nf-select"style={{ padding: "4px 6px", width: "auto", minWidth: 90 }}>
                       <option value="">Default ratio</option>
                       <option value="1:1">1:1 Square</option>
                       <option value="16:9">16:9 Wide</option>
@@ -14224,7 +15892,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                       <option value="21:9">21:9 Ultrawide</option>
                     </select>
                   )}
-                  <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--nf-text-muted)", cursor: "pointer", userSelect: "none" }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--nf-text-muted)", cursor: "pointer", userSelect: "none" }}>
                     <input type="checkbox" checked={imageGen4x} onChange={e => setImageGen4x(e.target.checked)}
                       style={{ width: 14, height: 14, accentColor: "var(--nf-accent)" }} />
                     4x mode
@@ -14285,9 +15953,9 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     {imageGenStatus.images.map((img, idx) => (
                       <div key={idx} style={{ border: "1px solid var(--nf-border)", borderRadius: 3, overflow: "hidden", textOverflow: "ellipsis", background: "var(--nf-bg-deep)" }}>
                         <div key={idx} style={{ padding: "4px 8px", background: "var(--nf-bg-surface)", borderBottom: "1px solid var(--nf-border)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <span key={idx} style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{img.label}</span>
+                          <span key={idx} style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{img.label}</span>
                           {img.status === "generating" && <Spinner />}
-                          {img.status === "error" && <span style={{ fontSize: 9, color: "var(--nf-accent)" }}>Failed</span>}
+                          {img.status === "error" && <span style={{ fontSize: 11, color: "var(--nf-accent)" }}>Failed</span>}
                         </div>
                         {img.imageUrl ? (
                           <>
@@ -14305,12 +15973,12 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                                 _insertImageAtPoint(el, _buildImgFigure(img.imageUrl, caption + ` (${img.label})`), position);
                                 syncEditorContent(); lastSyncedContentRef.current = el.innerHTML;
                                 showToast(`${img.label} inserted`, "success");
-                              }} className="nf-btn-micro" style={{ fontSize: 8, flex: 1, justifyContent: "center" }}>
+                              }} className="nf-btn-micro" style={{ fontSize: 11, flex: 1, justifyContent: "center" }}>
                                 <Icons.ArrowDown /> Insert
                               </button>
                               <button onClick={() => {
                                 handleSaveImageDraft(img.imageUrl, `${imagePromptData?.prompt || ""} [${img.label}]`, activeChapterIdx);
-                              }} className="nf-btn-micro" style={{ fontSize: 8, flex: 1, justifyContent: "center" }}>
+                              }} className="nf-btn-micro" style={{ fontSize: 11, flex: 1, justifyContent: "center" }}>
                                 <Icons.Save /> Draft
                               </button>
                             </div>
@@ -14320,7 +15988,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                             <Spinner />
                           </div>
                         ) : (
-                          <div style={{ padding: 16, textAlign: "center", fontSize: 10, color: "var(--nf-text-muted)" }}>
+                          <div style={{ padding: 16, textAlign: "center", color: "var(--nf-text-muted)" }}>
                             {img.error || "Pending"}
                           </div>
                         )}
@@ -14363,11 +16031,11 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
           </div>
           {showGroupForm && (
             <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--nf-border)", background: "var(--nf-bg-raised)" }}>
-              <div style={{ fontSize: 10, fontWeight: 600, color: "var(--nf-accent-2)", marginBottom: 6 }}>New Character Group</div>
-              <input id="nf-group-name" placeholder="Group name (e.g. Palace Guards)" className="nf-input nf-input-compact" style={{ fontSize: 11, marginBottom: 4 }} />
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-accent-2)", marginBottom: 6 }}>New Character Group</div>
+              <input id="nf-group-name" placeholder="Group name (e.g. Palace Guards)" className="nf-input nf-input-compact"style={{ marginBottom: 4 }} />
               <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
-                <input id="nf-group-count" type="number" min="1" defaultValue="10" placeholder="Count" className="nf-input nf-input-compact" style={{ fontSize: 11, width: 60 }} />
-                <input id="nf-group-desc" placeholder="Brief description..." className="nf-input nf-input-compact" style={{ fontSize: 11, flex: 1 }} />
+                <input id="nf-group-count" type="number" min="1" defaultValue="10" placeholder="Count" className="nf-input nf-input-compact"style={{ width: 60 }} />
+                <input id="nf-group-desc" placeholder="Brief description..." className="nf-input nf-input-compact"style={{ flex: 1 }} />
               </div>
               <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                 <button onClick={() => setShowGroupForm(false)} className="nf-btn-micro">Cancel</button>
@@ -14406,7 +16074,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   ) : c.isBulk ? (
                     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, opacity: 0.3 }}>
                       <Icons.Users />
-                      <span style={{ fontSize: 8, color: "var(--nf-text-muted)" }}>{c.bulkCount || "?"}×</span>
+                      <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{c.bulkCount || "?"}×</span>
                     </div>
                   ) : (
                     <span style={{ fontSize: 20, opacity: 0.2, color: "var(--nf-text-muted)" }}>
@@ -14416,7 +16084,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   {/* Status indicator */}
                   {c.status && c.status !== "alive" && (
                     <div style={{
-                      position: "absolute", bottom: 3, right: 3, fontSize: 8, padding: "2px 5px",
+                      position: "absolute", bottom: 3, right: 3, padding: "2px 5px",
                       background: "rgba(0,0,0,0.7)", color: "var(--nf-text-inverse, #fff)", borderRadius: 2,
                       textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600,
                     }}>{c.status}</div>
@@ -14429,7 +16097,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
                   }}>{c.name || <span style={{ opacity: 0.3, fontStyle: "italic" }}>unnamed</span>}</div>
                   <div style={{
-                    fontSize: 9, color: "var(--nf-text-muted)", textTransform: "uppercase",
+                    fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase",
                     letterSpacing: "0.1em", marginTop: 1,
                   }}>{c.role}</div>
                 </div>
@@ -14446,18 +16114,18 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                   {editingChar.name || "New Character"}
                 </h2>
                 {editingChar.isBulk ? (
-                  <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginTop: 2 }}>
+                  <div style={{ fontSize: 11, color: "var(--nf-accent-2)", marginTop: 2 }}>
                     Bulk group — {editingChar.bulkCount || "?"} individuals (background characters, not individually developed)
                   </div>
                 ) : (() => {
                   const checkFields = ["appearance","personality","backstory","desires","speechPattern","fears","flaws","strengths","skills","internalConflict","externalConflict","shortTermGoals","longTermGoals","habits","voiceSamples","signatureItems","secrets","arc"];
                   const emptyCount = checkFields.filter(f => !editingChar[f]).length;
                   return emptyCount > 0 ? (
-                    <div style={{ fontSize: 10, color: "var(--nf-accent-2)", marginTop: 2 }}>
+                    <div style={{ fontSize: 11, color: "var(--nf-accent-2)", marginTop: 2 }}>
                       {emptyCount} empty field{emptyCount !== 1 ? "s" : ""} — use AI chat or click "Fill Empty Fields" to populate
                     </div>
                   ) : (
-                    <div style={{ fontSize: 10, color: "var(--nf-success)", marginTop: 2 }}>✓ All key fields populated</div>
+                    <div style={{ fontSize: 11, color: "var(--nf-success)", marginTop: 2 }}>✓ All key fields populated</div>
                   );
                 })()}
               </div>
@@ -14480,11 +16148,14 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     characters: Array.isArray(pl.characters) ? pl.characters.filter(cid => cid !== charId) : pl.characters,
                     povCharacterId: pl.povCharacterId === charId ? "" : pl.povCharacterId,
                   }));
-                  // Clean worldBuilding: remove from frequentCharacters arrays, clear orgHierarchy.charId refs
+                  // Clean worldBuilding: remove from frequentCharacters, orgMembers, and orgHierarchy.charId refs
                   const updatedWorld = (project?.worldBuilding || []).map(w => {
                     const next = { ...w };
                     if (Array.isArray(w.frequentCharacters)) {
                       next.frequentCharacters = w.frequentCharacters.filter(cid => cid !== charId);
+                    }
+                    if (Array.isArray(w.orgMembers)) {
+                      next.orgMembers = w.orgMembers.filter(cid => cid !== charId);
                     }
                     if (Array.isArray(w.orgHierarchy)) {
                       next.orgHierarchy = w.orgHierarchy.map(pos => pos.charId === charId ? { ...pos, charId: "" } : pos);
@@ -14547,7 +16218,7 @@ CAMERA DEFAULTS: ${contextData._cameraDefaults || "50mm f/2.8"}` },
                     if (!editingChar.name || !editingChar.appearance) { showToast("Add name and appearance first", "error"); return; }
                     showToast("Generating portrait...", "info");
                     try {
-                      const prompt = `Create a realistic passport portrait (Frame: Strict head-and-shoulders passport-style portrait. Camera is at eye level, centered on the subject. Subject's head occupies approximately 60-70% of the image height (from crown to chin). Shoulders visible below the chin, showing upper chest. Crop at mid-torso. No full body. No waist-up. Subject faces directly forward, looking into the camera lens. Neutral expression. Eyes open, looking straight ahead.
+                      const prompt = `Create a realistic model catalogue portrait (Frame: Strict upper body model catalogue portrait. Camera is at eye level, centered on the subject. Subject's head occupies approximately 30% of the image height (from crown to chin). Shoulders visible below the chin, showing upper chest. Crop at mid-torso. No full body, only waist-up. Subject faces directly forward, looking into the camera lens. Sensual expression with eyes half looking up and mouth half gasping, sweaty with glossy baby oil allover, flexing with one hand behind head and one hand flexing to the navel. Shirtless.
 
 Background: Pure solid white (#FFFFFF). No gradients. No shadows on the background. No texture. No color tint. No bokeh. No objects. Just flat, even, pure white from edge to edge.
 
@@ -14603,7 +16274,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     </button>
                   )}
                 </div>
-                <div style={{ fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.5 }}>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", lineHeight: 1.5 }}>
                   AI generation uses your appearance description. Add details like hair color, build, and distinguishing features for better results.
                 </div>
               </div>
@@ -14621,7 +16292,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <SelectField label="Role in Story" value={editingChar.role} onChange={v => updateCharById(editingCharId, "role", v)} options={ROLE_OPTIONS} />
                     <Field label="Number of Individuals" value={editingChar.bulkCount} onChange={v => updateCharById(editingCharId, "bulkCount", parseInt(v, 10) || 0)} type="number" />
                   </div>
-                  <DebouncedField label="Group Description" value={editingChar.bulkDescription} onChange={v => { updateCharById(editingCharId, "bulkDescription", v); updateCharById(editingCharId, "personality", v); }} multiline placeholder="Who are they? What's their collective identity, attitude, and function in the story?" />
+                  <DebouncedField label="Group Description" value={editingChar.bulkDescription || editingChar.personality || ""} onChange={v => {
+                    // Single batched update — both fields match so AI prompt always has something regardless of which it reads
+                    setProjects(prev => prev.map(p => {
+                      if (p.id !== activeProjectId) return p;
+                      return { ...p, characters: p.characters.map(c => c.id === editingCharId ? { ...c, bulkDescription: v, personality: v } : c) };
+                    }));
+                  }} multiline placeholder="Who are they? What's their collective identity, attitude, and function in the story?" />
                 </div>
                 <div className="nf-char-section">
                   <div className="nf-char-section-label">Group Details</div>
@@ -14673,7 +16350,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <div className="nf-field" style={{ flex: 1 }}>
                       <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Occupation / Title
-                        {orgPositions.length > 0 && <span style={{ fontSize: 8, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from org</span>}
+                        {orgPositions.length > 0 && <span style={{ fontSize: 11, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from org</span>}
                       </label>
                       {orgPositions.length > 0 ? (
                         <div>
@@ -14692,7 +16369,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   <input type="checkbox" checked={!!editingChar.hasAppeared}
                     onChange={e => updateCharById(editingCharId, "hasAppeared", e.target.checked)} />
                   <span>Has appeared in story {editingChar.hasAppeared ? "✓" : "(AI will include when chapters mention them)"}</span>
-                  <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips</span>
+                  <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips</span>
                 </label>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px 12px" }}>
@@ -14704,20 +16381,34 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 {/* Allegiances: auto-derived from org memberships */}
                 {(() => {
                   const orgNames = [];
+                  const orgItems = [];
                   (project?.worldBuilding || []).forEach(w => {
                     if (w.category !== "Organization") return;
                     const isMember = (Array.isArray(w.orgMembers) && w.orgMembers.includes(editingCharId)) ||
                       (Array.isArray(w.orgHierarchy) && w.orgHierarchy.some(p => p.charId === editingCharId));
-                    if (isMember && w.name) orgNames.push(w.name);
+                    if (isMember && w.name) { orgNames.push(w.name); orgItems.push(w); }
                   });
                   const derived = orgNames.length > 0 ? orgNames.join(", ") : "";
                   return (
                     <div className="nf-field" style={{ flex: 1 }}>
                       <label className="nf-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         Allegiances / Factions
-                        {derived && <span style={{ fontSize: 8, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from orgs</span>}
+                        {derived && <span style={{ fontSize: 11, padding: "2px 4px", borderRadius: 2, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>from orgs</span>}
                       </label>
-                      {derived && <div style={{ fontSize: 10, color: "var(--nf-accent-2)", padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 4 }}>{derived}</div>}
+                      {orgItems.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+                          {orgItems.map(org => (
+                            <div key={org.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px 4px 4px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, fontSize: 11, color: "var(--nf-accent-2)", fontWeight: 500 }}>
+                              {org.logoImage ? (
+                                <img loading="lazy" src={org.logoImage} alt="" style={{ width: 20, height: 20, objectFit: "contain", borderRadius: 2, background: "var(--nf-bg-raised)" }} />
+                              ) : (
+                                <span style={{ width: 20, height: 20, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12 }}>⚜</span>
+                              )}
+                              {org.name}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <DebouncedField value={editingChar.allegiances || ""} onChange={v => updateCharById(editingCharId, "allegiances", v)} placeholder={derived ? "Additional allegiances..." : "e.g. Order of the Phoenix, Team Alpha"} small />
                     </div>
                   );
@@ -14745,8 +16436,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 });
                 if (addressTerms.length === 0) return null;
                 return (
-                  <div style={{ fontSize: 10, padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginBottom: 4 }}>
-                    <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Address terms (from relationships): </span>
+                  <div style={{ fontSize: 11, padding: "4px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginBottom: 4 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Address terms (from relationships): </span>
                     {addressTerms.map((t, i) => <span key={i}>{i > 0 ? " · " : ""}{t.name}: {t.terms}</span>)}
                   </div>
                 );
@@ -14788,20 +16479,20 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <input type="checkbox" checked={!!editingChar.backstoryRevealed}
                   onChange={e => updateCharById(editingCharId, "backstoryRevealed", e.target.checked)} />
                 <span>Backstory has been revealed to reader {editingChar.backstoryRevealed ? "✓ (AI will include in context)" : "(AI holds back until revealed)"}</span>
-                <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips this</span>
+                <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips this</span>
               </label>
               <DebouncedField label="Character Arc" value={editingChar.arc} onChange={v => updateCharById(editingCharId, "arc", v)} multiline placeholder="Full trajectory: who they start as → who they become..." small />
               <DebouncedField label="Signature Items / Possessions" value={editingChar.signatureItems || ""} onChange={v => updateCharById(editingCharId, "signatureItems", v)} multiline placeholder="A locket with a photo, enchanted blade, battered notebook, vintage motorcycle..." small />
               {/* Secrets — two tiers */}
               <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 8 }}>
-                <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Secrets</div>
+                <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Secrets</div>
                 <DebouncedField label="Known Secrets (reader knows, sent to AI)" value={editingChar.secrets || ""} onChange={v => updateCharById(editingCharId, "secrets", v)} multiline placeholder="Secrets the reader/AI should know — hidden heritage, double identity, forbidden power..." small />
                 <DebouncedField label="Hidden Secrets (NOT sent to AI until reveal)" value={editingChar.hiddenSecrets || ""} onChange={v => updateCharById(editingCharId, "hiddenSecrets", v)} multiline placeholder="Plot twists — keep hidden from AI context until the reveal chapter..." small />
                 <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", fontSize: 11, color: "var(--nf-text-muted)", cursor: "pointer" }}>
                   <input type="checkbox" checked={!!editingChar.secretRevealed}
                     onChange={e => updateCharById(editingCharId, "secretRevealed", e.target.checked)} />
                   <span>Secrets have been revealed {editingChar.secretRevealed ? "✓ (AI now knows)" : "(AI doesn't see hiddenSecrets)"}</span>
-                  <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips this</span>
+                  <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: "auto" }}>AI auto-flips this</span>
                 </label>
                 {/* Auto-derived: shared secrets from relationships */}
                 {(() => {
@@ -14816,8 +16507,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   });
                   if (relSecrets.length === 0) return null;
                   return (
-                    <div style={{ fontSize: 10, padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginTop: 6 }}>
-                      <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Shared secrets (from relationships):</span>
+                    <div style={{ fontSize: 11, padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, color: "var(--nf-accent-2)", marginTop: 6 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Shared secrets (from relationships):</span>
                       {relSecrets.map((s, i) => <div key={i} style={{ marginTop: 2 }}>🤫 With {s.name}: {s.secret}</div>)}
                     </div>
                   );
@@ -14833,7 +16524,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 );
                 return (
                   <div style={{ marginTop: 8, padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
-                    <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Relationships (from Relationships tab)</div>
+                    <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Relationships (from Relationships tab)</div>
                     {charRels.map(r => {
                       const otherId = r.char1 === editingCharId ? r.char2 : r.char1;
                       const otherName = _resolveCharName(otherId, project?.characters);
@@ -14841,8 +16532,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                         <div key={r.id} style={{ marginBottom: 6, padding: "6px 8px", background: "var(--nf-bg-surface)", borderRadius: 2, fontSize: 11 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
                             <span style={{ fontWeight: 600, color: "var(--nf-text)" }}>↔ {otherName}</span>
-                            {r.status && <span style={{ fontSize: 9, padding: "0px 5px", background: "var(--nf-bg-hover)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{r.status}</span>}
-                            {r.tension && r.tension !== "none" && <span style={{ fontSize: 9, color: "var(--nf-accent)" }}>{r.tension}</span>}
+                            {r.status && <span style={{ fontSize: 11, padding: "0px 5px", background: "var(--nf-bg-hover)", borderRadius: 2, color: "var(--nf-text-muted)" }}>{r.status}</span>}
+                            {r.tension && r.tension !== "none" && <span style={{ fontSize: 11, color: "var(--nf-accent)" }}>{r.tension}</span>}
                           </div>
                           {r.dynamic && <div style={{ color: "var(--nf-text-dim)", lineHeight: 1.4 }}>{r.dynamic.slice(0, 150)}{r.dynamic.length > 150 ? "..." : ""}</div>}
                         </div>
@@ -14857,19 +16548,48 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <div className="nf-char-section">
               <div className="nf-char-section-label" style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span>Living State</span>
-                <span style={{ fontSize: 9, fontWeight: 500, color: "var(--nf-accent-2)", background: "var(--nf-bg-deep)", padding: "2px 6px", borderRadius: 2, letterSpacing: "0.05em" }}>AI-MAINTAINED</span>
+                <span style={{ fontSize: 11, fontWeight: 500, color: "var(--nf-accent-2)", background: "var(--nf-bg-deep)", padding: "2px 6px", borderRadius: 2, letterSpacing: "0.05em" }}>AI-MAINTAINED</span>
                 {editingChar.lastUpdatedChapter > 0 && (
-                  <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: "auto", fontFamily: "var(--nf-font-mono)" }}>Last updated Ch{editingChar.lastUpdatedChapter + 1}</span>
+                  <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: "auto", fontFamily: "var(--nf-font-mono)" }}>Last updated Ch{editingChar.lastUpdatedChapter + 1}</span>
                 )}
               </div>
               <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
-                <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 10, lineHeight: 1.5 }}>
                   These fields update automatically after each chapter you write (when State Updater post-processor is enabled). Edit freely — AI will refine on next generation.
                 </div>
                 <DebouncedField label="Current Emotional State" value={editingChar.currentEmotionalState || ""} onChange={v => updateCharById(editingCharId, "currentEmotionalState", v)} multiline placeholder="e.g. 'Exhausted, wary of Marcus, hiding the letter'" small />
                 <DebouncedField label="Obligations Owed" value={editingChar.obligationsOwed || ""} onChange={v => updateCharById(editingCharId, "obligationsOwed", v)} multiline placeholder="e.g. 'Promised Sarah to meet Tuesday. Owes Marcus the truth. Debt to the Loan Shark.'" small />
                 <DebouncedField label="Knowledge State" value={editingChar.knowledgeState || ""} onChange={v => updateCharById(editingCharId, "knowledgeState", v)} multiline placeholder="e.g. 'Knows the letter is forged. Doesn't know Marcus's secret. Suspects the affair.'" small />
               </div>
+            </div>
+
+            {/* Mood Board — multiple reference images for character */}
+            <div className="nf-char-section">
+              <div className="nf-char-section-label">Mood Board</div>
+              <MultiImageGallery
+                label="Reference Images"
+                hint="Outfits, expressions, settings, vibes. Think Pinterest for this character."
+                images={editingChar.moodBoard || []}
+                onAdd={(img) => updateCharById(editingCharId, "moodBoard", [...(editingChar.moodBoard || []), img])}
+                onRemove={(id) => updateCharById(editingCharId, "moodBoard", (editingChar.moodBoard || []).filter(i => i.id !== id))}
+                onUpdateCaption={(id, caption) => updateCharById(editingCharId, "moodBoard", (editingChar.moodBoard || []).map(i => i.id === id ? { ...i, caption } : i))}
+                maxCount={16}
+              />
+            </div>
+
+            {/* Signature Items — illustrations for the character's iconic objects */}
+            <div className="nf-char-section">
+              <div className="nf-char-section-label">Signature Item Illustrations</div>
+              <MultiImageGallery
+                label="Iconic Objects"
+                hint="The locket, the blade, the worn notebook — objects that carry story weight."
+                images={editingChar.signatureItemImages || []}
+                onAdd={(img) => updateCharById(editingCharId, "signatureItemImages", [...(editingChar.signatureItemImages || []), img])}
+                onRemove={(id) => updateCharById(editingCharId, "signatureItemImages", (editingChar.signatureItemImages || []).filter(i => i.id !== id))}
+                onUpdateCaption={(id, caption) => updateCharById(editingCharId, "signatureItemImages", (editingChar.signatureItemImages || []).map(i => i.id === id ? { ...i, caption } : i))}
+                maxCount={8}
+                compact
+              />
             </div>
 
             {/* D4: Section — Intimate (collapsible by default for non-romance) */}
@@ -14889,12 +16609,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
                 {/* LOCATIONS — toggle directly from character tab */}
                 <div style={{ marginBottom: 22 }}>
-                  <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                     📍 Locations — toggle where {editingChar.name || "this character"} is found
                   </div>
                   {(() => {
                     const locationEntries = (project?.worldBuilding || []).filter(w => w.name && (w.category === "Location" || !w.category));
-                    if (locationEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No locations yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("world")}>World</span> tab</div>;
+                    if (locationEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No locations yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("world")}>World</span> tab</div>;
                     return (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {locationEntries.map(loc => {
@@ -14905,7 +16625,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               const updated = isAssigned ? freqChars.filter(cid => cid !== editingCharId) : [...freqChars, editingCharId];
                               updateProject({ worldBuilding: (project?.worldBuilding || []).map(w => w.id === loc.id ? { ...w, frequentCharacters: updated } : w) });
                             }} style={{
-                              padding: "4px 10px", borderRadius: 6, fontSize: 10, fontWeight: isAssigned ? 600 : 400, cursor: "pointer",
+                              padding: "4px 10px", borderRadius: 6, fontWeight: isAssigned ? 600 : 400, cursor: "pointer",
                               background: isAssigned ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                               border: `1px solid ${isAssigned ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                               color: isAssigned ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
@@ -14923,7 +16643,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 {/* RELATIONSHIPS — view + quick-add from character tab */}
                 <div style={{ marginBottom: 22 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-                    <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>
                       ↔ Relationships
                     </div>
                     {(project?.characters || []).filter(c => c.id !== editingCharId && c.name).length > 0 && (
@@ -14944,7 +16664,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                             trustLevel: "medium", isPublic: true, taboos: "", terms: "",
                           }] });
                           e.target.value = "";
-                        }} style={{ fontSize: 9, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)", cursor: "pointer" }}>
+                        }} style={{ fontSize: 11, padding: "2px 6px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, color: "var(--nf-text-muted)", cursor: "pointer" }}>
                           <option value="">+ Add relationship...</option>
                           {(project?.characters || []).filter(c => c.id !== editingCharId && c.name).filter(c => {
                             // Hide characters that already have a relationship with this one
@@ -14959,7 +16679,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   {(() => {
                     const charRels = (project?.relationships || []).filter(r => r.char1 === editingCharId || r.char2 === editingCharId);
                     const allChars = project?.characters || [];
-                    if (charRels.length === 0) return <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No relationships yet — use the dropdown above to add one</div>;
+                    if (charRels.length === 0) return <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No relationships yet — use the dropdown above to add one</div>;
                     const tensionColors = { none: "var(--nf-text-muted)", low: "var(--nf-success)", medium: "var(--nf-accent-2)", high: "var(--nf-accent)", explosive: "var(--nf-accent)" };
                     return (
                       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -14972,15 +16692,15 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               {other?.image && <img loading="lazy" src={other.image} alt="" style={{ width: 22, height: 22, borderRadius: "50%", objectFit: "cover" }} />}
                               <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)", cursor: "pointer" }} onClick={() => setEditingCharId(otherId)}>{other?.name || "?"}</span>
                               <select value={r.status || "developing"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, status: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 95 }}>
+                                style={{ fontSize: 11, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 95 }}>
                                 {RELATIONSHIP_STATUS_OPTIONS.map(o => <option value={o.value}>{o.label}</option>)}
                               </select>
                               <select value={r.tension || "medium"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, tension: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: `1px solid ${tensionColors[r.tension] || "var(--nf-border)"}`, borderRadius: 2, color: tensionColors[r.tension] || "var(--nf-text-muted)", cursor: "pointer", fontWeight: 600, maxWidth: 80 }}>
+                                style={{ fontSize: 11, padding: "2px 4px", background: "var(--nf-bg-deep)", border: `1px solid ${tensionColors[r.tension] || "var(--nf-border)"}`, borderRadius: 2, color: tensionColors[r.tension] || "var(--nf-text-muted)", cursor: "pointer", fontWeight: 600, maxWidth: 80 }}>
                                 {TENSION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                               </select>
                               <select value={r.category || "romantic"} onChange={e => updateProject({ relationships: (project?.relationships || []).map(re => re.id === r.id ? { ...re, category: e.target.value } : re) })}
-                                style={{ fontSize: 9, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 80 }}>
+                                style={{ fontSize: 11, padding: "2px 4px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text-muted)", cursor: "pointer", maxWidth: 80 }}>
                                 {RELATIONSHIP_CATEGORY_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                               </select>
                               <button onClick={() => { setActiveTab("relationships"); setExpandedRelIds(prev => new Set([...prev, r.id])); }}
@@ -15008,13 +16728,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   });
                   return charOrgs.length > 0 ? (
                     <div style={{ marginBottom: 20 }}>
-                      <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                         ⛨ Organizations ({charOrgs.length})
                       </div>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {charOrgs.map((o, i) => (
                           <span key={i} onClick={() => { setActiveTab("world"); setExpandedWorldIds(prev => new Set([...prev, o.orgId])); }}
-                            style={{ padding: "4px 10px", borderRadius: 6, fontSize: 10, cursor: "pointer",
+                            style={{ padding: "4px 10px", borderRadius: 6, cursor: "pointer",
                               background: "rgba(160,140,200,0.08)", border: "1px solid rgba(160,140,200,0.3)",
                               color: "rgba(160,140,200,0.8)", fontWeight: 500 }}>
                             ⛨ {o.position || "Member"} — {o.orgName}
@@ -15027,12 +16747,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
                 {/* PLOT APPEARANCES — toggle directly */}
                 <div>
-                  <div style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                     Appears in chapters
                   </div>
                   {(() => {
                     const plotEntries = (project?.plotOutline || []).sort((a, b) => (a.chapter || 0) - (b.chapter || 0));
-                    if (plotEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No plot entries yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("plot")}>Plot</span> tab</div>;
+                    if (plotEntries.length === 0) return <div role="button" tabIndex={0} style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>No plot entries yet — create them in the <span style={{ cursor: "pointer", color: "var(--nf-accent-2)", textDecoration: "underline" }} onClick={() => setActiveTab("plot")}>Plot</span> tab</div>;
                     return (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {plotEntries.map(pl => {
@@ -15043,7 +16763,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               const updated = isIn ? charIds.filter(cid => cid !== editingCharId) : [...charIds, editingCharId];
                               updateProject({ plotOutline: (project?.plotOutline || []).map(p => p.id === pl.id ? { ...p, characters: updated } : p) });
                             }} style={{
-                              padding: "2px 8px", borderRadius: 4, fontSize: 9, cursor: "pointer", fontWeight: isIn ? 600 : 400,
+                              padding: "2px 8px", borderRadius: 4, fontSize: 11, cursor: "pointer", fontWeight: isIn ? 600 : 400,
                               background: isIn ? "var(--nf-accent-glow)" : "var(--nf-bg-surface)",
                               border: `1px solid ${isIn ? "var(--nf-accent)" : "var(--nf-border)"}`,
                               color: isIn ? "var(--nf-accent)" : "var(--nf-text-muted)",
@@ -15126,7 +16846,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               )}
               <button onClick={() => {
                 const newId = uid();
-                updateProject({ worldBuilding: [...items, { id: newId, name: "", category: "", description: "", keywords: "", introducedInChapter: 0, referenceImages: {}, imagePrompts: {},
+                updateProject({ worldBuilding: [...items, { id: newId, name: "", category: "", description: "", keywords: "", referenceImages: {}, imagePrompts: {},
                   // ─── NEW FIELDS ───
                   frequentCharacters: [], // character IDs who frequent this location
                   subLocations: "", // child locations / rooms / areas
@@ -15144,6 +16864,9 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   orgHierarchy: [], // [{id, name, role, parentId, charId}]
                   orgPurpose: "", // mission statement / goals
                   orgMembers: [], // character IDs
+                  // ─── FUN: logos for organizations, multi-ref for locations ───
+                  logoImage: "", // Base64 logo/seal/crest (for orgs)
+                  additionalRefs: [], // [{id, data, caption, addedAt}] — multiple location photos
                 }] });
                 setExpandedWorldIds(prev => new Set([...prev, newId]));
               }} className="nf-btn-icon-sm"><Icons.Plus /> Add</button>
@@ -15152,10 +16875,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <p className="nf-hint">Locations, rules, norms, tech, magic — everything that defines your world.</p>
           {items.map(item => {
             const isExpanded = expandedWorldIds.has(item.id);
-            // FIX 4.4: Check if this entry is hidden from AI context at the current chapter
-            const isHiddenFromAI = item.introducedInChapter > 0 && (activeChapterIdx + 1) < item.introducedInChapter;
             return (
-              <div key={item.id} className="nf-card" style={{ cursor: isExpanded ? undefined : "pointer", opacity: isHiddenFromAI ? 0.55 : 1 }}>
+              <div key={item.id} className="nf-card" style={{ cursor: isExpanded ? undefined : "pointer" }}>
                 {/* D6: Collapsed summary view */}
                 <div role="button" tabIndex={0} onClick={() => !isExpanded && toggleWorldExpand(item.id)} style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <button onClick={(e) => { e.stopPropagation(); toggleWorldExpand(item.id); }} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0 }} aria-label={isExpanded ? "Collapse" : "Expand"}>
@@ -15163,9 +16884,22 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   </button>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {/* Org logo or category icon preview */}
+                      {item.category === "Organization" && item.logoImage ? (
+                        <img loading="lazy" src={item.logoImage} alt="" style={{ width: 24, height: 24, borderRadius: 2, objectFit: "contain", background: "var(--nf-bg-surface)", flexShrink: 0 }} />
+                      ) : null}
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{item.name || <span style={{ opacity: 0.4, fontStyle: "italic" }}>Unnamed entry</span>}</span>
-                      {item.category && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.category}</span>}
-                      {isHiddenFromAI && <span style={{ fontSize: 8, padding: "2px 5px", borderRadius: 2, background: "var(--nf-error-bg)", border: "1px solid var(--nf-error-border)", color: "var(--nf-accent)", fontWeight: 600 }}>Hidden until Ch{item.introducedInChapter}</span>}
+                      {item.category && <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{item.category}</span>}
+                      {/* Member count badge for orgs — dedupe across orgMembers + orgHierarchy */}
+                      {item.category === "Organization" && (() => {
+                        const memberSet = new Set();
+                        if (Array.isArray(item.orgMembers)) item.orgMembers.forEach(cid => cid && memberSet.add(cid));
+                        if (Array.isArray(item.orgHierarchy)) item.orgHierarchy.forEach(p => p.charId && memberSet.add(p.charId));
+                        const memberCount = memberSet.size;
+                        return memberCount > 0 ? (
+                          <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{memberCount} member{memberCount !== 1 ? "s" : ""}</span>
+                        ) : null;
+                      })()}
                     </div>
                     {!isExpanded && item.description && <div title={item.name} style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.description.slice(0, 100)}</div>}
                   </div>
@@ -15193,15 +16927,74 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--nf-border)" }}>
                     <div style={{ display: "flex", gap: 12, alignItems: "start" }}>
                       <div style={{ flex: 1 }}>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 140px 100px", gap: 12 }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 180px", gap: 12 }}>
                           <DebouncedField label="Name" value={item.name} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, name: v } : it) })} placeholder="e.g. The Midnight Court" />
                           {/* D7: Cleaner type categories */}
                           <SelectField label="Type" value={item.category || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, category: v } : it) })}
                             options={["Location","Rule / Law","Culture","Organization","Magic System","Technology","History","Flora / Fauna","Language","Religion","Other"]} placeholder="Select..." />
-                          <Field label="Intro Ch#" value={item.introducedInChapter || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, introducedInChapter: parseInt(v, 10) || 0 } : it) })} placeholder="0=any" type="number" min="0" small />
                         </div>
+                        {/* Smart category-change warning: detect stale fields from a different category */}
+                        {(() => {
+                          const currentCat = item.category;
+                          if (!currentCat) return null;
+                          const catFieldMap = {
+                            "Location": ["atmosphere","sensoryDetails","subLocations","dangers","rules","population","resources"],
+                            "Rule / Law": ["enforcement","scope","loopholes","publicOpinion","enactedBy"],
+                            "Culture": ["values","customs","socialHierarchy","taboos","artForms","dialect"],
+                            "Magic System": ["magicSource","magicRules","magicCost","magicRarity","magicTypes","magicPerception","magicPractitioners"],
+                            "Technology": ["techFunction","techMechanism","techAvailability","techLimitations","techImpact","techCreator"],
+                            "History": ["historyDate","historyFigures","historyCauses","historyConsequences","historyLegacy","historyDisputed"],
+                            "Flora / Fauna": ["habitat","floraAppearance","behavior","floraUses","floraRarity","floraCultural"],
+                            "Language": ["langSpeakers","langWriting","langPhrases","langGrammar","langRelated","langStatus"],
+                            "Religion": ["deities","coreBeliefs","rituals","sacredPlaces","clergy","heresies","followers"],
+                            "Organization": ["orgPurpose","orgHierarchy","orgMembers","logoImage"],
+                          };
+                          const currentFields = new Set(catFieldMap[currentCat] || []);
+                          const staleCats = Object.keys(catFieldMap).filter(c => c !== currentCat).filter(c => {
+                            return catFieldMap[c].some(f => {
+                              const v = item[f];
+                              if (!v) return false;
+                              if (Array.isArray(v)) return v.length > 0;
+                              return v !== "";
+                            });
+                          });
+                          if (staleCats.length === 0) return null;
+                          return (
+                            <div style={{ marginTop: 8, marginBottom: 8, padding: "8px 12px", background: "var(--nf-accent-glow-2)", border: "1px dashed var(--nf-accent-2)", borderRadius: 3, fontSize: 11, color: "var(--nf-text-dim)", lineHeight: 1.5 }}>
+                              <span style={{ color: "var(--nf-accent-2)", fontWeight: 600 }}>⚠ Stale data from: {staleCats.join(", ")}.</span> These fields are no longer visible on this entry but still stored.
+                              <button onClick={() => {
+                                const fieldsToClear = staleCats.flatMap(c => catFieldMap[c]).filter(f => !currentFields.has(f));
+                                const cleanup = { ...item };
+                                fieldsToClear.forEach(f => {
+                                  if (Array.isArray(cleanup[f])) cleanup[f] = [];
+                                  else cleanup[f] = "";
+                                });
+                                updateProject({ worldBuilding: items.map(it => it.id === item.id ? cleanup : it) });
+                                showToast("Cleared stale fields", "success");
+                              }} className="nf-btn-micro" style={{ marginLeft: 8 }}>Clear stale fields</button>
+                            </div>
+                          );
+                        })()}
                         <DebouncedField label="Description" value={item.description} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, description: v } : it) })} multiline placeholder="Detailed description..." />
                         <Field label="Keywords (for AI detection)" value={item.keywords || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, keywords: v } : it) })} placeholder="Comma-separated: court, vampires, shadows, ruling council" small />
+
+                        {/* Organization logo — handled inline in hierarchy section, not a separate panel */}
+
+                        {/* Multi-image gallery for locations and other entries */}
+                        {(item.category === "Location" || item.category === "Flora / Fauna" || item.category === "Technology" || item.category === "Religion") && (
+                          <div style={{ marginTop: 10, padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
+                            <MultiImageGallery
+                              label="Reference Images"
+                              hint={item.category === "Location" ? "Multiple reference photos — interior, exterior, vibes" : "Visual references"}
+                              images={item.additionalRefs || []}
+                              onAdd={(img) => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, additionalRefs: [...(it.additionalRefs || []), img] } : it) })}
+                              onRemove={(id) => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, additionalRefs: (it.additionalRefs || []).filter(i => i.id !== id) } : it) })}
+                              onUpdateCaption={(id, caption) => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, additionalRefs: (it.additionalRefs || []).map(i => i.id === id ? { ...i, caption } : i) } : it) })}
+                              maxCount={10}
+                              compact
+                            />
+                          </div>
+                        )}
 
                         {/* ─── Category-specific fields ─── */}
                         {(() => {
@@ -15209,7 +17002,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           const upd = (field, v) => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, [field]: v } : it) });
                           const F = (label, field, ph, multi) => <DebouncedField key={field} label={label} value={item[field] || ""} onChange={v => upd(field, v)} multiline={multi} placeholder={ph} small />;
                           const secS = { marginTop: 12, padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 };
-                          const secL = (t) => <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>{t}</div>;
+                          const secL = (t) => <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>{t}</div>;
                           const G = (...ch) => <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>{ch}</div>;
                           if (cat === "Location") return (<div style={secS}>{secL("Location Details")}{F("Atmosphere / Mood","atmosphere","Eerie, warm and inviting, claustrophobic, sacred...",true)}{F("Sensory Details","sensoryDetails","Sights, sounds, smells, textures...",true)}{F("Sub-Locations / Rooms","subLocations","The Great Hall, Secret Passage, Dungeon...",true)}{G(F("Dangers / Threats","dangers","Hidden traps, rival gangs, magical wards...",true),F("Rules / Restrictions","rules","No magic allowed, curfew at midnight...",true))}{F("Population / Demographics","population","~2000 residents, mostly elves and half-bloods")}{F("Resources / Economy","resources","Trade goods, currency, local wealth...")}</div>);
                           if (cat === "Rule / Law") return (<div style={secS}>{secL("Rule / Law Details")}{F("Enforcement","enforcement","Who enforces this? What are the penalties?",true)}{G(F("Scope / Jurisdiction","scope","All citizens, only mages, specific regions...",true),F("Exceptions / Loopholes","loopholes","Nobles exempt, emergency override...",true))}{F("Public Opinion","publicOpinion","Widely hated, grudgingly accepted, fiercely defended...",true)}{F("Origin / Enacted By","enactedBy","Ancient king, council vote, divine decree...")}</div>);
@@ -15228,9 +17021,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           <DebouncedField label="Connections / Influences" value={item.culturalNorms || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, culturalNorms: v } : it) })} multiline placeholder="How does this connect to other elements?" small />
                         </div>
 
-                        {/* ─── NEW: Characters who frequent this location ─── */}
+                        {/* ─── NEW: Characters who frequent this location (Location entries only) ─── */}
+                        {(item.category === "Location" || !item.category) && (
                         <div style={{ marginTop: 12 }}>
-                          <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8, fontFamily: "var(--nf-font-body)" }}>
+                          <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8, fontFamily: "var(--nf-font-body)" }}>
                             Characters at This Location
                           </div>
                           {(project?.characters || []).filter(c => c.name).length > 0 ? (
@@ -15272,16 +17066,17 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                     {ch.image ? (
                                       <img loading="lazy" src={ch.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover" }} />
                                     ) : (
-                                      <span style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 600 }}>{(ch.name || "?")[0]}</span>
+                                      <span style={{ width: 20, height: 20, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>{(ch.name || "?")[0]}</span>
                                     )}
                                     <span style={{ fontWeight: 600, color: "var(--nf-text-dim)" }}>{(ch.name || "?").split(/\s+/)[0]}</span>
-                                    {ch.role && <span style={{ fontSize: 8, color: "var(--nf-text-muted)" }}>{ch.role}</span>}
+                                    {ch.role && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{ch.role}</span>}
                                   </div>
                                 );
                               })}
                             </div>
                           )}
                         </div>
+                        )}
 
                         {/* ─── NEW: Organization Hierarchy ─── */}
                         {item.category === "Organization" && (
@@ -15290,9 +17085,25 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                             <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
                               {/* Logo */}
                               <div style={{ flexShrink: 0, textAlign: "center" }}>
-                                <div style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Logo</div>
-                                <div style={{ width: 56, height: 56, borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px ${item.orgLogo ? "solid" : "dashed"} var(--nf-border)`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", textOverflow: "ellipsis", cursor: "pointer", position: "relative" }}
-                                  onClick={async () => {
+                                <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 4 }}>Logo</div>
+                                <input type="file" accept="image/*" id={`nf-org-logo-upload-${item.id}`} style={{ display: "none" }} onChange={e => {
+                                  const file = e.target.files?.[0]; if (!file) return;
+                                  if (file.size > 2 * 1024 * 1024) { showToast("Logo too large — max 2MB", "error"); return; }
+                                  const reader = new FileReader();
+                                  reader.onload = ev => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, logoImage: ev.target.result } : it) });
+                                  reader.readAsDataURL(file);
+                                  e.target.value = "";
+                                }} />
+                                <div style={{ width: 64, height: 64, borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px ${item.logoImage ? "solid" : "dashed"} var(--nf-border)`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" }}>
+                                  {item.logoImage ? (
+                                    <img loading="lazy" src={item.logoImage} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                                  ) : (
+                                    <span style={{ fontSize: 22, color: "var(--nf-text-muted)", opacity: 0.4 }}>⚜</span>
+                                  )}
+                                  {item.logoImage && <button onClick={(e) => { e.stopPropagation(); updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, logoImage: "" } : it) }); }} style={{ position: "absolute", top: 1, right: 1, background: "rgba(0,0,0,0.6)", border: "none", color: "#fff", borderRadius: 2, padding: "0 4px", fontSize: 11, cursor: "pointer", lineHeight: 1.4 }}>×</button>}
+                                </div>
+                                <div style={{ display: "flex", gap: 3, marginTop: 4, justifyContent: "center" }}>
+                                  <button onClick={async () => {
                                     if (!settings.apiKey || !item.name) { showToast("Name the org and set API key first", "error"); return; }
                                     showToast("Generating logo...", "info");
                                     try {
@@ -15304,25 +17115,41 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                       if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                       const data = await res.json();
                                       const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
-                                      if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: img } : it) }); showToast("Logo generated", "success"); }
+                                      if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, logoImage: img } : it) }); showToast("Logo generated", "success"); }
                                       else showToast("No image returned", "error");
                                     } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
-                                  }}>
-                                  {item.orgLogo ? (
-                                    <img loading="lazy" src={item.orgLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                                  ) : (
-                                    <span style={{ fontSize: 10, color: "var(--nf-text-muted)", opacity: 0.4 }}>✦</span>
-                                  )}
-                                  {item.orgLogo && <button onClick={(e) => { e.stopPropagation(); updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgLogo: "" } : it) }); }} style={{ position: "absolute", top: 1, right: 1, background: "rgba(0,0,0,0.6)", border: "none", color: "var(--nf-text-inverse, #fff)", borderRadius: 2, padding: "0 3px", fontSize: 9, cursor: "pointer", lineHeight: 1.4 }}>×</button>}
+                                  }} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 6px" }} title="AI-generate logo"><Icons.Wand /></button>
+                                  <button onClick={() => document.getElementById(`nf-org-logo-upload-${item.id}`)?.click()} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 6px" }} title="Upload logo">↑</button>
                                 </div>
                               </div>
                               {/* Group Photo (moved to top) */}
                               {Array.isArray(item.orgHierarchy) && item.orgHierarchy.some(p => p.charId) && (
                                 <div style={{ flex: 1 }}>
                                   {item.orgGroupPhoto ? (
-                                    <div style={{ position: "relative", borderRadius: 3, overflow: "hidden", textOverflow: "ellipsis" }}>
-                                      <img loading="lazy" src={item.orgGroupPhoto} alt={`${item?.name || "unnamed"} group`} style={{ width: "100%", maxHeight: 120, objectFit: "cover", borderRadius: 3, border: "1px solid var(--nf-border)" }} />
-                                      <button onClick={() => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: "" } : it) })} style={{ position: "absolute", top: 3, right: 3, background: "rgba(0,0,0,0.6)", border: "none", color: "var(--nf-text-inverse, #fff)", borderRadius: 2, padding: "2px 4px", fontSize: 9, cursor: "pointer" }}>×</button>
+                                    <div>
+                                      <div style={{ position: "relative", borderRadius: 3, overflow: "hidden" }}>
+                                        <img loading="lazy" src={item.orgGroupPhoto} alt={`${item?.name || "unnamed"} group`} style={{ width: "100%", maxHeight: 240, objectFit: "contain", background: "var(--nf-bg-deep)", borderRadius: 3, border: "1px solid var(--nf-border)", display: "block" }} />
+                                        <button onClick={() => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: "" } : it) })} style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,0.7)", border: "none", color: "#fff", borderRadius: 2, padding: "3px 7px", fontSize: 12, cursor: "pointer" }}>×</button>
+                                      </div>
+                                      {item.orgGroupPhotoPrompt && (
+                                        <details style={{ marginTop: 6 }}>
+                                          <summary style={{ fontSize: 11, color: "var(--nf-text-muted)", cursor: "pointer", padding: "4px 0" }}>View generation prompt</summary>
+                                          <div style={{ marginTop: 4, padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, fontSize: 12, color: "var(--nf-text-dim)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>{item.orgGroupPhotoPrompt}</div>
+                                          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                                            <button onClick={() => { navigator.clipboard.writeText(item.orgGroupPhotoPrompt); showToast("Copied", "success"); }} className="nf-btn-micro" style={{ fontSize: 11 }}><Icons.Copy /> Copy</button>
+                                            <button onClick={async () => {
+                                              showToast("Re-rendering...", "info");
+                                              try {
+                                                const res = await fetch("https://openrouter.ai/api/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" }, body: JSON.stringify({ model: "google/gemini-3.1-flash-image-preview", messages: [{ role: "user", content: item.orgGroupPhotoPrompt }], modalities: ["image", "text"], temperature: 0.8, max_tokens: 4096 }) });
+                                                if (!res.ok) throw new Error(`API error (${res.status})`);
+                                                const data = await res.json();
+                                                const img = data.choices?.[0]?.message?.images?.[0]?.image_url?.url;
+                                                if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: img } : it) }); showToast("Photo regenerated", "success"); }
+                                              } catch (e) { showToast(`Failed: ${e.message}`, "error"); }
+                                            }} className="nf-btn-micro" style={{ fontSize: 11 }}><Icons.Sparkle /> Re-render</button>
+                                          </div>
+                                        </details>
+                                      )}
                                     </div>
                                   ) : (
                                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
@@ -15337,9 +17164,9 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                           if (!res.ok) { const errData = await res.json().catch(() => ({})); throw new Error(errData.error?.message || `API error (${res.status})`); }
                                           const data = await res.json();
                                           const prompt = stripThinkingTokens(data.choices?.[0]?.message?.content || "").trim();
-                                          if (prompt) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhotoPrompt: prompt } : it) }); showToast("Prompt ready — click Render", "success"); }
+                                          if (prompt) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhotoPrompt: prompt } : it) }); showToast("Prompt ready — review and click Render", "success"); }
                                         } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
-                                      }} className="nf-btn-micro" style={{ fontSize: 9 }}><Icons.Wand /> {item.orgGroupPhotoPrompt ? "Regen Prompt" : "Group Photo"}</button>
+                                      }} className="nf-btn-micro" style={{ fontSize: 11 }}><Icons.Wand /> {item.orgGroupPhotoPrompt ? "Regen Prompt" : "Group Photo"}</button>
                                       {item.orgGroupPhotoPrompt && <button onClick={async () => {
                                         showToast("Rendering...", "info");
                                         try {
@@ -15350,26 +17177,29 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                           if (img) { updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgGroupPhoto: img } : it) }); showToast("Photo rendered", "success"); }
                                           else showToast("No image", "error");
                                         } catch (e) { showToast(`Failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
-                                      }} className="nf-btn-micro" style={{ fontSize: 9, borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}><Icons.Sparkle /> Render</button>}
-                                      {item.orgGroupPhotoPrompt && <button onClick={() => { navigator.clipboard.writeText(item.orgGroupPhotoPrompt); showToast("Copied", "success"); }} className="nf-btn-micro" style={{ fontSize: 9 }}><Icons.Copy /></button>}
+                                      }} className="nf-btn-micro" style={{ fontSize: 11, borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }}><Icons.Sparkle /> Render</button>}
+                                      {item.orgGroupPhotoPrompt && <button onClick={() => { navigator.clipboard.writeText(item.orgGroupPhotoPrompt); showToast("Copied", "success"); }} className="nf-btn-micro" style={{ fontSize: 11 }}><Icons.Copy /></button>}
+                                      {item.orgGroupPhotoPrompt && (
+                                        <div style={{ width: "100%", marginTop: 6, padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, fontSize: 12, color: "var(--nf-text-dim)", lineHeight: 1.5, whiteSpace: "pre-wrap", maxHeight: 200, overflowY: "auto" }}>{item.orgGroupPhotoPrompt}</div>
+                                      )}
                                     </div>
                                   )}
                                 </div>
                               )}
                             </div>
                             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                              <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>Organization Hierarchy</div>
+                              <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)" }}>Organization Hierarchy</div>
                               <button onClick={() => {
                                 const hierarchy = Array.isArray(item.orgHierarchy) ? [...item.orgHierarchy] : [];
                                 hierarchy.push({ id: uid(), name: "", role: "", parentId: "", charId: "" });
                                 updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: hierarchy } : it) });
-                              }} className="nf-btn-micro" style={{ fontSize: 9 }}><Icons.Plus /> Add Position</button>
+                              }} className="nf-btn-micro" style={{ fontSize: 11 }}><Icons.Plus /> Add Position</button>
                             </div>
                             <DebouncedField label="Purpose / Mission" value={item.orgPurpose || ""} onChange={v => updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgPurpose: v } : it) })} multiline placeholder="What does this organization exist to do? Goals, values, ideology..." small />
 
                             {/* Members from character list */}
                             <div style={{ marginTop: 8, marginBottom: 8 }}>
-                              <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 4 }}>Members (from characters)</div>
+                              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 4 }}>Members (from characters)</div>
                               {(project?.characters || []).filter(c => c.name).length > 0 ? (
                                 <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                                   {(project?.characters || []).filter(c => c.name).map(c => {
@@ -15380,7 +17210,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                         const updated = isSelected ? members.filter(cid => cid !== c.id) : [...members, c.id];
                                         updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgMembers: updated } : it) });
                                       }} style={{
-                                        padding: "2px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer",
+                                        padding: "2px 8px", borderRadius: 4, cursor: "pointer",
                                         background: isSelected ? "var(--nf-accent-glow)" : "var(--nf-bg-surface)",
                                         border: `1px solid ${isSelected ? "var(--nf-accent)" : "var(--nf-border)"}`,
                                         color: isSelected ? "var(--nf-accent)" : "var(--nf-text-muted)",
@@ -15391,18 +17221,18 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                     );
                                   })}
                                 </div>
-                              ) : <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add characters first</div>}
+                              ) : <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add characters first</div>}
                             </div>
 
                             {/* Hierarchy tree — proper top-down family tree */}
                             {Array.isArray(item.orgHierarchy) && item.orgHierarchy.length > 0 && (
-                              <div style={{ marginTop: 8 }}>
-                                <div style={{ fontSize: 9, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 20 }}>Positions & Ranks</div>
+                              <div style={{ marginTop: 8, minWidth: 0, maxWidth: "100%", overflow: "hidden" }}>
+                                <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 500, marginBottom: 20 }}>Positions & Ranks</div>
                                 <style>{`
-                                  .nf-org-tree { --line: var(--nf-border); }
-                                  .nf-org-tree ul { display: flex; justify-content: center; padding-top: 20px; position: relative; margin: 0; padding-left: 0; list-style: none; }
+                                  .nf-org-tree { --line: var(--nf-border); max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+                                  .nf-org-tree ul { display: flex; justify-content: center; padding-top: 20px; position: relative; margin: 0; padding-left: 0; list-style: none; white-space: nowrap; }
                                   .nf-org-tree ul::before { content: ''; position: absolute; top: 0; left: 50%; border-left: 1.5px solid var(--line); height: 20px; }
-                                  .nf-org-tree li { display: flex; flex-direction: column; align-items: center; position: relative; padding: 20px 6px 0; }
+                                  .nf-org-tree li { display: flex; flex-direction: column; align-items: center; position: relative; padding: 20px 6px 0; flex-shrink: 0; }
                                   .nf-org-tree li::before, .nf-org-tree li::after { content: ''; position: absolute; top: 0; width: 50%; height: 20px; border-top: 1.5px solid var(--line); }
                                   .nf-org-tree li::before { right: 50%; border-right: 1.5px solid var(--line); border-top-right-radius: 4px; }
                                   .nf-org-tree li::after { left: 50%; border-left: 1.5px solid var(--line); border-top-left-radius: 4px; }
@@ -15425,37 +17255,54 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                   const renderCard = (pos) => {
                                     const posIdx = hier.indexOf(pos);
                                     const linkedChar = pos.charId ? (project?.characters || []).find(c => c.id === pos.charId) : null;
+                                    const isHierExpanded = expandedHierIds.has(pos.id);
                                     const depthColor = (() => {
                                       let d = 0, check = pos.parentId;
                                       const visited = new Set();
                                       while (check && d < 8) { if (visited.has(check)) break; visited.add(check); const p = hier.find(pp => pp.id === check); if (p) { d++; check = p.parentId; } else break; }
                                       return d === 0 ? "var(--nf-accent)" : d === 1 ? "var(--nf-accent-2)" : "rgba(160,140,200,0.6)";
                                     })();
+
+                                    // Tree cards are ALWAYS compact to prevent horizontal stretching.
+                                    // Clicking toggles a separate editor panel below the tree.
                                     return (
-                                      <div style={{ background: "var(--nf-bg-surface)", border: `1px solid var(--nf-border)`, borderTop: `3px solid ${depthColor}`, borderRadius: 3, padding: "8px 8px 6px", width: 180, position: "relative" }}>
-                                        <button onClick={() => {
+                                      <div
+                                        role="button" tabIndex={0}
+                                        onClick={() => setExpandedHierIds(prev => {
+                                          const n = new Set(prev);
+                                          if (n.has(pos.id)) n.delete(pos.id); else n.add(pos.id);
+                                          return n;
+                                        })}
+                                        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpandedHierIds(prev => { const n = new Set(prev); if (n.has(pos.id)) n.delete(pos.id); else n.add(pos.id); return n; }); } }}
+                                        style={{
+                                          background: isHierExpanded ? "var(--nf-bg-hover)" : "var(--nf-bg-surface)",
+                                          border: `1px solid ${isHierExpanded ? depthColor : "var(--nf-border)"}`,
+                                          borderTop: `3px solid ${depthColor}`, borderRadius: 4, padding: "10px 12px",
+                                          width: 200, position: "relative", cursor: "pointer",
+                                          display: "flex", alignItems: "center", gap: 10,
+                                          boxShadow: isHierExpanded ? "0 0 0 2px var(--nf-accent-glow-2)" : "none",
+                                          transition: "background 0.15s, border-color 0.15s, box-shadow 0.15s",
+                                        }}
+                                        title={isHierExpanded ? "Click to close editor" : "Click to edit this position"}
+                                      >
+                                        <button onClick={(e) => { e.stopPropagation();
+                                          if (!window.confirm(`Remove position "${pos.name || "Untitled"}"?`)) return;
                                           updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: item.orgHierarchy.filter((_, i) => i !== posIdx) } : it) });
-                                        }} className="nf-btn-icon" style={{ padding: 6, position: "absolute", top: 0, right: 0, opacity: 0.3, minWidth: 28, minHeight: 28 }} aria-label="Remove"><Icons.X /></button>
-                                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                                          {linkedChar?.image ? (
-                                            <img loading="lazy" src={linkedChar.image} alt="" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", border: `2px solid ${depthColor}`, flexShrink: 0 }} />
-                                          ) : (
-                                            <div style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "var(--nf-text-muted)", border: `2px dashed var(--nf-border)`, flexShrink: 0 }}>
-                                              {linkedChar ? (linkedChar.name || "?")[0] : "?"}
-                                            </div>
-                                          )}
-                                          <div style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-                                            <div title={pos.name} style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pos.name || "Untitled"}</div>
-                                            <div style={{ fontSize: 9, color: linkedChar ? depthColor : "var(--nf-text-muted)", fontWeight: 500 }}>{linkedChar ? linkedChar.name : "vacant"}</div>
+                                          setExpandedHierIds(prev => { const n = new Set(prev); n.delete(pos.id); return n; });
+                                        }} className="nf-btn-icon" style={{ padding: 2, position: "absolute", top: 2, right: 2, opacity: 0.3, minWidth: 18, minHeight: 18 }} aria-label="Remove"><Icons.X /></button>
+                                        {linkedChar?.image ? (
+                                          <img loading="lazy" src={linkedChar.image} alt="" style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", border: `2px solid ${depthColor}`, flexShrink: 0 }} />
+                                        ) : (
+                                          <div style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--nf-bg-raised)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, color: "var(--nf-text-muted)", border: `2px dashed var(--nf-border)`, flexShrink: 0 }}>
+                                            {linkedChar ? (linkedChar.name || "?")[0] : "?"}
                                           </div>
-                                        </div>
-                                        <Field label="" value={pos.name || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], name: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} placeholder="Title" small style={{ fontSize: 10 }} />
-                                        <SelectField label="" value={pos.charId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], charId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "— Vacant —" }, ...charOptions]} style={{ fontSize: 10 }} />
-                                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4 }}>
-                                          <Field label="" value={pos.role || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], role: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} placeholder="Role desc" small style={{ fontSize: 10 }} />
-                                          {hier.filter(p => p.id !== pos.id && p.name).length > 0 ? (
-                                            <SelectField label="" value={pos.parentId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], parentId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "Top level" }, ...hier.filter(p => p.id !== pos.id && p.name).map(p => ({ value: p.id, label: p.name }))]} style={{ fontSize: 10 }} />
-                                          ) : <div />}
+                                        )}
+                                        <div style={{ minWidth: 0, flex: 1, paddingRight: 16 }}>
+                                          <div title={pos.name} style={{ fontSize: 13, fontWeight: 600, color: "var(--nf-text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.3 }}>{pos.name || <span style={{ fontStyle: "italic", opacity: 0.5 }}>Untitled</span>}</div>
+                                          <div title={linkedChar?.name || "vacant"} style={{ fontSize: 11, color: linkedChar ? depthColor : "var(--nf-text-muted)", fontWeight: 500, lineHeight: 1.3, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                            {linkedChar ? linkedChar.name : "vacant"}
+                                            {linkedChar?.role && <span style={{ marginLeft: 5, padding: "1px 5px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", background: "var(--nf-bg-raised)", color: "var(--nf-text-muted)", borderRadius: 2, fontWeight: 600 }}>{linkedChar.role}</span>}
+                                          </div>
                                         </div>
                                       </div>
                                     );
@@ -15476,11 +17323,58 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                   };
 
                                   return (
-                                    <div className="nf-org-tree" style={{ overflowX: "auto", padding: "8px 0" }}>
-                                      <ul>
-                                        {roots.map(root => renderBranch(root))}
-                                      </ul>
-                                    </div>
+                                    <>
+                                      <div className="nf-org-tree" style={{ overflowX: "auto", padding: "8px 0" }}>
+                                        <ul>
+                                          {roots.map(root => renderBranch(root))}
+                                        </ul>
+                                      </div>
+                                      {/* Editor panel — renders BELOW the tree so tree width is never stretched */}
+                                      {(() => {
+                                        const editingIds = [...expandedHierIds].filter(id => hier.some(p => p.id === id));
+                                        if (editingIds.length === 0) return null;
+                                        return (
+                                          <div style={{ marginTop: 12, padding: "12px 14px", background: "var(--nf-bg-raised)", border: "1px solid var(--nf-accent-2)", borderRadius: 4, display: "flex", flexDirection: "column", gap: 14 }}>
+                                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                              <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-accent-2)" }}>
+                                                Editing {editingIds.length} position{editingIds.length !== 1 ? "s" : ""}
+                                              </div>
+                                              <button onClick={() => setExpandedHierIds(new Set())} className="nf-btn-micro" style={{ fontSize: 11 }}>Close all</button>
+                                            </div>
+                                            {editingIds.map(pid => {
+                                              const pos = hier.find(p => p.id === pid);
+                                              if (!pos) return null;
+                                              const posIdx = hier.indexOf(pos);
+                                              const linkedChar = pos.charId ? (project?.characters || []).find(c => c.id === pos.charId) : null;
+                                              return (
+                                                <div key={pid} style={{ padding: "12px", background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", borderRadius: 3, display: "flex", flexDirection: "column", gap: 12 }}>
+                                                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                                    {linkedChar?.image ? (
+                                                      <img loading="lazy" src={linkedChar.image} alt="" style={{ width: 44, height: 44, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                                                    ) : (
+                                                      <div style={{ width: 44, height: 44, borderRadius: "50%", background: "var(--nf-bg-raised)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, color: "var(--nf-text-muted)", border: "2px dashed var(--nf-border)", flexShrink: 0 }}>
+                                                        {linkedChar ? (linkedChar.name || "?")[0] : "?"}
+                                                      </div>
+                                                    )}
+                                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                                      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--nf-text)" }}>{pos.name || <span style={{ fontStyle: "italic", opacity: 0.5 }}>Untitled position</span>}</div>
+                                                      <div style={{ fontSize: 12, color: "var(--nf-text-muted)", marginTop: 2 }}>{linkedChar ? linkedChar.name : "vacant"}</div>
+                                                    </div>
+                                                    <button onClick={() => setExpandedHierIds(prev => { const n = new Set(prev); n.delete(pid); return n; })} className="nf-btn-micro" style={{ fontSize: 11 }}>Close</button>
+                                                  </div>
+                                                  <Field label="Position Title" value={pos.name || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], name: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} placeholder="e.g. Chief, Captain, High Priest" />
+                                                  <SelectField label="Held By" value={pos.charId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], charId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "— Vacant —" }, ...charOptions]} />
+                                                  <DebouncedField label="Role / Responsibilities" value={pos.role || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], role: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} multiline placeholder="What they do, their responsibilities and authority" />
+                                                  {hier.filter(p => p.id !== pos.id && p.name).length > 0 && (
+                                                    <SelectField label="Reports To" value={pos.parentId || ""} onChange={v => { const h = [...item.orgHierarchy]; h[posIdx] = { ...h[posIdx], parentId: v }; updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, orgHierarchy: h } : it) }); }} options={[{ value: "", label: "Top level (reports to no one)" }, ...hier.filter(p => p.id !== pos.id && p.name).map(p => ({ value: p.id, label: p.name }))]} />
+                                                  )}
+                                                </div>
+                                              );
+                                            })}
+                                          </div>
+                                        );
+                                      })()}
+                                    </>
                                   );
                                 })()}
                               </div>
@@ -15491,7 +17385,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
                         {/* Connected world entries */}
                         <div style={{ marginTop: 8 }}>
-                          <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
+                          <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 6 }}>
                             Connected To (other world entries)
                           </div>
 
@@ -15519,8 +17413,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                           }
                           if (derivedItems.length === 0) return null;
                           return (
-                            <div style={{ padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 8, fontSize: 10, lineHeight: 1.6 }}>
-                              <span style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--nf-accent-2)" }}>Cross-references </span>
+                            <div style={{ padding: "6px 8px", background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", borderRadius: 2, marginBottom: 8, lineHeight: 1.6 }}>
+                              <span style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--nf-accent-2)" }}>Cross-references </span>
                               {derivedItems.map((d, di) => (
                                 <div key={di} style={{ color: d.color }}>{d.label}: {d.items.join(" · ")}</div>
                               ))}
@@ -15537,7 +17431,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                     const updated = isConn ? connections.filter(cid => cid !== other.id) : [...connections, other.id];
                                     updateProject({ worldBuilding: items.map(it => it.id === item.id ? { ...it, connectedTo: updated } : it) });
                                   }} style={{
-                                    padding: "2px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer",
+                                    padding: "2px 8px", borderRadius: 4, cursor: "pointer",
                                     background: isConn ? "var(--nf-accent-glow-2)" : "var(--nf-bg-surface)",
                                     border: `1px solid ${isConn ? "var(--nf-accent-2)" : "var(--nf-border)"}`,
                                     color: isConn ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
@@ -15549,7 +17443,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               })}
                             </div>
                           ) : (
-                            <div style={{ fontSize: 10, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add more world entries to create connections</div>
+                            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", fontStyle: "italic" }}>Add more world entries to create connections</div>
                           )}
                         </div>
 						
@@ -15557,21 +17451,21 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                         {(item.category === "Location" || !item.category) && (
                         <div style={{ marginTop: 12 }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                            <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-body)" }}>
+                            <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-body)" }}>
                               Room Views (4 walls — upload images or copy prompts)
                             </div>
                             <button
                               onClick={() => handleGenerateImagePrompts(item.id)}
                               disabled={!settings.apiKey || !item.description || item._generatingPrompts}
                               className="nf-btn-micro"
-                              style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)", fontSize: 9 }}>
+                              style={{ borderColor: "var(--nf-accent)", color: "var(--nf-accent)", fontSize: 11 }}>
                               {item._generatingPrompts
                                 ? <><Spinner /> Generating...</>
                                 : <><Icons.Wand /> {Object.values(item.imagePrompts || {}).some(p => p) ? "Regenerate" : "Generate 4 Prompts"}</>}
                             </button>
                           </div>
                           {!item.description && (
-                            <div style={{ fontSize: 10, color: "var(--nf-accent)", fontStyle: "italic", padding: "8px 0" }}>
+                            <div style={{ fontSize: 11, color: "var(--nf-accent)", fontStyle: "italic", padding: "8px 0" }}>
                               Add a description above first, then click Generate.
                             </div>
                           )}
@@ -15602,7 +17496,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                           position: "absolute", bottom: 0, left: 0, right: 0,
                                           background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
                                           padding: "12px 8px 6px",
-                                          fontSize: 9, color: "var(--nf-text-inverse, #fff)", fontWeight: 600,
+                                          fontSize: 11, color: "var(--nf-text-inverse, #fff)", fontWeight: 600,
                                           letterSpacing: "0.06em",
                                         }}>
                                           ✓ {WALL_LABELS[idx]}
@@ -15624,7 +17518,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                       {/* Reveal prompt underneath */}
                                       <details style={{ padding: "4px 6px" }}>
                                         <summary style={{
-                                          fontSize: 8, color: "var(--nf-text-muted)", cursor: "pointer",
+                                          fontSize: 11, color: "var(--nf-text-muted)", cursor: "pointer",
                                           userSelect: "none",
                                         }}>Show prompt</summary>
                                         {hasPrompt && (
@@ -15633,7 +17527,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                               width: "100%", minHeight: 60, maxHeight: 120, padding: 6,
                                               marginTop: 4, border: "1px solid var(--nf-border)", borderRadius: 2,
                                               background: "var(--nf-bg-surface)", color: "var(--nf-text-dim)",
-                                              fontSize: 9, lineHeight: 1.4, fontFamily: "var(--nf-font-mono)",
+                                              fontSize: 11, lineHeight: 1.4, fontFamily: "var(--nf-font-mono)",
                                               resize: "vertical", outline: "none",
                                             }} />
                                         )}
@@ -15661,7 +17555,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                       alignItems: "center",
                                     }}>
                                       <span style={{
-                                        fontSize: 9, fontWeight: 600,
+                                        fontSize: 11, fontWeight: 600,
                                         color: hasPrompt ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
                                         textTransform: "uppercase", letterSpacing: "0.06em",
                                       }}>
@@ -15706,13 +17600,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                                 showToast("No image returned — try again", "error");
                                               }
                                             } catch (e) { showToast(`Render failed: ${e.message?.replace(/sk-[a-zA-Z0-9]+/g, "sk-***") || "Unknown error"}`, "error"); }
-                                          }} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 6px", borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }} disabled={!settings.apiKey}>
+                                          }} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 6px", borderColor: "var(--nf-accent)", color: "var(--nf-accent)" }} disabled={!settings.apiKey}>
                                             <Icons.Sparkle /> Render
                                           </button>
                                           <button onClick={() => {
                                             navigator.clipboard.writeText(prompts[wallKey]);
                                             showToast("Prompt copied", "success");
-                                          }} className="nf-btn-micro" style={{ fontSize: 8, padding: "2px 6px" }}>
+                                          }} className="nf-btn-micro" style={{ fontSize: 11, padding: "2px 6px" }}>
                                             <Icons.Copy /> Copy
                                           </button>
                                         </div>
@@ -15726,7 +17620,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                         style={{
                                           flex: 1, minHeight: 120, maxHeight: 200,
                                           padding: 8, border: "none", background: "transparent",
-                                          color: "var(--nf-text-dim)", fontSize: 10, lineHeight: 1.5,
+                                          color: "var(--nf-text-dim)", lineHeight: 1.5,
                                           fontFamily: "var(--nf-font-mono)", resize: "vertical", outline: "none",
                                         }}
                                       />
@@ -15735,7 +17629,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                         flex: 1, aspectRatio: "4/3",
                                         display: "flex", alignItems: "center", justifyContent: "center", padding: 8,
                                       }}>
-                                        <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textAlign: "center", fontStyle: "italic" }}>
+                                        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textAlign: "center", fontStyle: "italic" }}>
                                           {item._generatingPrompts ? <><Spinner /><br/>Generating...</> : "Generate prompts first"}
                                         </div>
                                       </div>
@@ -15743,7 +17637,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                                     {/* Upload button — always visible */}
                                     <div style={{ padding: "4px 6px", borderTop: "1px solid var(--nf-border)" }}>
                                       <label className="nf-btn-micro" style={{
-                                        width: "100%", justifyContent: "center", cursor: "pointer", fontSize: 8,
+                                        width: "100%", justifyContent: "center", cursor: "pointer",
                                       }}>
                                         <Icons.Export /> {hasPrompt ? "Upload Image" : "Upload Image (no prompt needed)"}
                                         <input type="file" accept="image/*" style={{ display: "none" }}
@@ -15895,10 +17789,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{p.title || <span style={{ opacity: 0.4, fontStyle: "italic" }}>Untitled</span>}</span>
-                    {p.sceneType && p.sceneType !== "narrative" && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{p.sceneType}</span>}
-                    {beatsCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{beatsCount} beat{beatsCount !== 1 ? "s" : ""}</span>}
-                    {charCount > 0 && <span style={{ fontSize: 9, color: "var(--nf-text-muted)" }}>{charCount} char{charCount !== 1 ? "s" : ""}</span>}
-                    {p.date && <span style={{ fontSize: 9, color: "var(--nf-accent-2)" }}>{p.date}</span>}
+                    {p.sceneType && p.sceneType !== "narrative" && <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em" }}>{p.sceneType}</span>}
+                    {beatsCount > 0 && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{beatsCount} beat{beatsCount !== 1 ? "s" : ""}</span>}
+                    {charCount > 0 && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{charCount} char{charCount !== 1 ? "s" : ""}</span>}
+                    {p.date && <span style={{ fontSize: 11, color: "var(--nf-accent-2)" }}>{p.date}</span>}
                   </div>
                   {!isPlotExpanded && p.summary && <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.summary.slice(0, 120)}</div>}
                 </div>
@@ -15968,7 +17862,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 					    const currentBeats = Array.isArray(p.beats) ? p.beats : (p.beats ? String(p.beats).split('\n').filter(b => b.trim()).map((b, i) => ({ id: uid(), title: `Beat ${i + 1}`, description: b.trim() })) : []);
 					    const newBeat = { id: uid(), title: `Beat ${currentBeats.length + 1}`, description: "" };
 					    updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: [...currentBeats, newBeat] } : pl) });
-					  }} className="nf-btn-micro" style={{ fontSize: 9 }}>
+					  }} className="nf-btn-micro" style={{ fontSize: 11 }}>
 					    <Icons.Plus /> Add Beat
 					  </button>
 				    </div>
@@ -15980,7 +17874,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 				    {(Array.isArray(p.beats) ? p.beats : []).map((beat, bi) => (
 					  <div key={beat.id || bi} style={{ display: "flex", gap: 6, alignItems: "start", marginBottom: 4, padding: "6px 8px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 3 }}>
 					    <div key={bi} style={{ flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 1, paddingTop: 4 }}>
-						  <span key={bi} style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-accent)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, border: "1px solid var(--nf-border)", fontFamily: "var(--nf-font-mono)", letterSpacing: "0.08em" }}>B{bi + 1}</span>
+						  <span key={bi} style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-accent)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, border: "1px solid var(--nf-border)", fontFamily: "var(--nf-font-mono)", letterSpacing: "0.08em" }}>B{bi + 1}</span>
 						  <button key={bi} onClick={() => { if (bi === 0) return; const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; [b2[bi-1], b2[bi]] = [b2[bi], b2[bi-1]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi === 0} className="nf-btn-icon" style={{ padding: 0, opacity: bi === 0 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15"/></svg></button>
 						  <button key={bi} onClick={() => { const b2 = [...(Array.isArray(p.beats) ? p.beats : [])]; if (bi >= b2.length - 1) return; [b2[bi], b2[bi+1]] = [b2[bi+1], b2[bi]]; updateProject({ plotOutline: outline.map(pl => pl.id === p.id ? { ...pl, beats: b2 } : pl) }); }} disabled={bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1} className="nf-btn-icon" style={{ padding: 0, opacity: bi >= (Array.isArray(p.beats) ? p.beats.length : 0) - 1 ? 0.15 : 0.4 }}><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg></button>
 					    </div>
@@ -16011,7 +17905,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                               color: isSelected ? "var(--nf-accent-2)" : "var(--nf-text-muted)",
                               transition: "background 0.15s, border-color 0.15s, color 0.15s, opacity 0.15s, transform 0.15s", display: "flex", alignItems: "center", gap: 4,
                             }}>
-                              {c.image ? <img loading="lazy" src={c.image} alt="" style={{ width: 18, height: 18, borderRadius: "50%", objectFit: "cover" }} /> : <span style={{ width: 18, height: 18, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8, color: "var(--nf-text-muted)" }}>{(c.name || "?")[0]}</span>}
+                              {c.image ? <img loading="lazy" src={c.image} alt="" style={{ width: 18, height: 18, borderRadius: "50%", objectFit: "cover" }} /> : <span style={{ width: 18, height: 18, borderRadius: "50%", background: "var(--nf-bg-hover)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--nf-text-muted)" }}>{(c.name || "?")[0]}</span>}
                               {isSelected ? "✓ " : ""}{c.name}
                             </button>
                           );
@@ -16093,8 +17987,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     }
                     if (items2.length === 0) return null;
                     return (
-                      <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 8, fontSize: 10, lineHeight: 1.7 }}>
-                        <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Scene context (auto-derived)</div>
+                      <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 8, lineHeight: 1.7 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Scene context (auto-derived)</div>
                         {items2.map((item3, idx) => (
                           <div key={idx} style={{ color: item3.color }}>{item3.icon} {item3.text}</div>
                         ))}
@@ -16145,6 +18039,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             tabContext="plot outline — plan chapters, structure arcs, develop beats"
             onAutoFill={handlePlotAutoFill}
             chapterIdx={activeChapterIdx}
+            editingEntityId={expandedPlotIds.size === 1 ? [...expandedPlotIds][0] : null}
             messages={getTabMessages("plot")} setMessages={setTabMessages("plot")} />
         )}
         {isMobile && settings.apiKey && (
@@ -16161,6 +18056,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <TabAIChat project={project} settings={settings} tabName="plot"
                       tabContext="plot outline — plan chapters, structure arcs, develop beats"
                       onAutoFill={handlePlotAutoFill} chapterIdx={activeChapterIdx}
+                      editingEntityId={expandedPlotIds.size === 1 ? [...expandedPlotIds][0] : null}
                       messages={getTabMessages("plot")} setMessages={setTabMessages("plot")} />
                   </div>
                 </div>
@@ -16243,11 +18139,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       <span style={{ color: "var(--nf-accent)", fontSize: 14 }}>↔</span>
                       {(() => { const c2 = allChars.find(c => c.id === r.char2); return c2?.image ? <img loading="lazy" src={c2.image} alt="" style={{ width: 20, height: 20, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--nf-border)" }} /> : null; })()}
                       <span style={{ fontWeight: 600, fontSize: 13, color: "var(--nf-text)" }}>{c2Name || "?"}</span>
-                      {r.status && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)" }}>{r.status}</span>}
-                      {r.category && r.category !== "romantic" && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{r.category}</span>}
+                      {r.status && <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: "1px solid var(--nf-border)", color: "var(--nf-text-muted)" }}>{r.status}</span>}
+                      {r.category && r.category !== "romantic" && <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 500 }}>{r.category}</span>}
                       {/* D12: Tension color indicator */}
                       {r.tension && r.tension !== "none" && (
-                        <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px solid ${tColor}`, color: tColor, fontWeight: 700 }}>
+                        <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 4, background: "var(--nf-bg-surface)", border: `1px solid ${tColor}`, color: tColor, fontWeight: 700 }}>
                           {r.tension === "explosive" ? "⚡" : r.tension === "high" ? "🔥" : ""} {r.tension}
                         </span>
                       )}
@@ -16292,8 +18188,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       const c1Dead = c1?.status === "dead", c2Dead = c2?.status === "dead";
                       if (!sharedLocs.length && !sharedOrgs.length && !sharedChapters.length && !c1Dead && !c2Dead) return null;
                       return (
-                        <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginBottom: 20, fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.7 }}>
-                          <div style={{ fontSize: 8, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Auto-derived context</div>
+                        <div style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginBottom: 20, color: "var(--nf-text-muted)", lineHeight: 1.7 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-dim)", marginBottom: 4 }}>Auto-derived context</div>
                           {(c1Dead || c2Dead) && <div style={{ color: "var(--nf-accent)", fontWeight: 600 }}>⚠ {c1Dead && c1 ? `${c1.name} is dead` : ""}{c1Dead && c2Dead ? " & " : ""}{c2Dead && c2 ? `${c2.name} is dead` : ""} — relationship is historical</div>}
                           {sharedLocs.length > 0 && <div>📍 Shared locations: <span style={{ color: "var(--nf-accent-2)", fontWeight: 500 }}>{sharedLocs.join(", ")}</span></div>}
                           {sharedOrgs.length > 0 && <div>⛨ Same organization: <span style={{ color: "rgba(160,140,200,0.8)", fontWeight: 500 }}>{sharedOrgs.join(", ")}</span></div>}
@@ -16325,13 +18221,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     {r.lastUpdatedChapter > 0 && Object.keys(r.chapterEvolution || {}).length > 0 && (
                       <div style={{ padding: "8px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 4 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                          <span style={{ fontSize: 9, fontWeight: 500, color: "var(--nf-accent-2)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, letterSpacing: "0.05em" }}>AI-EVOLVING</span>
-                          <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>
+                          <span style={{ fontSize: 11, fontWeight: 500, color: "var(--nf-accent-2)", background: "var(--nf-bg-surface)", padding: "2px 6px", borderRadius: 2, letterSpacing: "0.05em" }}>AI-EVOLVING</span>
+                          <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>
                             Status, tension, trust, chemistry, power dynamic, and perspectives evolve per chapter.
                           </span>
-                          <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: "auto", fontFamily: "var(--nf-font-mono)" }}>Last Ch{r.lastUpdatedChapter + 1}</span>
+                          <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: "auto", fontFamily: "var(--nf-font-mono)" }}>Last Ch{r.lastUpdatedChapter + 1}</span>
                         </div>
-                        <div style={{ fontSize: 10, color: "var(--nf-text-muted)", lineHeight: 1.4 }}>
+                        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", lineHeight: 1.4 }}>
                           Set the foundation above; the State Updater agent tracks evolution per chapter. Manual edits still win until next generation.
                         </div>
                       </div>
@@ -16346,7 +18242,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     {/* Relationship Evolution Path — visual progression */}
                     {r.progression && (
                       <div style={{ margin: "4px 0 12px", padding: "10px 14px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2 }}>
-                        <div style={{ fontSize: 9, fontWeight: 500, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontFamily: "var(--nf-font-body)" }}>Evolution Path</div>
+                        <div style={{ fontSize: 11, fontWeight: 500, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 8, fontFamily: "var(--nf-font-body)" }}>Evolution Path</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 0, flexWrap: "wrap" }}>
                           {r.progression.split(/\s*[→➜>]\s*/).filter(Boolean).map((stage, si, arr) => {
                             // Determine if this stage is "reached" based on current status
@@ -16359,7 +18255,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                             return (
                               <div key={si} style={{ display: "flex", alignItems: "center" }}>
                                 <div style={{
-                                  padding: "4px 10px", borderRadius: 2, fontSize: 10, fontWeight: isCurrent ? 700 : 400,
+                                  padding: "4px 10px", borderRadius: 2, fontWeight: isCurrent ? 700 : 400,
                                   background: isCurrent ? "var(--nf-accent-glow)" : isReached ? "var(--nf-bg-surface)" : "transparent",
                                   border: `1px solid ${isCurrent ? "var(--nf-accent)" : isReached ? "var(--nf-border)" : "var(--nf-border)"}`,
                                   color: isCurrent ? "var(--nf-accent)" : isReached ? "var(--nf-text)" : "var(--nf-text-muted)",
@@ -16383,7 +18279,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                     <Field label="Evolution Timeline" value={r.evolutionTimeline} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, evolutionTimeline: v } : re) })} multiline placeholder="Ch1: strangers → Ch5: first real conversation → Ch8: kiss → Ch12: betrayal..." small />
                     {/* NEW: Relationship depth fields */}
                     <div style={{ padding: "10px 12px", background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, marginTop: 4 }}>
-                      <div style={{ fontSize: 9, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Relationship Depth</div>
+                      <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", marginBottom: 8 }}>Relationship Depth</div>
                       <Field label="Chemistry / What Makes This Dynamic Compelling" value={r.chemistry || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, chemistry: v } : re) })} multiline placeholder="Opposites attract, shared trauma bonds them, intellectual sparring..." small />
                       <Field label="Source of Conflict" value={r.conflictSource || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, conflictSource: v } : re) })} multiline placeholder="Class differences, past betrayal, competing goals, jealousy..." small />
                       <Field label="Shared Secrets" value={r.sharedSecrets || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, sharedSecrets: v } : re) })} multiline placeholder="What do they know about each other that no one else does?" small />
@@ -16393,7 +18289,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                         <Field label="Taboos / Boundaries" value={r.taboos || ""} onChange={v => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, taboos: v } : re) })} placeholder="Topics they avoid, lines they won't cross..." small />
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-                        <label style={{ fontSize: 10, color: "var(--nf-text-muted)", display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                        <label style={{ fontSize: 11, color: "var(--nf-text-muted)", display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
                           <input type="checkbox" checked={r.isPublic !== false} onChange={e => updateProject({ relationships: rels.map(re => re.id === r.id ? { ...re, isPublic: e.target.checked } : re) })} style={{ accentColor: "var(--nf-accent)" }} />
                           Public relationship (known to other characters)
                         </label>
@@ -16447,6 +18343,253 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
   };
 
   // ─── TAB: MEMORY ───
+  // ─── KEEPSAKES TAB ───
+  // Combines: Writing Journal (per-chapter diary), Thinking Pad (scratch space),
+  // First Lines collector, Character Letters, and a Sentence Garden quick-view.
+  const renderKeepsakes = () => {
+    const garden = project?.sentenceGarden || [];
+    const journal = project?.writingJournal || {};
+    const firstLines = project?.firstLines || [];
+    const letters = project?.characterLetters || [];
+    const chars = (project?.characters || []).filter(c => c.name && !c.isBulk);
+
+    // Collect first lines live from chapters (falls back to stored firstLines)
+    const liveFirstLines = (project?.chapters || []).map((ch, i) => {
+      const plain = (ch.content || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").trim();
+      const firstSentence = plain.match(/^[^.!?]+[.!?]["')]?\s*/);
+      const line = firstSentence ? firstSentence[0].trim() : plain.slice(0, 120).trim();
+      return line ? { chapterIdx: i, title: ch.title, line } : null;
+    }).filter(Boolean);
+
+    const generateCharacterLetter = async (charId) => {
+      const char = chars.find(c => c.id === charId);
+      if (!char || !settings.apiKey) { showToast("Need API key + character", "error"); return; }
+      showToast(`${char.name} is writing to you...`, "info");
+      try {
+        const chaptersSince = Math.max(0, activeChapterIdx - (char.lastUpdatedChapter || 0));
+        const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${settings.apiKey}`, "HTTP-Referer": window.location.origin, "X-Title": "NovelForge" },
+          body: JSON.stringify({
+            model: settings.model || "anthropic/claude-sonnet-4",
+            messages: [
+              { role: "system", content: `You are ${char.name}, a character in a novel. Write a short, personal letter to your author (the reader). Reflect on who you've become, what you regret, what you still want. Be intimate. Use your authentic voice. 150-300 words. Sign it with your name.
+
+Your profile:
+Role: ${char.role}
+Personality: ${(char.personality || "").slice(0, 400)}
+Backstory: ${char.backstoryRevealed ? (char.backstory || "").slice(0, 400) : "(keep private)"}
+Current emotional state: ${char.currentEmotionalState || "unspecified"}
+Arc: ${char.arc || ""}
+Speech pattern: ${char.speechPattern || ""}` },
+              { role: "user", content: `Write your letter. We're at Chapter ${activeChapterIdx + 1} of the novel. This is the voice of YOU, speaking to your author.` },
+            ],
+            max_tokens: 600, temperature: 0.9,
+          }),
+        });
+        if (!res.ok) throw new Error(`API error ${res.status}`);
+        const data = await res.json();
+        const content = (stripThinkingTokens(data.choices?.[0]?.message?.content || "")).trim();
+        if (content) {
+          const entry = { id: uid(), charId, charName: char.name, chapterIdx: activeChapterIdx, content, generatedAt: new Date().toISOString() };
+          updateProject({ characterLetters: [...letters, entry] });
+          showToast(`📜 ${char.name} wrote to you`, "success");
+        }
+      } catch (e) { showToast(`Letter failed: ${e.message}`, "error"); }
+    };
+
+    return (
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div className="nf-content-scroll">
+          <div className="nf-page-title" style={{ marginBottom: 6 }}>Keepsakes</div>
+          <p className="nf-hint" style={{ marginBottom: 20 }}>Memories, reflections, and small joys from your writing life. Private. Quiet. Yours.</p>
+
+          {/* Thinking Pad — scratch space */}
+          <div className="nf-card">
+            <h3 className="nf-card-title">💭 Thinking Pad</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>Back-of-the-napkin space. Not a chapter. Just a place to think.</p>
+            <textarea
+              value={project?.thinkingPad || ""}
+              onChange={e => updateProject({ thinkingPad: e.target.value })}
+              placeholder="Jot an idea, a reminder, a question to yourself..."
+              className="nf-textarea"
+              style={{ minHeight: 160, fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.7 }}
+            />
+          </div>
+
+          {/* Writing Journal — per-chapter diary */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">📔 Writing Journal</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>How did writing this chapter feel? Private — not sent to AI, not in exports.</p>
+            {(project?.chapters || []).map((ch, i) => {
+              const entry = journal[i] || { note: "", mood: "", savedAt: "" };
+              return (
+                <div key={ch.id || i} style={{ padding: "10px 12px", borderBottom: "1px solid var(--nf-border)", marginBottom: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)" }}>Ch{i + 1}: {ch.title || "Untitled"}</span>
+                    {entry.savedAt && <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{new Date(entry.savedAt).toLocaleDateString()}</span>}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+                    {["flow", "struggle", "breakthrough", "avoidance", "tender", "grief", "joy"].map(mood => (
+                      <button key={mood} onClick={() => updateProject({ writingJournal: { ...journal, [i]: { ...entry, mood, savedAt: new Date().toISOString() } } })}
+                        className={`nf-btn-micro ${entry.mood === mood ? "nf-btn-primary" : ""}`} style={{ fontSize: 11 }}>
+                        {mood}
+                      </button>
+                    ))}
+                  </div>
+                  <textarea value={entry.note || ""}
+                    onChange={e => updateProject({ writingJournal: { ...journal, [i]: { ...entry, note: e.target.value, savedAt: new Date().toISOString() } } })}
+                    placeholder="How was writing this? Struggled with... Broke through by... Felt..."
+                    style={{ width: "100%", minHeight: 50, fontSize: 12, padding: 6, background: "var(--nf-bg-deep)", border: "1px solid var(--nf-border)", borderRadius: 2, color: "var(--nf-text)", fontFamily: "var(--nf-font-body)", resize: "vertical" }} />
+                </div>
+              );
+            })}
+            {(!project?.chapters || project.chapters.length === 0) && (
+              <div style={{ padding: 20, textAlign: "center", color: "var(--nf-text-muted)", fontSize: 11 }}>No chapters yet.</div>
+            )}
+          </div>
+
+          {/* First Lines Collector */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">✍️ First Lines</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>The opening line of every chapter, side by side. An album of your book's voice.</p>
+            {liveFirstLines.length === 0 ? (
+              <div style={{ padding: 20, textAlign: "center", color: "var(--nf-text-muted)", fontSize: 11, fontStyle: "italic" }}>Your first lines will gather here.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {liveFirstLines.map(fl => (
+                  <div key={fl.chapterIdx} style={{ padding: "8px 12px", borderLeft: "2px solid var(--nf-accent-2)", background: "var(--nf-bg-deep)", borderRadius: "0 3px 3px 0" }}>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 3 }}>Ch{fl.chapterIdx + 1} · {fl.title}</div>
+                    <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, fontStyle: "italic", lineHeight: 1.6, color: "var(--nf-text)" }}>"{fl.line}"</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Character Letters */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">📜 Letters from Your Characters</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>AI generates a letter in the voice of a character, reflecting on who they've become.</p>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+              {chars.length > 0 ? chars.map(c => (
+                <button key={c.id} onClick={() => generateCharacterLetter(c.id)} className="nf-btn nf-btn-ghost" style={{ fontSize: 11 }}>
+                  <Icons.Wand /> {c.name} writes to you
+                </button>
+              )) : <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>Add characters first.</div>}
+            </div>
+            {letters.length === 0 ? (
+              <div style={{ padding: 16, textAlign: "center", color: "var(--nf-text-muted)", fontSize: 11, fontStyle: "italic" }}>No letters yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {letters.slice().reverse().map(letter => (
+                  <div key={letter.id} style={{ padding: "14px 16px", background: "var(--nf-bg-raised)", border: "1px solid var(--nf-border)", borderLeft: "3px solid var(--nf-accent)", borderRadius: "0 4px 4px 0", position: "relative" }}>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                      <span><strong style={{ color: "var(--nf-accent)" }}>{letter.charName}</strong> · Chapter {letter.chapterIdx + 1}</span>
+                      <span>{new Date(letter.generatedAt).toLocaleDateString()}</span>
+                    </div>
+                    <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 14, lineHeight: 1.75, color: "var(--nf-text)", whiteSpace: "pre-wrap" }}>{letter.content}</div>
+                    <button onClick={() => updateProject({ characterLetters: letters.filter(l => l.id !== letter.id) })}
+                      className="nf-btn-icon" style={{ position: "absolute", top: 8, right: 8, padding: 4, opacity: 0.5 }} aria-label="Remove letter"><Icons.X /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sentence Garden quick-view link */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">🌿 Sentence Garden</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>Your pinned favorite lines — open the full viewer to browse or remove.</p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 13, color: "var(--nf-text)" }}>
+                {garden.length} pinned {garden.length === 1 ? "sentence" : "sentences"}
+              </span>
+              <button onClick={() => setSentenceGardenOpen(true)} className="nf-btn nf-btn-primary">
+                <Icons.Leaf /> Open Garden
+              </button>
+            </div>
+          </div>
+
+          {/* Character Conversation Room */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">💬 Character Conversation Room</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>Pick two characters + a scenario. AI generates a short practice dialogue — sandbox, not canon.</p>
+            <button onClick={() => setConversationRoomOpen(true)} className="nf-btn nf-btn-primary" disabled={chars.length < 2}>
+              <Icons.Wand /> Open conversation room
+            </button>
+            {chars.length < 2 && (
+              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 8 }}>Need at least two named characters.</div>
+            )}
+          </div>
+
+          {/* Story Map */}
+          <div className="nf-card" style={{ marginTop: 16 }}>
+            <h3 className="nf-card-title">🗺 Story Map</h3>
+            <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>Drag-drop canvas showing characters, locations, and organizations as connected nodes. Visual thinking space.</p>
+            <button onClick={() => setStoryMapOpen(true)} className="nf-btn nf-btn-primary">
+              <Icons.Map /> Open story map
+            </button>
+          </div>
+
+          {/* Writing Memories — surface old pinned sentences */}
+          {garden.length >= 3 && (() => {
+            // Pick up to 3 random-but-stable-per-day entries
+            const day = Math.floor(Date.now() / 86400000);
+            const seed = (n) => ((n * 9301 + 49297) % 233280) / 233280;
+            const memories = garden.length <= 3 ? garden : (() => {
+              const indices = new Set();
+              let i = 0;
+              while (indices.size < 3 && i < 30) {
+                indices.add(Math.floor(seed(day + i) * garden.length));
+                i++;
+              }
+              return [...indices].map(idx => garden[idx]);
+            })();
+            return (
+              <div className="nf-card" style={{ marginTop: 16 }}>
+                <h3 className="nf-card-title">🕯 Writing Memories</h3>
+                <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>Lines from your garden, resurfacing. A different three each day.</p>
+                <div style={{ display: "grid", gap: 10 }}>
+                  {memories.map(entry => (
+                    <div key={entry.id} style={{ padding: "10px 12px", borderLeft: "2px solid var(--nf-accent)", background: "var(--nf-bg-deep)", borderRadius: "0 3px 3px 0" }}>
+                      <div style={{ fontFamily: "var(--nf-font-prose)", fontSize: 13, fontStyle: "italic", lineHeight: 1.6, color: "var(--nf-text)" }}>"{entry.text}"</div>
+                      <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4 }}>
+                        {entry.chapterTitle || `Ch${(entry.chapterIdx ?? 0) + 1}`} · {entry.savedAt ? `pinned ${new Date(entry.savedAt).toLocaleDateString()}` : ""}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Session Soundtrack Log */}
+          {(project?.sessionLogs || []).length > 0 && (
+            <div className="nf-card" style={{ marginTop: 16 }}>
+              <h3 className="nf-card-title">🎵 Session Soundtrack</h3>
+              <p className="nf-hint" style={{ marginTop: -4, marginBottom: 10 }}>What ambient sound + intention accompanied your past sessions.</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 260, overflow: "auto" }}>
+                {(project?.sessionLogs || []).slice().reverse().slice(0, 20).map(log => (
+                  <div key={log.id} style={{ padding: "8px 12px", background: "var(--nf-bg-deep)", borderRadius: 2, display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, color: "var(--nf-text)" }}>
+                    <div>
+                      <span style={{ fontFamily: "var(--nf-font-mono)", color: "var(--nf-text-muted)" }}>{new Date(log.endedAt || log.startedAt).toLocaleDateString()}</span>
+                      {log.intention && <span style={{ marginLeft: 8, color: "var(--nf-accent-2)", fontStyle: "italic" }}>{log.intention}</span>}
+                    </div>
+                    <div style={{ color: "var(--nf-text-muted)" }}>
+                      {log.ambient && log.ambient !== "none" && <span>{log.ambient}</span>}
+                      {log.wordsDelta > 0 && <span style={{ marginLeft: 10, fontFamily: "var(--nf-font-mono)" }}>+{log.wordsDelta}w</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   const renderMemory = () => {
     const { fullPayload, tokenEstimate, sectionBreakdown, selectedMode } = memoryContextPayload;
     const modelCtx = settings.modelContextWindow || 128000;
@@ -16488,7 +18631,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <div style={{ marginBottom: 26, display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>Previewing mode:</span>
           <span style={{ fontSize: 12, color: "var(--nf-accent-2)", fontWeight: 700, textTransform: "capitalize" }}>{selectedMode}</span>
-          <span style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>(switch modes in the Write tab to preview different contexts)</span>
+          <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>(switch modes in the Write tab to preview different contexts)</span>
         </div>
 
         {/* F1: Prominent total payload with usage bar */}
@@ -16502,7 +18645,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <div style={{ height: 4, background: "var(--nf-bg-deep)", borderRadius: 2, overflow: "hidden", marginBottom: 6 }}>
             <div style={{ height: "100%", borderRadius: 2, width: `${usagePct}%`, background: usagePct > 80 ? "var(--nf-accent)" : usagePct > 50 ? "var(--nf-accent-2)" : "var(--nf-success)", transition: "width 0.5s ease" }} />
           </div>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>{usagePct}% of model context window ({(modelCtx / 1000).toFixed(0)}k)</div>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>{usagePct}% of model context window ({(modelCtx / 1000).toFixed(0)}k)</div>
         </div>
 
         {/* F2: Dynamic threshold warning */}
@@ -16525,7 +18668,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <div className="nf-card-title" style={{ fontSize: 12, marginBottom: 8 }}>Detected in Current Chapter</div>
             {detectedCharIds.size > 0 && (
               <div style={{ marginBottom: 6 }}>
-                <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Characters (full detail): </span>
+                <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>Characters (full detail): </span>
                 {(project?.characters || []).filter(c => detectedCharIds.has(c.id)).map(c => (
                   <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-success-bg)", border: "1px solid var(--nf-success)", color: "var(--nf-success)", fontWeight: 600, display: "inline-block" }}>{c.name}</span>
                 ))}
@@ -16556,11 +18699,11 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               if (ambientIds.size === 0) return null;
               return (
                 <div style={{ marginBottom: 6 }}>
-                  <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Nearby at location (compact): </span>
+                  <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>Nearby at location (compact): </span>
                   {(project?.characters || []).filter(c => ambientIds.has(c.id)).map(c => (
                     <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px dashed var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 400, display: "inline-block", fontStyle: "italic" }}>{c.name}</span>
                   ))}
-                  <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2, fontStyle: "italic" }}>
+                  <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2, fontStyle: "italic" }}>
                     These characters frequent the current location — sent as compact summaries (name + role + one-line personality only)
                   </div>
                 </div>
@@ -16568,7 +18711,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             })()}
             {detectedWorldIds.size > 0 && (
               <div>
-                <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>World entries: </span>
+                <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>World entries: </span>
                 {(project?.worldBuilding || []).filter(w => detectedWorldIds.has(w.id)).map(w => (
                   <span style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow-2)", border: "1px solid var(--nf-accent-2)", color: "var(--nf-accent-2)", fontWeight: 600, display: "inline-block" }}>{w.name}</span>
                 ))}
@@ -16583,7 +18726,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               if (locNames.length === 0) return null;
               return (
                 <div style={{ marginTop: 6 }}>
-                  <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 600 }}>Plot locations: </span>
+                  <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 600 }}>Plot locations: </span>
                   {locNames.map((n, i) => (
                     <span key={i} style={{ fontSize: 11, padding: "2px 8px", margin: "0 3px 3px 0", borderRadius: 4, background: "var(--nf-accent-glow)", border: "1px solid var(--nf-accent)", color: "var(--nf-accent)", fontWeight: 500, display: "inline-block" }}>📍 {n}</span>
                   ))}
@@ -16629,10 +18772,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: "var(--nf-text)" }}>
                     {ch.title}
-                    <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontWeight: 400, marginLeft: 8 }}>
+                    <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontWeight: 400, marginLeft: 8 }}>
                       {ch.content ? `${wordCount(ch.content).toLocaleString()} words` : "empty"}
                     </span>
-                    {isStale && <span style={{ fontSize: 9, color: "var(--nf-accent)", marginLeft: 6 }}>⚠ may be stale</span>}
+                    {isStale && <span style={{ fontSize: 11, color: "var(--nf-accent)", marginLeft: 6 }}>⚠ may be stale</span>}
                   </div>
                   <button onClick={() => autoSummarizeChapter(i)} disabled={isSummarizing || !ch.content || wordCount(ch.content) < 50}
                     className="nf-btn-micro"><Icons.Brain /> {ch.summary ? "Re-summarize" : "Auto"}</button>
@@ -16651,7 +18794,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               {showMemoryPreview ? <Icons.EyeOff /> : <Icons.Eye />} {showMemoryPreview ? "Hide" : "Show"} Context Payload
             </button>
             {showMemoryPreview && (
-              <span style={{ fontSize: 10, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
+              <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>
                 {fullPayload.length.toLocaleString()} chars · Use Ctrl+F in browser to search
               </span>
             )}
@@ -16681,7 +18824,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               <option key={lang.value} value={lang.value}>{lang.label}</option>
             ))}
           </select>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, lineHeight: 1.5 }}>
             Partial translations — core UI elements only. Novel content is never auto-translated.
           </div>
         </div>
@@ -16702,7 +18845,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               onChange={e => setSettings(prev => ({ ...prev, zenTypography: e.target.checked }))} />
             <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Zen typography</span>
           </label>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
             Center editor at 65-character width with serif body font (Lora). Optimal for focused reading.
           </div>
           <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
@@ -16710,14 +18853,152 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               onChange={e => setSettings(prev => ({ ...prev, sentenceFade: e.target.checked }))} />
             <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Sentence-fade AI streaming</span>
           </label>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
             AI responses appear a sentence at a time with gentle fade-in. Disabled: character-by-character typewriter.
           </div>
         </div>
       </div>
 
+      {/* ─── Mental Health & Ambient Environment ─── */}
+      <div className="nf-card" style={{ marginTop: 16 }}>
+        <h3 className="nf-card-title">🌿 Writing Environment</h3>
+        <p className="nf-hint" style={{ marginTop: -4, marginBottom: 12 }}>Designed for mental rest. No gamification, no streaks, no pressure.</p>
+
+        {/* Ambient sound */}
+        <div className="nf-field">
+          <label className="nf-label">Ambient Sound</label>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+            {[
+              { k: "none", label: "Silence" },
+              { k: "rain", label: "🌧 Rain" },
+              { k: "cafe", label: "☕ Café" },
+              { k: "fireplace", label: "🔥 Fireplace" },
+              { k: "forest", label: "🌲 Forest" },
+              { k: "library", label: "📚 Library hush" },
+            ].map(opt => (
+              <button key={opt.k} onClick={() => setSettings(prev => ({ ...prev, ambientSound: opt.k }))}
+                className={`nf-btn-micro ${settings.ambientSound === opt.k ? "nf-btn-primary" : ""}`}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+          {settings.ambientSound && settings.ambientSound !== "none" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 11, color: "var(--nf-text-muted)", minWidth: 44 }}>Volume</span>
+              <input type="range" min="0" max="1" step="0.05"
+                value={settings.ambientVolume || 0.4}
+                onChange={e => setSettings(prev => ({ ...prev, ambientVolume: parseFloat(e.target.value) }))}
+                style={{ flex: 1, accentColor: "var(--nf-accent)" }} />
+              <span style={{ fontSize: 11, fontFamily: "var(--nf-font-mono)", color: "var(--nf-text-muted)", minWidth: 32, textAlign: "right" }}>{Math.round((settings.ambientVolume || 0.4) * 100)}%</span>
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 6, lineHeight: 1.5 }}>
+            Procedurally generated — no audio files downloaded.
+          </div>
+        </div>
+
+        {/* Silent writing mode */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 14 }}>
+          <input type="checkbox" checked={!!settings.silentWritingMode}
+            onChange={e => setSettings(prev => ({ ...prev, silentWritingMode: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Silent writing mode</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Hides word count, hook scores, and other stats while writing. For when the numbers make you anxious.
+        </div>
+
+        {/* Line focus */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.lineFocusMode}
+            onChange={e => setSettings(prev => ({ ...prev, lineFocusMode: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Line focus mode</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Fade non-current paragraphs. Like looking through a soft lens at your current thought.
+        </div>
+
+        {/* Circadian dimming */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.circadianDimming}
+            onChange={e => setSettings(prev => ({ ...prev, circadianDimming: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Circadian dimming</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Warmer tones after 8pm. Respects your eye rest.
+        </div>
+
+        {/* Typewriter pacing */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.typewriterPacing}
+            onChange={e => setSettings(prev => ({ ...prev, typewriterPacing: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Typewriter pacing</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Softly breathing caret and widened letter spacing — encourages a meditative, deliberate pace.
+        </div>
+
+        {/* Breathing pauser */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.breathingPauser}
+            onChange={e => setSettings(prev => ({ ...prev, breathingPauser: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Breathing pauser</span>
+        </label>
+        {settings.breathingPauser && (
+          <div style={{ marginLeft: 22, marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>Every</span>
+            <input type="number" min="15" max="180" value={settings.breathingPauserInterval || 45}
+              onChange={e => setSettings(prev => ({ ...prev, breathingPauserInterval: Math.max(15, Math.min(180, parseInt(e.target.value, 10) || 45)) }))}
+              style={{ width: 54, padding: "2px 6px", fontSize: 11 }} className="nf-input nf-input-compact" />
+            <span style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>minutes</span>
+          </div>
+        )}
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Gentle 4-4-6 breath animation after continuous writing. Dismissable.
+        </div>
+
+        {/* Chapter celebration */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.chapterCelebration}
+            onChange={e => setSettings(prev => ({ ...prev, chapterCelebration: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Chapter milestone bloom</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Muted radial bloom when a chapter crosses 1000 words. Not confetti.
+        </div>
+
+        {/* Session decompression */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.sessionDecompression}
+            onChange={e => setSettings(prev => ({ ...prev, sessionDecompression: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>End-of-session reflection</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Optional quiet summary screen when you close a session. No streaks.
+        </div>
+
+        {/* Question of the day */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.questionOfTheDay}
+            onChange={e => setSettings(prev => ({ ...prev, questionOfTheDay: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Question of the day</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          A thoughtful daily prompt about your novel. Skip freely.
+        </div>
+
+        {/* Forge-chan good night */}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginTop: 10 }}>
+          <input type="checkbox" checked={!!settings.forgeChanGoodNight}
+            onChange={e => setSettings(prev => ({ ...prev, forgeChanGoodNight: e.target.checked }))} />
+          <span style={{ color: "var(--nf-text)", fontWeight: 500 }}>Forge-chan evening greetings</span>
+        </label>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 22 }}>
+          Forge-chan says goodnight when you close the app late. (◕‿◕✿)
+        </div>
+      </div>
+
       {/* E4: Clearly separated API section with scope label */}
-      <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginTop: 20, marginBottom: 6 }}>Global Settings (all projects)</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginTop: 20, marginBottom: 6 }}>Global Settings (all projects)</div>
       <div className="nf-card">
         <h3 className="nf-card-title">API Configuration</h3>
         <div className="nf-field">
@@ -16731,7 +19012,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             </button>
           </div>
           {/* E1: API key storage warning */}
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, opacity: 0.7 }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, opacity: 0.7 }}>
             Stored in browser localStorage. Clear browser data to remove.
           </div>
         </div>
@@ -16747,7 +19028,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             }}
               onBlur={e => setSettings(prev => ({ ...prev, maxTokens: clamp(parseInt(e.target.value, 10) || 4096, 256, 16384) }))}
               className="nf-input" type="number" min="0" />
-            <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2 }}>256–16,384</div>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2 }}>256–16,384</div>
           </div>
           {/* E2: Cleaner temperature handling */}
           <div className="nf-field">
@@ -16770,7 +19051,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             }}
               onBlur={e => setSettings(prev => ({ ...prev, modelContextWindow: clamp(parseInt(e.target.value, 10) || 128000, 4000, 2000000) }))}
               className="nf-input" type="number" min="0" />
-            <div style={{ fontSize: 9, color: "var(--nf-text-muted)", marginTop: 2 }}>Auto-set from model</div>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2 }}>Auto-set from model</div>
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -16803,7 +19084,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <h3 className="nf-card-title">🎭 Multi-Agent System</h3>
         <p style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 14, lineHeight: 1.6 }}>
           Delegate memory retrieval and context assembly to specialized agents running in parallel.
-          Each role below can use a different model — default is <code style={{ fontSize: 10, background: "var(--nf-bg-deep)", padding: "1px 4px", borderRadius: 2 }}>x-ai/grok-4.1-fast</code>.
+          Each role below can use a different model — default is <code style={{ fontSize: 11, background: "var(--nf-bg-deep)", padding: "1px 4px", borderRadius: 2 }}>x-ai/grok-4.1-fast</code>.
           Typically produces higher-quality output at lower cost by focusing the writing agent's attention.
         </p>
         <div className="nf-field">
@@ -16812,7 +19093,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               onChange={e => setSettings(prev => ({ ...prev, agentsEnabled: e.target.checked }))} />
             <span style={{ fontSize: 13, color: "var(--nf-text)", fontWeight: 500 }}>Enable multi-agent mode</span>
           </label>
-          <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 24 }}>
+          <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, marginLeft: 24 }}>
             When enabled, AI operations use the orchestrator + specialist pipeline instead of the monolithic context engine.
           </div>
         </div>
@@ -16827,16 +19108,16 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   <div key={role.key} style={{ padding: "8px 10px", background: "var(--nf-bg-deep)", borderRadius: 4, border: "1px solid var(--nf-border)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <span style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)" }}>{role.label}</span>
-                      <span style={{ fontSize: 9, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>{role.budget.toLocaleString()} tok</span>
+                      <span style={{ fontSize: 11, color: "var(--nf-text-muted)", fontFamily: "var(--nf-font-mono)" }}>{role.budget.toLocaleString()} tok</span>
                     </div>
-                    <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginBottom: 6, lineHeight: 1.4 }}>{role.desc}</div>
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginBottom: 6, lineHeight: 1.4 }}>{role.desc}</div>
                     <select
                       value={settings.agentModels?.[role.key] || AGENT_DEFAULT_MODEL}
                       onChange={e => setSettings(prev => ({
                         ...prev,
                         agentModels: { ...(prev.agentModels || {}), [role.key]: e.target.value },
                       }))}
-                      className="nf-select" style={{ fontSize: 11, width: "100%" }}>
+                      className="nf-select"style={{ width: "100%" }}>
                       {AGENT_MODEL_OPTIONS.map(opt => (
                         <option key={opt.value} value={opt.value}>{opt.label}</option>
                       ))}
@@ -16875,7 +19156,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                       style={{ marginTop: 2 }} />
                     <div>
                       <div style={{ fontSize: 11, fontWeight: 600, color: "var(--nf-text)" }}>{pp.label}</div>
-                      <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 2 }}>{pp.desc}</div>
+                      <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 2 }}>{pp.desc}</div>
                     </div>
                   </label>
                 ))}
@@ -16886,9 +19167,43 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
       </div>
 
       {/* E4: Clearly separated project section */}
-      <div style={{ fontSize: 9, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginTop: 24, marginBottom: 6 }}>Project Settings (this novel only)</div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--nf-text-muted)", textTransform: "uppercase", letterSpacing: "0.1em", marginTop: 24, marginBottom: 6 }}>Project Settings (this novel only)</div>
       <div className="nf-card">
         <h3 className="nf-card-title">Novel Settings</h3>
+        {/* Cover image */}
+        <div className="nf-field">
+          <label className="nf-label">Cover Image</label>
+          <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+            <div style={{ width: 96, height: 144, border: "1px solid var(--nf-border)", borderRadius: 3, overflow: "hidden", background: "var(--nf-bg-deep)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+              {project?.coverImage ? (
+                <img loading="lazy" src={project.coverImage} alt="Cover" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <span style={{ fontSize: 11, color: "var(--nf-text-muted)", textAlign: "center", padding: 6 }}>No cover</span>
+              )}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+              <input type="file" accept="image/*" id="nf-cover-input" style={{ display: "none" }} onChange={e => {
+                const file = e.target.files?.[0]; if (!file) return;
+                if (file.size > 3 * 1024 * 1024) { showToast("Image too large — max 3MB", "error"); return; }
+                const reader = new FileReader();
+                reader.onload = ev => updateProject({ coverImage: ev.target.result });
+                reader.readAsDataURL(file);
+                e.target.value = "";
+              }} />
+              <button onClick={() => document.getElementById("nf-cover-input")?.click()} className="nf-btn nf-btn-ghost" style={{ fontSize: 11 }}>
+                <Icons.Image /> {project?.coverImage ? "Replace" : "Upload"} cover
+              </button>
+              {project?.coverImage && (
+                <button onClick={() => updateProject({ coverImage: "" })} className="nf-btn nf-btn-ghost" style={{ fontSize: 11 }}>
+                  <Icons.X /> Remove
+                </button>
+              )}
+              <div style={{ fontSize: 11, color: "var(--nf-text-muted)", lineHeight: 1.5, marginTop: 4 }}>
+                Appears in your project list. Keep under 3MB — JPG/PNG/WebP. Ideal ratio 2:3 (like a book cover).
+              </div>
+            </div>
+          </div>
+        </div>
         <Field label="Title" value={project?.title} onChange={v => updateProject({ title: v })} placeholder="Novel title" />
         <Field label="Synopsis" value={project?.synopsis} onChange={v => updateProject({ synopsis: v })} multiline placeholder="Story synopsis..." />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -16902,7 +19217,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           <input type="range" min="1" max="5" value={project?.heatLevel || 3}
             onChange={e => updateProject({ heatLevel: parseInt(e.target.value, 10) })} className="nf-range"
             aria-valuetext={["Fade to black","Suggestive","Moderate","Explicit","Graphic"][(project?.heatLevel || 3) - 1]} />
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", color: "var(--nf-text-muted)", marginTop: 4 }}>
             <span>Fade to black</span><span>Suggestive</span><span>Moderate</span><span>Explicit</span><span>Graphic</span>
           </div>
         </div>
@@ -16911,19 +19226,19 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
         <Field label="Hard Limits" value={project?.avoidList} onChange={v => updateProject({ avoidList: v })} multiline placeholder="Never include..." small />
         {/* ─── LITERARY CRAFT SETTINGS ─── */}
         <details style={{ marginTop: 8 }}>
-          <summary style={{ fontSize: 9, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent-2)", cursor: "pointer", padding: "4px 0" }}>Literary Craft</summary>
+          <summary style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--nf-accent-2)", cursor: "pointer", padding: "4px 0" }}>Literary Craft</summary>
           <div style={{ marginTop: 8 }}>
             <div className="nf-field">
               <label className="nf-label">Thematic Argument — Thesis</label>
-              <input value={project?.thematicArgument?.thesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), thesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="What this novel argues FOR" style={{ fontSize: 10 }} />
+              <input value={project?.thematicArgument?.thesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), thesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="What this novel argues FOR" />
             </div>
             <div className="nf-field">
               <label className="nf-label">Thematic Argument — Antithesis</label>
-              <input value={project?.thematicArgument?.antithesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), antithesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="The opposing viewpoint" style={{ fontSize: 10 }} />
+              <input value={project?.thematicArgument?.antithesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), antithesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="The opposing viewpoint" />
             </div>
             <div className="nf-field">
               <label className="nf-label">Thematic Argument — Synthesis</label>
-              <input value={project?.thematicArgument?.synthesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), synthesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="Where the novel lands — the resolution" style={{ fontSize: 10 }} />
+              <input value={project?.thematicArgument?.synthesis || ""} onChange={e => updateProject({ thematicArgument: { ...(project?.thematicArgument || {}), synthesis: e.target.value } })} className="nf-input nf-input-compact" placeholder="Where the novel lands — the resolution" />
             </div>
             {/* ─── MOTIFS ─── */}
             <div className="nf-field">
@@ -16933,8 +19248,8 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               </div>
               {(project?.motifs || []).map((m, mi) => (
                 <div key={m.id || mi} style={{ display: "flex", gap: 6, marginTop: 4, alignItems: "start" }}>
-                  <input value={m.name || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], name: e.target.value }; updateProject({ motifs }); }} className="nf-input nf-input-compact" placeholder="Symbol name" style={{ fontSize: 10, flex: 1 }} />
-                  <input value={m.meaning || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], meaning: e.target.value }; updateProject({ motifs }); }} className="nf-input nf-input-compact" placeholder="Meaning" style={{ fontSize: 10, flex: 1 }} />
+                  <input value={m.name || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], name: e.target.value }; updateProject({ motifs }); }} className="nf-input nf-input-compact" placeholder="Symbol name"style={{ flex: 1 }} />
+                  <input value={m.meaning || ""} onChange={e => { const motifs = [...(project?.motifs || [])]; motifs[mi] = { ...motifs[mi], meaning: e.target.value }; updateProject({ motifs }); }} className="nf-input nf-input-compact" placeholder="Meaning"style={{ flex: 1 }} />
                   <button onClick={() => updateProject({ motifs: (project?.motifs || []).filter((_, i) => i !== mi) })} className="nf-btn-icon" style={{ padding: 2, flexShrink: 0, opacity: 0.4 }}><Icons.X /></button>
                 </div>
               ))}
@@ -16948,14 +19263,14 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               {(project?.readerKnowledge || []).map((rk, ri) => (
                 <div key={rk.id || ri} style={{ marginTop: 4, padding: "6px 8px", background: "var(--nf-bg-deep)", borderRadius: 2 }}>
                   <div style={{ display: "flex", gap: 6, marginBottom: 4 }}>
-                    <input value={rk.fact || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], fact: e.target.value }; updateProject({ readerKnowledge: rks }); }} className="nf-input nf-input-compact" placeholder="What the reader knows" style={{ fontSize: 10, flex: 1 }} />
-                    <input value={rk.revealedInChapter || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], revealedInChapter: parseInt(e.target.value, 10) || 0 }; updateProject({ readerKnowledge: rks }); }} className="nf-input nf-input-compact" placeholder="Reveal Ch#" type="number" min="0" style={{ fontSize: 10, width: 60 }} />
+                    <input value={rk.fact || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], fact: e.target.value }; updateProject({ readerKnowledge: rks }); }} className="nf-input nf-input-compact" placeholder="What the reader knows"style={{ flex: 1 }} />
+                    <input value={rk.revealedInChapter || ""} onChange={e => { const rks = [...(project?.readerKnowledge || [])]; rks[ri] = { ...rks[ri], revealedInChapter: parseInt(e.target.value, 10) || 0 }; updateProject({ readerKnowledge: rks }); }} className="nf-input nf-input-compact" placeholder="Reveal Ch#" type="number" min="0"style={{ width: 60 }} />
                     <button onClick={() => updateProject({ readerKnowledge: (project?.readerKnowledge || []).filter((_, i) => i !== ri) })} className="nf-btn-icon" style={{ padding: 2, opacity: 0.4 }}><Icons.X /></button>
                   </div>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {(project?.characters || []).filter(c => c.name).map(c => {
                       const isKnown = (rk.knownBy || []).includes(c.id);
-                      return <button key={c.id} type="button" onClick={() => { const rks = [...(project?.readerKnowledge || [])]; const kb = isKnown ? (rk.knownBy || []).filter(id => id !== c.id) : [...(rk.knownBy || []), c.id]; rks[ri] = { ...rks[ri], knownBy: kb }; updateProject({ readerKnowledge: rks }); }} style={{ fontSize: 8, padding: "1px 6px", borderRadius: 12, border: `1px solid ${isKnown ? "var(--nf-accent-2)" : "var(--nf-border)"}`, background: isKnown ? "var(--nf-accent-glow-2)" : "transparent", color: isKnown ? "var(--nf-accent-2)" : "var(--nf-text-muted)", cursor: "pointer" }}>{isKnown ? "✓ " : ""}{c.name.split(/\s+/)[0]}</button>;
+                      return <button key={c.id} type="button" onClick={() => { const rks = [...(project?.readerKnowledge || [])]; const kb = isKnown ? (rk.knownBy || []).filter(id => id !== c.id) : [...(rk.knownBy || []), c.id]; rks[ri] = { ...rks[ri], knownBy: kb }; updateProject({ readerKnowledge: rks }); }} style={{ fontSize: 11, padding: "1px 6px", borderRadius: 12, border: `1px solid ${isKnown ? "var(--nf-accent-2)" : "var(--nf-border)"}`, background: isKnown ? "var(--nf-accent-glow-2)" : "transparent", color: isKnown ? "var(--nf-accent-2)" : "var(--nf-text-muted)", cursor: "pointer" }}>{isKnown ? "✓ " : ""}{c.name.split(/\s+/)[0]}</button>;
                     })}
                   </div>
                 </div>
@@ -16989,7 +19304,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <label className="nf-label">Google OAuth Client ID</label>
             <input value={gdriveClientId} onChange={e => setGdriveClientId(e.target.value)}
               placeholder="Xxxxx.apps.googleusercontent.com" className="nf-input" style={{ fontSize: 12 }} />
-            <div style={{ fontSize: 10, color: "var(--nf-text-muted)", marginTop: 4, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 11, color: "var(--nf-text-muted)", marginTop: 4, lineHeight: 1.5 }}>
               Get one at <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener" style={{ color: "var(--nf-accent)", textDecoration: "underline" }}>Google Cloud Console</a> → Create OAuth 2.0 Client ID (Web application) → Add <code style={{ background: "var(--nf-bg-surface)", padding: "0 4px", borderRadius: 2 }}>{window.location.origin}</code> as an authorized JavaScript origin.
             </div>
           </div>
@@ -17012,7 +19327,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: gdriveAutoSync ? 10 : 0 }}>
               <div>
                 <div style={{ fontSize: 12, fontWeight: 600, color: "var(--nf-text)" }}>Auto-Sync</div>
-                <div style={{ fontSize: 10, color: "var(--nf-text-muted)" }}>Periodically save to Google Drive</div>
+                <div style={{ fontSize: 11, color: "var(--nf-text-muted)" }}>Periodically save to Google Drive</div>
               </div>
               <button onClick={() => setGdriveAutoSync(!gdriveAutoSync)} style={{
                 width: 40, height: 22, borderRadius: 12, border: "none", cursor: "pointer",
@@ -17134,14 +19449,14 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
       <div style={{ padding: "16px 12px 20px", borderTop: "1px solid var(--nf-border)", marginTop: 12 }}>
         <div style={{ textAlign: "center", marginBottom: 8 }}>
           <span style={{ fontFamily: "var(--nf-font-display)", fontSize: 14, fontWeight: 500, color: "var(--nf-text-dim)", letterSpacing: "0.02em" }}>NovelForge</span>
-          <span style={{ fontSize: 9, color: "var(--nf-text-muted)", marginLeft: 6, fontFamily: "var(--nf-font-mono)" }}>v1.0</span>
+          <span style={{ fontSize: 11, color: "var(--nf-text-muted)", marginLeft: 6, fontFamily: "var(--nf-font-mono)" }}>v1.0</span>
         </div>
-        <div style={{ fontSize: 9, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.7, opacity: 0.7 }}>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.7, opacity: 0.7 }}>
           <div>Developed by <span style={{ color: "var(--nf-accent-2)", fontWeight: 600 }}>@arvtk</span></div>
           <div style={{ fontStyle: "italic", marginTop: 2 }}>with an unreasonable amount of help from Claude</div>
-          <div style={{ fontStyle: "italic", fontSize: 8, opacity: 0.6, marginTop: 1 }}>(who mass-produced 16,000+ lines and mass-forgot what half of them do)</div>
+          <div style={{ fontStyle: "italic", opacity: 0.6, marginTop: 1 }}>(who mass-produced 16,000+ lines and mass-forgot what half of them do)</div>
         </div>
-        <div style={{ fontSize: 8, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.6, marginTop: 10, opacity: 0.5, letterSpacing: "0.02em" }}>
+        <div style={{ fontSize: 11, color: "var(--nf-text-muted)", textAlign: "center", lineHeight: 1.6, marginTop: 10, opacity: 0.5, letterSpacing: "0.02em" }}>
           © {new Date().getFullYear()} @arvtk. All rights reserved. This software and its source code, design, architecture, and all associated intellectual property are the exclusive property of the developer. Unauthorized reproduction, distribution, modification, reverse engineering, or commercial use — in whole or in part — is strictly prohibited without prior written consent. All AI-generated code contributions were produced under the direction and creative control of the developer and are incorporated as works made for hire. Novel content, characters, and creative works produced using this tool remain the sole property of their respective authors. This software is provided "as is" without warranty of any kind, express or implied.
         </div>
       </div>
@@ -17326,6 +19641,29 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           /* Soft non-blinking cursor for Reading Mode */
           .nf-cursor-soft { color: var(--nf-accent); margin-left: 1px; opacity: 0.5; animation: nf-soft-pulse 2.2s ease-in-out infinite; }
           @keyframes nf-soft-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.65; } }
+          /* Chapter celebration — muted bloom */
+          @keyframes nf-celebration-bloom {
+            0% { transform: scale(0.3); opacity: 0; }
+            30% { transform: scale(1.0); opacity: 1; }
+            70% { transform: scale(1.8); opacity: 0.6; }
+            100% { transform: scale(2.6); opacity: 0; }
+          }
+          /* Line focus mode — fade non-current paragraphs */
+          .nf-line-focus .nf-editor-contenteditable > *:not(:focus-within):not(:hover) { opacity: 0.3; transition: opacity 0.4s ease; }
+          .nf-line-focus .nf-editor-contenteditable > *:focus-within,
+          .nf-line-focus .nf-editor-contenteditable > *:hover { opacity: 1; }
+          /* Chapter tone tint overlay */
+          body.nf-tone-melancholy .nf-text-editor { background: linear-gradient(to bottom, rgba(90,106,122,0.03), transparent 200px); }
+          body.nf-tone-hopeful .nf-text-editor { background: linear-gradient(to bottom, rgba(125,138,111,0.035), transparent 200px); }
+          body.nf-tone-dread .nf-text-editor { background: linear-gradient(to bottom, rgba(90,58,58,0.04), transparent 200px); }
+          body.nf-tone-tender .nf-text-editor { background: linear-gradient(to bottom, rgba(168,118,90,0.035), transparent 200px); }
+          body.nf-tone-wild .nf-text-editor { background: linear-gradient(to bottom, rgba(196,101,58,0.04), transparent 200px); }
+          /* Circadian dimming — applied via inline filter on nf-root */
+          .nf-circadian-dim { filter: sepia(0.12) brightness(0.94) contrast(0.98); transition: filter 0.6s ease; }
+          /* Typewriter pacing — soft breathing caret, encourages slower pace */
+          body.nf-typewriter-pacing .nf-editor-contenteditable { caret-color: var(--nf-accent); animation: nf-caret-breath 3s ease-in-out infinite; }
+          @keyframes nf-caret-breath { 0%, 100% { caret-color: var(--nf-accent); } 50% { caret-color: var(--nf-accent-2); } }
+          body.nf-typewriter-pacing .nf-editor-contenteditable { letter-spacing: 0.005em; word-spacing: 0.04em; }
           /* G16: Theme transitions on key containers */
 
           /* Mobile hover-lock prevention — disable all :hover rules when device lacks hover capability */
@@ -17333,7 +19671,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             *:hover { background: inherit !important; color: inherit !important; border-color: inherit !important; box-shadow: inherit !important; transform: none !important; opacity: inherit !important; }
           }
           /* Mobile hover-lock prevention */
-          .nf-root { width: 100vw; height: 100vh; display: flex; font-family: var(--nf-font-body); background: var(--nf-bg-deep); color: var(--nf-text); overflow: hidden; font-size: 13px; transition: background 0.3s ease, color 0.3s ease; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+          .nf-root { width: 100vw; height: 100vh; height: 100dvh; display: flex; font-family: var(--nf-font-body); background: var(--nf-bg-deep); color: var(--nf-text); overflow: hidden; font-size: 13px; transition: background 0.3s ease, color 0.3s ease; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; padding: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0); box-sizing: border-box; }
           .nf-btn, .nf-btn-icon, .nf-btn-icon-sm, .nf-btn-micro, button, [role="button"] { touch-action: manipulation; }
           @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }
           @media (prefers-contrast: more) { :root { --nf-border: #888; --nf-text-muted: #ccc; } }
@@ -17362,7 +19700,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-project-title { font-size: 13px; font-weight: 500; color: var(--nf-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; font-family: var(--nf-font-display); }
           .nf-project-meta { font-size: 10px; color: var(--nf-text-muted); }
           
-          .nf-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 15px; border-radius: 3px; font-size: 12px; font-weight: 500; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-dim); transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); letter-spacing: 0.02em; }
+          .nf-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 15px; border-radius: 3px; font-size: 13px; font-weight: 500; cursor: pointer; border: 1px solid var(--nf-border); background: transparent; color: var(--nf-text-dim); transition: color 0.2s, border-color 0.2s, background 0.2s, transform 0.2s cubic-bezier(0.4,0,0.2,1); font-family: var(--nf-font-body); letter-spacing: 0.02em; }
           .nf-btn:hover { background: var(--nf-bg-hover); border-color: var(--nf-accent); }
           .nf-btn:active { transform: scale(0.96); transition-duration: 0.06s; }
           .nf-btn:focus-visible { outline: 2px solid var(--nf-accent); outline-offset: 2px; }
@@ -17392,7 +19730,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
 
           
           /* Physical card interactions — Japandi paper feel */
-          .nf-card { word-break: break-word; margin-bottom: 14px; padding: 16px; background: var(--nf-bg-raised); border-radius: 2px; border: 1px solid var(--nf-border); transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, border-color 0.2s; position: relative; }
+          .nf-card { word-break: break-word; margin-bottom: 14px; padding: 16px; background: var(--nf-bg-raised); border-radius: 2px; border: 1px solid var(--nf-border); transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1), box-shadow 0.25s ease, border-color 0.2s; position: relative; min-width: 0; max-width: 100%; }
           .nf-card:hover { transform: rotate(-0.2deg) translateY(-1px); box-shadow: var(--nf-shadow); }
           .nf-card:active { transform: scale(0.995); transition-duration: 0.1s; }
           .nf-card-title { font-size: 14px; word-break: break-word; font-family: var(--nf-font-display); font-weight: 500; color: var(--nf-text); margin-bottom: 12px; letter-spacing: 0.01em; }
@@ -17402,35 +19740,35 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-polaroid:active { transform: scale(0.97) rotate(0deg); transition-duration: 0.1s; }
           .nf-polaroid.active { border-color: var(--nf-accent); }
           
-          .nf-field { margin-bottom: 10px; }
-          .nf-label { display: block; font-size: 10px; font-weight: 700; color: var(--nf-text-dim); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--nf-font-body); }
-          .nf-input { width: 100%; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.2s, background 0.2s; }
-          .nf-input-compact { font-size: 11px; padding: 6px 8px; }
+          .nf-field { margin-bottom: 14px; }
+          .nf-label { display: block; font-size: 11px; font-weight: 600; color: var(--nf-text-dim); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.08em; font-family: var(--nf-font-body); }
+          .nf-input { width: 100%; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 14px; line-height: 1.5; outline: none; font-family: var(--nf-font-body); transition: border-color 0.2s, background 0.2s; min-height: 38px; box-sizing: border-box; }
+          .nf-input-compact { font-size: 13px; padding: 8px 10px; min-height: 34px; }
           .nf-input:hover { border-color: var(--nf-text-muted); }
           .nf-input:focus { border-color: var(--nf-border-focus); background: var(--nf-bg); }
-          .nf-textarea { width: 100%; min-height: 76px; max-height: 400px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; line-height: 1.6; resize: vertical; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.2s, background 0.2s; }
+          .nf-textarea { width: 100%; min-height: 44px; padding: 10px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 14px; line-height: 1.65; resize: none; outline: none; font-family: var(--nf-font-prose); transition: border-color 0.2s, background 0.2s; box-sizing: border-box; }
           .nf-textarea:hover { border-color: var(--nf-text-muted); }
           .nf-textarea:focus { border-color: var(--nf-border-focus); background: var(--nf-bg); }
-          .nf-textarea-sm { min-height: 56px; }
-          .nf-select { width: 100%; padding: 9px 10px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 13px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.2s; }
+          .nf-textarea-sm { min-height: 40px; font-size: 13px; line-height: 1.6; }
+          .nf-select { width: 100%; padding: 9px 12px; background: var(--nf-bg-surface); border: 1px solid var(--nf-border); border-radius: var(--nf-radius-sm); color: var(--nf-text); font-size: 14px; outline: none; font-family: var(--nf-font-body); transition: border-color 0.2s; min-height: 38px; box-sizing: border-box; }
           .nf-select:hover { border-color: var(--nf-text-muted); }
           .nf-select:focus { border-color: var(--nf-border-focus); }
           .nf-range { width: 100%; accent-color: var(--nf-accent); }
-          .nf-hint { color: var(--nf-text-muted); font-size: 11px; margin-bottom: 20px; line-height: 1.6; }
+          .nf-hint { color: var(--nf-text-muted); font-size: 12px; margin-bottom: 20px; line-height: 1.65; }
           .nf-char-section { margin-bottom: 20px; word-break: break-word; padding: 16px; background: var(--nf-bg-raised); border: 1px solid var(--nf-border); border-radius: var(--nf-radius); transition: border-color 0.3s; }
           .nf-char-section:focus-within { border-color: var(--nf-border-focus); }
-          .nf-char-section-label { font-size: 10px; font-weight: 700; color: var(--nf-accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--nf-border); font-family: var(--nf-font-body); }
+          .nf-char-section-label { font-size: 12px; font-weight: 700; color: var(--nf-accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--nf-border); font-family: var(--nf-font-body); }
           
           .nf-tab-bar { display: flex; align-items: center; border-bottom: 1px solid var(--nf-border); background: var(--nf-bg); padding: 0 12px; min-height: 46px; }
           .nf-tab-scroll-area { display: flex; align-items: center; overflow-x: auto; scrollbar-width: none; -webkit-mask-image: linear-gradient(to right, black 92%, transparent 100%); }
           .nf-tab-scroll-area::-webkit-scrollbar { display: none; }
-          .nf-tab-btn { display: flex; align-items: center; gap: 6px; padding: 12px 14px; background: none; border: none; border-bottom: 3px solid transparent; color: var(--nf-text-muted); cursor: pointer; font-size: 12px; font-weight: 600; font-family: var(--nf-font-body); transition: color 0.2s, background 0.2s, transform 0.15s; white-space: nowrap; }
+          .nf-tab-btn { display: flex; align-items: center; gap: 6px; padding: 12px 14px; background: none; border: none; border-bottom: 3px solid transparent; color: var(--nf-text-muted); cursor: pointer; font-size: 13px; font-weight: 600; font-family: var(--nf-font-body); transition: color 0.2s, background 0.2s, transform 0.15s; white-space: nowrap; }
           .nf-tab-btn:hover { color: var(--nf-text-dim); background: var(--nf-bg-hover); }
           .nf-tab-btn.active { border-bottom-color: transparent; color: var(--nf-text); background: var(--nf-bg-raised); }
           .nf-tab-btn:active { transform: scale(0.96); transition-duration: 0.08s; }
           .nf-tab-btn:focus-visible { outline: 2px solid var(--nf-accent-2); outline-offset: -2px; }
           .nf-tab-label { }
-          .nf-tab-title { font-size: 11px; color: var(--nf-text-muted); font-style: italic; font-family: var(--nf-font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; flex-shrink: 0; }
+          .nf-tab-title { font-size: 12px; color: var(--nf-text-muted); font-style: italic; font-family: var(--nf-font-display); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; flex-shrink: 0; }
           
           .nf-write-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; position: relative; }
           .nf-chapter-sidebar { width: 190px; min-width: 190px; border-right: 1px solid var(--nf-border); display: flex; flex-direction: column; background: var(--nf-bg-raised); }
@@ -17448,9 +19786,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-editor-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
           .nf-chapter-header { padding: 8px 18px; border-bottom: 1px solid var(--nf-border); display: flex; align-items: center; gap: 10px; background: var(--nf-bg-raised); flex-wrap: wrap; position: sticky; top: 0; z-index: 10; }
           .nf-header-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-          .nf-chapter-title-input { flex: 1; min-width: 120px; background: none; border: none; border-bottom: 1px solid transparent; color: var(--nf-text); font-size: 18px; font-weight: 400; font-family: var(--nf-font-display); outline: none; letter-spacing: 0.01em; transition: border-color 0.2s; padding-bottom: 2px; }
-          .nf-chapter-title-input:hover { border-bottom-color: var(--nf-border); }
-          .nf-chapter-title-input:focus { border-bottom-color: var(--nf-accent-2); }
+          .nf-chapter-title-input { flex: 1; min-width: 200px; background: none; border: none; border-bottom: 1px solid var(--nf-border); color: var(--nf-text); font-size: 20px; font-weight: 500; font-family: var(--nf-font-display); outline: none; letter-spacing: 0.01em; transition: border-color 0.2s; padding: 4px 2px 6px; }
+          .nf-chapter-title-input:hover { border-bottom-color: var(--nf-text-muted); }
+          .nf-chapter-title-input:focus { border-bottom-color: var(--nf-accent); }
+          .nf-chapter-title-input::placeholder { color: var(--nf-text-muted); font-style: italic; font-weight: 400; }
           .nf-word-count { font-size: 10px; color: var(--nf-text-muted); white-space: nowrap; font-family: var(--nf-font-mono); }
           .nf-editor-split { flex: 1; display: flex; overflow: hidden; }
           .nf-text-editor { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -17638,7 +19977,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
           .nf-send-btn:active { transform: scale(0.92); transition-duration: 0.06s; }
           .nf-send-btn:disabled { opacity: 0.3; cursor: default; background: var(--nf-bg-surface); }
           
-          .nf-content-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 28px 36px; scroll-behavior: smooth; }
+          .nf-content-scroll { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 28px 36px; scroll-behavior: smooth; }
           .nf-page-title { font-family: var(--nf-font-display); font-size: 28px; font-weight: 400; color: var(--nf-text); margin: 0 0 20px; letter-spacing: 0.01em; }
           .nf-card-title { font-size: 14px; word-break: break-word; color: var(--nf-text); margin: 0 0 14px; font-weight: 500; font-family: var(--nf-font-display); }
           .nf-empty-state { display: flex; align-items: center; justify-content: center; height: 200px; color: var(--nf-text-muted); font-size: 15px; font-family: var(--nf-font-display); font-style: italic; animation: nf-float 3s ease-in-out infinite; }
@@ -17660,7 +19999,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-ai-panel { width: 300px; min-width: 280px; }
             .nf-tab-ai-panel { width: 280px; min-width: 260px; }
           }
-          @media (max-width: 768px) {
+          @media (max-width: 820px) {
             .nf-sidebar-open { position: fixed; inset: 0; z-index: 100; width: 85vw; min-width: 85vw; max-width: 320px; box-shadow: var(--nf-shadow-lg); }
             .nf-ai-panel { display: none; }
             .nf-tab-ai-panel { display: none; }
@@ -17695,12 +20034,13 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-polaroid { will-change: transform; }
           .nf-polaroid:hover { transform: none; box-shadow: none; }
             .nf-char-section { padding: 12px; margin-bottom: 14px; }
-            /* M11-15: Form fields - larger touch targets */
-            .nf-input { padding: 10px 12px; font-size: 14px; min-height: 40px; }
-            .nf-select { padding: 10px; font-size: 13px; min-height: 40px; }
-            .nf-textarea { padding: 10px 12px; font-size: 14px; min-height: 60px; }
-            .nf-label { font-size: 9px; margin-bottom: 4px; }
-            .nf-field { margin-bottom: 8px; }
+            /* M11-15: Form fields - larger touch targets, iOS NO-zoom (font-size 16px) */
+            .nf-input { padding: 10px 12px; font-size: 16px; min-height: 44px; }
+            .nf-select { padding: 10px; font-size: 16px; min-height: 44px; }
+            .nf-textarea { padding: 10px 12px; font-size: 16px; min-height: 48px; line-height: 1.6; }
+            .nf-input-compact { font-size: 16px !important; min-height: 44px !important; }
+            .nf-label { font-size: 10px; margin-bottom: 4px; }
+            .nf-field { margin-bottom: 10px; }
             /* M16-20: Buttons - larger touch targets */
             .nf-btn { padding: 10px 16px; font-size: 13px; min-height: 40px; }
             .nf-btn-icon { padding: 8px; min-width: 36px; min-height: 36px; justify-content: center; }
@@ -17717,10 +20057,10 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-chapter-item-title { font-size: 10px; }
             .nf-chapter-item-meta { font-size: 8px; }
             .nf-chapter-sidebar-header { padding: 6px 8px; }
-            .nf-section-label { font-size: 9px; }
+            .nf-section-label { font-size: 10px; }
             /* M31-35: Editor */
             .nf-chapter-header { padding: 6px 10px; }
-            .nf-chapter-title-input { font-size: 15px; min-width: 80px; }
+            .nf-chapter-title-input { font-size: 17px; min-width: 140px; padding: 6px 2px 8px; }
             .nf-header-actions { gap: 2px; }
             .nf-word-count { font-size: 9px; }
             .nf-mode-bar { flex-wrap: wrap; }
@@ -17769,6 +20109,50 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             .nf-rel-web-node text { font-size: 9px !important; }
             /* M101-105: Save indicator and toast */
             .nf-toast { font-size: 12px; max-width: 90vw; bottom: 70px; }
+            /* ─── M200+: Fix new fun-feature modals on mobile ─── */
+            /* All modals: respect safe areas, prevent overflow, bigger touch targets */
+            [role="dialog"] { padding: env(safe-area-inset-top, 0) env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0); }
+            [role="dialog"] > div[style*="maxWidth"] {
+              max-height: calc(100dvh - env(safe-area-inset-top, 0) - env(safe-area-inset-bottom, 0) - 32px) !important;
+              width: calc(100vw - 24px) !important;
+              max-width: calc(100vw - 24px) !important;
+              padding: 20px 18px !important;
+            }
+            /* Sentence Garden flower grid — 2-up on phone */
+            [aria-label="Sentence Garden"] div[style*="minmax(220px"] { grid-template-columns: 1fr 1fr !important; gap: 10px !important; }
+            /* Character Conversation — stack character pickers */
+            [aria-label="Character conversation"] div[style*="gridTemplateColumns: \\"1fr 1fr\\""] { grid-template-columns: 1fr !important; }
+            /* Intention modal — stack intention buttons 2-up */
+            [aria-label="Set intention"] div[style*="gridTemplateColumns: \\"1fr 1fr\\""] { grid-template-columns: 1fr !important; }
+            /* Find & Replace — tighten options row wrap */
+            [aria-label="Find and replace"] div[style*="flexWrap"] { gap: 10px !important; }
+            /* Breathing pauser — move to center-bottom, respect safe areas */
+            .nf-root > div[style*="bottom: 40"] { bottom: calc(20px + env(safe-area-inset-bottom, 0)) !important; right: 50% !important; transform: translateX(50%); padding: 18px !important; }
+            /* Story Map — full-width, shorter */
+            [aria-label="Story map"] > div[style*="height: \\"85vh\\""] { height: 85dvh !important; padding: 14px !important; }
+            /* Multi-image galleries — smaller thumbs on phone */
+            .nf-field [style*="minmax(96px"] { grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)) !important; }
+            .nf-field [style*="minmax(72px"] { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)) !important; }
+            /* Cover image field — stack preview above buttons */
+            .nf-field > div[style*="flex: 1, alignItems: \\"flex-start\\""] { flex-direction: column !important; align-items: flex-start !important; }
+            /* Chapter banner — shorter on mobile */
+            .nf-text-editor > div > img[alt=""] { height: 100px !important; }
+            /* Tab bar — must not overflow bottom safe area */
+            .nf-tab-bar { padding-bottom: env(safe-area-inset-bottom, 0) !important; }
+            /* Keepsakes tab textarea minimum usable */
+            .nf-card textarea { -webkit-user-select: text; user-select: text; }
+            /* Session decompression — center with safe padding */
+            [role="dialog"] > div[style*="textAlign: \\"center\\""] { padding: 32px 20px !important; }
+            /* Character letter content — readable width */
+            .nf-card div[style*="fontFamily: \\"var(--nf-font-prose)\\""] { font-size: 13px !important; line-height: 1.7 !important; }
+            /* Chapter tone pill row — wrap cleanly */
+            .nf-char-section div[style*="flexWrap: \\"wrap\\""] { gap: 4px !important; }
+            /* Icon buttons in topbar — always 36×36 minimum */
+            .nf-btn-icon { min-width: 36px !important; min-height: 36px !important; }
+            /* Prevent iOS double-tap zoom on buttons */
+            button, [role="button"] { touch-action: manipulation; }
+            /* Prevent overscroll bounce on modal backdrops */
+            [role="dialog"] { overscroll-behavior: contain; }
           }
           @media (max-width: 480px) {
             /* ═══════════════════════════════════════════
@@ -17784,7 +20168,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             /* Chapter sidebar — narrow, icon-centric */
             .nf-chapter-sidebar { width: 64px; min-width: 64px; }
             .nf-chapter-sidebar-header { padding: 6px; flex-direction: column; gap: 4px; align-items: center; }
-            .nf-chapter-sidebar-header .nf-section-label { font-size: 8px; text-align: center; }
+            .nf-chapter-sidebar-header .nf-section-label { font-size: 10px; text-align: center; }
             .nf-chapter-sidebar-header .nf-btn-icon-sm { padding: 6px; font-size: 0; min-height: 32px; width: 32px; justify-content: center; }
             .nf-chapter-item { padding: 8px 4px; min-height: 44px; }
             .nf-chapter-item-title { font-size: 9px; line-height: 1.2; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-align: center; }
@@ -17792,7 +20176,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
             /* Editor — comfortable prose reading */
             .nf-editor-contenteditable { padding: 20px 16px; font-size: 16px; max-width: 100%; line-height: 1.85; }
             .nf-chapter-header { padding: 8px 12px; gap: 6px; }
-            .nf-chapter-title-input { font-size: 16px; min-width: 60px; }
+            .nf-chapter-title-input { font-size: 16px; min-width: 100px; }
             .nf-header-actions { gap: 2px; }
             .nf-header-actions .nf-btn-icon-sm { padding: 6px; font-size: 0; min-height: 32px; width: 32px; justify-content: center; }
             .nf-word-count { font-size: 9px; }
@@ -18144,6 +20528,12 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   ))}
                 </div>
                 <div style={{ flex: 1 }} />
+                <button className="nf-btn-icon" onClick={() => setSentenceGardenOpen(true)} title="Sentence Garden — your pinned favorite lines" style={{ marginRight: 4 }} aria-label="Open Sentence Garden">
+                  🌿
+                </button>
+                <button className="nf-btn-icon" onClick={() => setFindReplaceOpen(true)} title="Find & Replace (Cmd+Shift+F)" style={{ marginRight: 4 }} aria-label="Find and replace">
+                  <Icons.Search />
+                </button>
                 <button className="nf-btn-icon" onClick={toggleTheme} title={`${theme === "dark" ? "Light" : "Dark"} mode`} style={{ marginRight: 4 }} aria-label="Toggle theme">
                   {theme === "dark" ? <Icons.Sun /> : <Icons.Moon />}
                 </button>
@@ -18157,6 +20547,7 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               {activeTab === "plot" && renderPlot()}
               {activeTab === "relationships" && renderRelationships()}
               {activeTab === "images" && renderImages()}
+              {activeTab === "keepsakes" && renderKeepsakes()}
               {activeTab === "memory" && renderMemory()}
               {activeTab === "settings" && renderSettings()}
             </main>
@@ -18184,6 +20575,78 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
               showToast(`Replaced ${totalReplaced} occurrence${totalReplaced !== 1 ? "s" : ""}`, "success");
               forceRepopulateEditor();
             }}
+          />
+        )}
+        {sentenceGardenOpen && project && (
+          <SentenceGardenModal
+            project={project}
+            onClose={() => setSentenceGardenOpen(false)}
+            onRemove={removeFromGarden}
+          />
+        )}
+        {/* Ambient sound player — procedural, no external files */}
+        <AmbientPlayer sound={settings?.ambientSound} volume={settings?.ambientVolume} />
+        {/* Breathing pauser — gentle 4-4-6 breath reminder */}
+        {showBreathingPauser && <BreathingPauser onDismiss={() => setShowBreathingPauser(false)} />}
+        {/* Chapter celebration — muted bloom at 1000 words */}
+        {showChapterCelebration && <ChapterCelebration onEnd={() => setShowChapterCelebration(false)} />}
+        {/* Question of the Day */}
+        {questionOfDayOpen && (
+          <QuestionOfDayModal
+            onClose={() => { try { sessionStorage.setItem("nf-qotd-shown", new Date().toDateString()); } catch {} setQuestionOfDayOpen(false); }}
+            onDismiss={() => { try { sessionStorage.setItem("nf-qotd-dismissed", new Date().toDateString()); sessionStorage.setItem("nf-qotd-shown", new Date().toDateString()); } catch {} setQuestionOfDayOpen(false); }}
+          />
+        )}
+        {/* Pre-session Intention */}
+        {intentionOpen && (
+          <IntentionModal
+            onChoose={(k) => { setSessionIntention(k); try { sessionStorage.setItem("nf-intention-shown", "1"); } catch {} setIntentionOpen(false); }}
+            onClose={() => { try { sessionStorage.setItem("nf-intention-shown", "1"); } catch {} setIntentionOpen(false); }}
+          />
+        )}
+        {/* End-of-session Decompression */}
+        {decompressionOpen && project && (
+          <DecompressionModal
+            sessionData={{
+              durationMs: Date.now() - sessionStartedAt,
+              wordsDelta: Math.max(0, (project.chapters || []).reduce((s, ch) => s + wordCount(ch.content), 0) - (sessionStartWordsRef.current || 0)),
+              intention: sessionIntention,
+            }}
+            onClose={() => {
+              // Log the session for the soundtrack history
+              try {
+                const wordsDelta = Math.max(0, (project.chapters || []).reduce((s, ch) => s + wordCount(ch.content), 0) - (sessionStartWordsRef.current || 0));
+                const logEntry = {
+                  id: uid(),
+                  startedAt: new Date(sessionStartedAt).toISOString(),
+                  endedAt: new Date().toISOString(),
+                  wordsDelta,
+                  ambient: settings.ambientSound || "none",
+                  intention: sessionIntention || "",
+                };
+                if (wordsDelta > 0 || (Date.now() - sessionStartedAt) > 5 * 60 * 1000) {
+                  updateProject({ sessionLogs: [...(project.sessionLogs || []).slice(-49), logEntry] });
+                }
+              } catch {}
+              setDecompressionOpen(false);
+            }}
+          />
+        )}
+        {/* Character Conversation Room */}
+        {conversationRoomOpen && project && (
+          <CharacterConversationModal
+            project={project}
+            settings={settings}
+            onClose={() => setConversationRoomOpen(false)}
+            showToast={showToast}
+          />
+        )}
+        {/* Story Map */}
+        {storyMapOpen && project && (
+          <StoryMapModal
+            project={project}
+            onClose={() => setStoryMapOpen(false)}
+            onUpdatePositions={(newPositions) => updateProject({ storyMapNodes: newPositions })}
           />
         )}
 		{flushConfirm && (
@@ -18228,17 +20691,17 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <div key={f.key} style={{ marginBottom: 20, padding: "8px 10px", background: f.isModification ? "var(--nf-error-bg)" : "var(--nf-bg-raised)", border: `1px solid ${f.isModification ? "var(--nf-error-border)" : "var(--nf-border)"}`, borderRadius: 2 }}>
                   <div key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                     <input type="checkbox" defaultChecked={!f.isModification} id={`fill-${f.key}`} style={{ accentColor: "var(--nf-accent)" }} />
-                    <label key={f.id} htmlFor={`fill-${f.key}`} style={{ fontSize: 10, fontWeight: 700, color: f.isModification ? "var(--nf-accent)" : "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", cursor: "pointer" }}>
+                    <label key={f.id} htmlFor={`fill-${f.key}`} style={{ fontSize: 11, fontWeight: 700, color: f.isModification ? "var(--nf-accent)" : "var(--nf-text-dim)", textTransform: "uppercase", letterSpacing: "0.08em", cursor: "pointer" }}>
                       {f.label} {f.isModification && "⚠ WILL MODIFY"}
                     </label>
                   </div>
                   {f.isModification && f.original && (
-                    <div style={{ fontSize: 10, color: "var(--nf-text-muted)", padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2, marginBottom: 4, borderLeft: "2px solid var(--nf-border)" }}>
-                      <span style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Current: </span>{String(f.original).slice(0, 200)}{String(f.original).length > 200 ? "..." : ""}
+                    <div style={{ fontSize: 11, color: "var(--nf-text-muted)", padding: "4px 8px", background: "var(--nf-bg-deep)", borderRadius: 2, marginBottom: 4, borderLeft: "2px solid var(--nf-border)" }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em" }}>Current: </span>{String(f.original).slice(0, 200)}{String(f.original).length > 200 ? "..." : ""}
                     </div>
                   )}
                   <div style={{ fontSize: 11, color: "var(--nf-text)", padding: "4px 8px", background: "var(--nf-bg-surface)", borderRadius: 2, lineHeight: 1.5, borderLeft: "2px solid var(--nf-success)" }}>
-                    <span style={{ fontSize: 8, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--nf-success)" }}>Proposed: </span>{String(f.proposed).slice(0, 300)}{String(f.proposed).length > 300 ? "..." : ""}
+                    <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--nf-success)" }}>Proposed: </span>{String(f.proposed).slice(0, 300)}{String(f.proposed).length > 300 ? "..." : ""}
                   </div>
                 </div>
               ))}
@@ -18255,15 +20718,41 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                   // Apply
                   if (fillReview.type === "character") {
                     const chars = project.characters.map(c => c.id === fillReview.entityId ? { ...c, ...accepted } : c);
-                    updateProject({ characters: chars });
+                    // AUTO-LINK to existing orgs if occupation/allegiances were filled
+                    const updatedChar = chars.find(c => c.id === fillReview.entityId);
+                    let updatedWorld = project.worldBuilding || [];
+                    let linksCreated = 0;
+                    if (updatedChar && (accepted.occupation || accepted.allegiances || accepted.tags || accepted.canonNotes)) {
+                      const searchText = [updatedChar.occupation, updatedChar.allegiances, updatedChar.tags, updatedChar.canonNotes, updatedChar.backstory]
+                        .filter(Boolean).join(" ").toLowerCase();
+                      if (searchText) {
+                        updatedWorld = updatedWorld.map(org => {
+                          if (org.category !== "Organization" || !org.name) return org;
+                          const orgNameLower = org.name.toLowerCase();
+                          const orgWords = orgNameLower.split(/\s+/).filter(w => w.length > 3 && !["the","and","of","for","with"].includes(w));
+                          const matches = searchText.includes(orgNameLower) || orgWords.some(w => searchText.includes(w));
+                          if (!matches) return org;
+                          const currentMembers = Array.isArray(org.orgMembers) ? org.orgMembers : [];
+                          if (currentMembers.includes(fillReview.entityId)) return org;
+                          linksCreated++;
+                          return { ...org, orgMembers: [...currentMembers, fillReview.entityId] };
+                        });
+                      }
+                    }
+                    const patch = { characters: chars };
+                    if (linksCreated > 0) patch.worldBuilding = updatedWorld;
+                    updateProject(patch);
+                    if (linksCreated > 0) showToast(`Applied ${Object.keys(accepted).length} field(s) • auto-linked to ${linksCreated} org${linksCreated !== 1 ? "s" : ""}`, "success");
+                    else showToast(`Applied ${Object.keys(accepted).length} field(s)`, "success");
                   } else if (fillReview.type === "world") {
                     const worlds = project.worldBuilding.map(w => w.id === fillReview.entityId ? { ...w, ...accepted } : w);
                     updateProject({ worldBuilding: worlds });
+                    showToast(`Applied ${Object.keys(accepted).length} field(s)`, "success");
                   } else if (fillReview.type === "relationship") {
                     const rels = project.relationships.map(r => r.id === fillReview.entityId ? { ...r, ...accepted } : r);
                     updateProject({ relationships: rels });
+                    showToast(`Applied ${Object.keys(accepted).length} field(s)`, "success");
                   }
-                  showToast(`Applied ${Object.keys(accepted).length} field(s)`, "success");
                   setFillReview(null);
                 }} className="nf-btn nf-btn-primary">
                   <Icons.Check /> Apply Selected
@@ -18302,14 +20791,14 @@ Lighting: Even, diffused studio lighting from the front. No harsh shadows under 
                 <strong style={{ color: "var(--nf-text-dim)" }}>Publish</strong> — clean book with title page, table of contents, justified prose
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", gridColumn: "1 / -1", marginBottom: 2, fontWeight: 500 }}>Full Book</div>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", gridColumn: "1 / -1", marginBottom: 2, fontWeight: 500 }}>Full Book</div>
                 <button onClick={() => handleExportPdf("draft")} className="nf-btn" style={{ justifyContent: "center" }}>
                   <Icons.FileText /> Draft
                 </button>
                 <button onClick={() => handleExportPdf("publish")} className="nf-btn nf-btn-primary" style={{ justifyContent: "center" }}>
                   <Icons.Book /> Publish
                 </button>
-                <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", gridColumn: "1 / -1", marginTop: 8, marginBottom: 2, fontWeight: 500 }}>Current Chapter Only</div>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--nf-text-muted)", gridColumn: "1 / -1", marginTop: 8, marginBottom: 2, fontWeight: 500 }}>Current Chapter Only</div>
                 <button onClick={() => handleExportPdf("chapter-draft")} className="nf-btn" style={{ justifyContent: "center" }}>
                   <Icons.FileText /> Ch. Draft
                 </button>
